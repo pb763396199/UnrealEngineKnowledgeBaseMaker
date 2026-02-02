@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ue5-kb"
+version = "2.0.0"
+description = "UE5 Knowledge Base Builder - 为任何 UE5 引擎生成知识库和 Claude Skill"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "UE5-KB Team"}
+]
+keywords = ["UE5", "Unreal Engine", "Knowledge Graph", "Code Analysis", "Claude Code"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "pyyaml>=6.0",
+    "networkx>=3.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+ue5kb = "ue5_kb.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/ue5-kb"
+Repository = "https://github.com/yourusername/ue5-kb"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ue5_kb*"]
+
+[tool.black]
+line-length = 120
+target-version = ['py39', 'py310', 'py311', 'py312']
