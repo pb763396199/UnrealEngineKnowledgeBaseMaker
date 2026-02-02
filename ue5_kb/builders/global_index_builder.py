@@ -161,7 +161,9 @@ class GlobalIndexBuilder:
         rel_path = build_cs.relative_to(engine_path)
 
         # 提取模块名 (文件名去掉 .Build.cs 后缀)
-        module_name = build_cs.stem  # 例如: "Core" from "Core.Build.cs"
+        # 例如: "Core.Build.cs" -> "Core"
+        file_name = build_cs.name  # "Core.Build.cs"
+        module_name = file_name.replace('.Build.cs', '').replace('.build.cs', '')  # "Core"
 
         # 根据路径结构推导分类
         parts = list(rel_path.parts)
