@@ -146,7 +146,7 @@ class ModuleGraphBuilder:
             classes, functions = self.parser.parse_file(file_path)
 
             # 添加文件节点
-            rel_path = os.path.relpath(file_path module_path)
+            rel_path = os.path.relpath(file_path, module_path)
             safe_path = rel_path.replace('/', '_').replace('\\', '_')
             file_id = f"file_{safe_path}"
             graph.add_node(file_id, ModuleGraph.NODE_TYPE_FILE, name=rel_path, path=file_path)
