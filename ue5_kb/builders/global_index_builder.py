@@ -77,6 +77,11 @@ class GlobalIndexBuilder:
         print("保存全局索引...")
         self.global_index.save()
 
+        # 构建所有模块的详细图谱
+        print("\n" + "-" * 60)
+        print("构建所有模块的知识图谱...")
+        self._build_all_module_graphs()
+
         # 输出统计
         stats = self.global_index.get_statistics()
         verification = self.global_index.verify_coverage()
@@ -345,6 +350,44 @@ class GlobalIndexBuilder:
         self.global_index.save()
 
         return self.global_index
+
+    def _build_all_module_graphs(self) -> None:
+        """
+        构建所有模块的知识图谱
+
+        为全局索引中的每个模块创建详细的知识图谱文件
+        """
+        from .module_graph_builder import ModuleGraphBuilder
+
+        graph_builder = ModuleGraphBuilder(self.config)
+        all_modules = self.global_index.get_all_modules()
+
+        total = len(all_modules)
+        print(f"开始构建 {total} 个模块的知识图谱...")
+
+        for i, (module_name, module_info) in enumerate(all_modules.items(), 1):
+            try:
+                # 检查是否已经存在图谱文件
+                graph_file = os.path.join(
+                    self.config.module_graphs_path,
+                    f"{module_name}.pkl"
+                )
+
+                if os.path.exists(graph_file):
+                    # 跳过已存在的图谱
+                    continue
+
+                # 构建模块图谱
+                graph = graph_builder.build_module_graph(module_name, module_info['path'])
+
+                stats = graph.get_statistics()
+                if i % 100 == 0 or i <= 10:
+                    print(f"  [{i}/{total}] {module_name}: {stats['total_nodes']} 节点, {stats['total_edges']} 边")
+
+            except Exception as e:
+                print(f"  警告: 构建模块 {module_name} 图谱时出错: {e}")
+
+        print(f"知识图谱构建完成!")
 
     def __repr__(self) -> str:
         return f"GlobalIndexBuilder(processed={self.processed_count}, config={self.config})"
