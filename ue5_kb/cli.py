@@ -16,11 +16,17 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="2.0.0")
+@click.version_option(version="2.1.0")
 def cli():
     """UE5 Knowledge Base Builder - UE5 知识库生成工具
 
-    为任何版本的 UE5 引擎生成知识库和 Claude Code Skill。
+    支持双模式：
+    - 引擎模式: 为整个 UE5 引擎生成知识库
+    - 插件模式: 为单个插件生成独立知识库
+
+    示例:
+      ue5kb init --engine-path "D:\\Unreal Engine\\UE5.1"
+      ue5kb init --plugin-path "F:\\MyPlugin"
     """
     pass
 
@@ -33,14 +39,25 @@ def cli():
 @click.option('--kb-path', type=click.Path(),
               help='知识库保存路径 (默认: 引擎/插件根目录/KnowledgeBase)')
 @click.option('--skill-path', type=click.Path(),
-              help='Skill 保存路径 (默认: C:\\Users\\pb763\\.claude\\skills\\ue5kb-{版本}/)')
+              help='Skill 保存路径 (默认: ~/.claude/skills/ue5kb-{版本})')
 @click.pass_context
 def init(ctx, engine_path, plugin_path, kb_path, skill_path):
     """初始化并生成知识库和 Skill
 
+    \b
     支持两种模式：
-    1. 引擎模式（--engine-path）：为整个 UE5 引擎生成知识库
-    2. 插件模式（--plugin-path）：为单个插件生成知识库
+    1. 引擎模式（--engine-path）
+       为整个 UE5 引擎生成知识库（1757+ 模块）
+       示例: ue5kb init --engine-path "D:\\Unreal Engine\\UE5.1"
+
+    2. 插件模式（--plugin-path）
+       为单个插件生成独立知识库
+       示例: ue5kb init --plugin-path "F:\\MyProject\\Plugins\\MyPlugin"
+
+    \b
+    输出内容：
+    - 知识库：包含模块索引和代码图谱
+    - Claude Skill：自动生成查询接口
     """
 
     # 0. 检查参数冲突
@@ -195,7 +212,10 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path):
 
 @cli.command()
 def status():
-    """显示当前状态"""
+    """显示当前状态和已生成的知识库
+
+    显示系统中已生成的所有知识库和 Skill。
+    """
     console.print("\n[bold cyan]UE5 Knowledge Base Builder 状态[/bold cyan]\n")
 
     # TODO: 显示已生成的知识库和 Skill
