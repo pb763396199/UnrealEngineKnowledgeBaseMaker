@@ -11,11 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin module scanning support - now scans Engine/Plugins directory in addition to Engine/Source
 - Plugin modules are tagged with `Plugins.{PluginType}.{PluginName}` category for easy identification
 - Two-phase scanning: Engine/Source modules first, then Engine/Plugins modules
+- Support for Marketplace plugins (e.g., BlueprintAssist_5.1, GraphPrinter_5.1)
+- Smart plugin structure detection - handles both `Plugin/Source/Module/` and `Plugin/Module/` structures
 
 ### Changed
 - Updated `global_index_builder.py` to support plugin directory structure
 - Enhanced module discovery to handle both engine modules and plugin modules
 - Updated README.md with plugin coverage documentation
+- Added `_scan_directory_for_modules()` helper method for better code organization
+
+### Fixed
+- Plugin scanning now correctly handles the nested `Source/` directory structure
+- Marketplace plugins (under `Plugins/Martketplace/`) are now properly discovered
 
 ## [2.0.0] - 2026-02-02
 

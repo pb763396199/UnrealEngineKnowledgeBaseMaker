@@ -150,18 +150,38 @@ class GlobalIndexBuilder:
 
         Args:
             plugin_path: 插件路径
-            plugin_type: 插件类型 (如 Editor, Runtime)
+            plugin_type: 插件类型 (如 Editor, Runtime, Martketplace)
             plugin_name: 插件名称
         """
-        # 插件可能包含多个子目录，每个子目录可能是一个模块
+        # 插件结构通常是: Plugin/Source/ModuleName/ModuleName.Build.cs
+        # 但也可能是: Plugin/ModuleName/ModuleName.Build.cs (较少见)
+
+        # 首先检查是否有 Source 目录
+        source_path = os.path.join(plugin_path, "Source")
+        if os.path.exists(source_path):
+            # 扫描 Source 目录下的所有模块
+            self._scan_directory_for_modules(source_path, plugin_type, plugin_name)
+        else:
+            # 如果没有 Source 目录，直接扫描插件目录
+            self._scan_directory_for_modules(plugin_path, plugin_type, plugin_name)
+
+    def _scan_directory_for_modules(self, dir_path: str, plugin_type: str, plugin_name: str) -> None:
+        """
+        扫描目录下的所有模块
+
+        Args:
+            dir_path: 要扫描的目录
+            plugin_type: 插件类型
+            plugin_name: 插件名称
+        """
         try:
-            entries = os.listdir(plugin_path)
+            entries = os.listdir(dir_path)
         except Exception as e:
-            print(f"警告: 无法读取插件目录 {plugin_path}: {e}")
+            print(f"警告: 无法读取目录 {dir_path}: {e}")
             return
 
         for entry in entries:
-            entry_path = os.path.join(plugin_path, entry)
+            entry_path = os.path.join(dir_path, entry)
 
             if not os.path.isdir(entry_path):
                 continue
@@ -170,7 +190,7 @@ class GlobalIndexBuilder:
             build_cs = BuildCsParser.find_module_build_cs(entry_path)
 
             if build_cs and os.path.exists(build_cs):
-                # 插件模块的分类: Plugins/{PluginType}/{PluginName}
+                # 插件模块的分类: Plugins.{PluginType}.{PluginName}
                 category = f"Plugins.{plugin_type}.{plugin_name}"
                 module_name = Path(build_cs).stem  # 从文件名提取模块名
                 self._process_module(module_name, build_cs, category)

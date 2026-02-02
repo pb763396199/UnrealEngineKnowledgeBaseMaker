@@ -83,11 +83,17 @@ ue5kb status
    - Editor/ - 编辑器插件
    - Enterprise/ - 企业级插件
    - FX/ - 特效插件
+   - Martketplace/ - Marketplace 插件 (如 BlueprintAssist_5.1)
    - 以及更多... (所有插件类型)
 
 每个插件模块会被标记为 `Plugins.{PluginType}.{PluginName}` 分类，例如：
 - `Plugins.Editor.ContentBrowser.ContentBrowserAssetDataSource`
 - `Plugins.AI.ModelMass.ModelMass`
+- `Plugins.Martketplace.BlueprintAssist_5_1.BlueprintAssist`
+
+**插件结构支持**：
+- 标准结构: `Plugin/Source/ModuleName/ModuleName.Build.cs`
+- 直接结构: `Plugin/ModuleName/ModuleName.Build.cs` (较少见)
 
 ### Skill 结构
 
