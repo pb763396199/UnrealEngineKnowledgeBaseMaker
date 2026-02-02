@@ -1,0 +1,354 @@
+"""
+UE{ENGINE_VERSION} 知识库查询实现 - 增强版
+
+功能:
+1. 模块级查询 - 使用 global_index (SQLite)
+2. 代码级查询 - 使用 module_graphs (PKL)
+"""
+
+import os
+import sys
+import pickle
+import json
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+
+# 知识库路径 (绝对路径)
+KB_PATH = Path(r"{KB_PATH}")
+
+# 添加知识库路径到 Python 路径
+engine_root = KB_PATH.parent
+if str(engine_root) not in sys.path:
+    sys.path.insert(0, str(engine_root))
+
+# 导入知识库模块
+try:
+    from ue5_kb.core.config import Config
+    from ue5_kb.core.global_index import GlobalIndex
+    from ue5_kb.core.optimized_index import FastQueryInterface
+    from ue5_kb.core.module_graph import ModuleGraph
+except ImportError as e:
+    raise ImportError(
+        f"无法导入知识库模块: {e}\\n"
+        f"请确保知识库已正确生成在: {KB_PATH}"
+    )
+
+# 全局缓存
+_global_index = None
+_module_graphs_cache = {}
+
+def _get_global_index() -> GlobalIndex:
+    """获取全局索引（单例）"""
+    global _global_index
+    if _global_index is None:
+        config = Config(str(KB_PATH / "config.yaml"))
+        _global_index = GlobalIndex(config)
+    return _global_index
+
+def _load_module_graph(module_name: str) -> Optional[Any]:
+    """加载模块图谱（带缓存）"""
+    if module_name in _module_graphs_cache:
+        return _module_graphs_cache[module_name]
+
+    graph_file = KB_PATH / "module_graphs" / f"{module_name}.pkl"
+    if not graph_file.exists():
+        return None
+
+    try:
+        with open(graph_file, 'rb') as f:
+            data = pickle.load(f)
+            graph = data.get('graph')
+            _module_graphs_cache[module_name] = graph
+            return graph
+    except Exception as e:
+        print(f"警告: 加载模块图谱 {module_name} 失败: {e}")
+        return None
+
+# ============================================================================
+# 模块级查询功能 - 使用 global_index
+# ============================================================================
+
+def query_module_dependencies(module_name: str) -> Dict[str, Any]:
+    """查询模块依赖"""
+    index = _get_global_index()
+
+    module_info = index.get_module(module_name)
+    if not module_info:
+        return {"error": f"未找到模块: {module_name}"}
+
+    deps = module_info.get('dependencies', [])
+    return {
+        "module": module_name,
+        "dependencies": deps,
+        "public_dependencies": module_info.get('public_dependencies', []),
+        "private_dependencies": module_info.get('private_dependencies', []),
+        "category": module_info.get('category'),
+        "file_count": module_info.get('file_count'),
+        "estimated_lines": module_info.get('estimated_lines')
+    }
+
+def search_modules(keyword: str) -> Dict[str, Any]:
+    """搜索模块"""
+    index = _get_global_index()
+    all_modules = index.get_all_modules()
+    results = []
+
+    keyword_lower = keyword.lower()
+    for module_name, info in all_modules.items():
+        if keyword_lower in module_name.lower():
+            results.append({
+                "name": module_name,
+                "category": info.get('category'),
+                "path": info.get('path')
+            })
+
+    return {
+        "keyword": keyword,
+        "found_count": len(results),
+        "results": results[:50]
+    }
+
+def get_statistics() -> Dict[str, Any]:
+    """获取统计信息"""
+    index = _get_global_index()
+    return index.get_statistics()
+
+# ============================================================================
+# 代码级查询功能 - 使用 module_graphs
+# ============================================================================
+
+def query_class_info(class_name: str) -> Dict[str, Any]:
+    """查询类的详细信息"""
+    # 查找类所在的模块
+    module_name = _find_module_for_class(class_name)
+    if not module_name:
+        return {"error": f"未找到类: {class_name}"}
+
+    # 加载模块图谱
+    graph = _load_module_graph(module_name)
+    if not graph:
+        return {"error": f"无法加载模块图谱: {module_name}"}
+
+    # 查找类节点
+    class_node = f"class_{class_name}"
+    if class_node not in graph.nodes:
+        return {"error": f"类 {class_name} 不在模块 {module_name} 的图谱中"}
+
+    # 提取类信息
+    node_data = graph.nodes[class_node]
+
+    # 查找父类
+    parent_classes = []
+    for source, target, edge_data in graph.edges(class_node, data=True):
+        if edge_data.get('type') == 'INHERITS':
+            parent_name = target.replace('class_', '')
+            parent_classes.append(parent_name)
+
+    # 查找接口
+    interfaces = []
+    for source, target, edge_data in graph.edges(class_node, data=True):
+        if edge_data.get('type') == 'IMPLEMENTS':
+            interface_name = target.replace('class_', '')
+            interfaces.append(interface_name)
+
+    # 查找方法
+    methods = []
+    for source, target, edge_data in graph.edges(class_node, data=True):
+        if edge_data.get('type') == 'HAS_METHOD':
+            method_data = graph.nodes.get(target, {})
+            methods.append(method_data.get('name', target))
+
+    # 查找所在文件
+    defined_in_file = None
+    for source, target in graph.in_edges(class_node):
+        source_data = graph.nodes.get(source, {})
+        if source_data.get('type') == 'File':
+            defined_in_file = source_data.get('name', source)
+            break
+
+    return {
+        "class_name": class_name,
+        "module": module_name,
+        "parent_classes": parent_classes,
+        "interfaces": interfaces,
+        "methods": methods[:50],
+        "total_methods": len(methods),
+        "file": defined_in_file,
+        "is_uclass": node_data.get('is_uclass', False),
+        "is_struct": node_data.get('is_struct', False),
+        "is_interface": node_data.get('is_interface', False),
+        "line_number": node_data.get('line_number')
+    }
+
+def query_class_hierarchy(class_name: str, depth: int = 3) -> Dict[str, Any]:
+    """查询类的继承层次结构"""
+    result = []
+    current_class = class_name
+
+    for i in range(depth):
+        info = query_class_info(current_class)
+        if 'error' in info:
+            break
+
+        result.append({
+            "level": i,
+            "class": current_class,
+            "module": info.get("module"),
+            "file": info.get("file")
+        })
+
+        parents = info.get("parent_classes", [])
+        if not parents:
+            break
+
+        current_class = parents[0]
+
+    return {
+        "class": class_name,
+        "hierarchy": result,
+        "depth": len(result)
+    }
+
+def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, Any]:
+    """查询模块中的所有类"""
+    graph = _load_module_graph(module_name)
+    if not graph:
+        return {"error": f"无法加载模块图谱: {module_name}"}
+
+    classes = []
+    for node, node_data in graph.nodes(data=True):
+        if node_data.get('type') != 'Class':
+            continue
+
+        if class_type == 'uclass' and not node_data.get('is_uclass'):
+            continue
+        elif class_type == 'struct' and not node_data.get('is_struct'):
+            continue
+        elif class_type == 'interface' and not node_data.get('is_interface'):
+            continue
+
+        class_name = node_data.get('name', node.replace('class_', ''))
+        classes.append({
+            "name": class_name,
+            "is_uclass": node_data.get('is_uclass', False),
+            "is_struct": node_data.get('is_struct', False),
+            "is_interface": node_data.get('is_interface', False),
+            "file": node_data.get('file_path')
+        })
+
+    return {
+        "module": module_name,
+        "total_classes": len(classes),
+        "classes": classes[:100]
+    }
+
+def query_function_info(function_name: str, module_name: str = None) -> Dict[str, Any]:
+    """查询函数信息"""
+    if module_name:
+        modules = [module_name]
+    else:
+        index = _get_global_index()
+        all_modules = index.get_all_modules()
+        modules = list(all_modules.keys())[:50]
+
+    results = []
+    for mod in modules:
+        graph = _load_module_graph(mod)
+        if not graph:
+            continue
+
+        for node, node_data in graph.nodes(data=True):
+            if node_data.get('type') != 'Function':
+                continue
+
+            if node_data.get('name') == function_name:
+                results.append({
+                    "function": function_name,
+                    "module": mod,
+                    "return_type": node_data.get('return_type'),
+                    "is_ufunction": node_data.get('is_ufunction', False),
+                    "file": node_data.get('file_path'),
+                    "line": node_data.get('line_number'),
+                    "class": node_data.get('class_name')
+                })
+
+    return {
+        "function_name": function_name,
+        "found_count": len(results),
+        "results": results
+    }
+
+def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
+    """搜索包含关键字的类"""
+    index = _get_global_index()
+    all_modules = index.get_all_modules()
+
+    results = []
+    keyword_lower = keyword.lower()
+
+    for module_name in list(all_modules.keys())[:100]:
+        graph = _load_module_graph(module_name)
+        if not graph:
+            continue
+
+        for node, node_data in graph.nodes(data=True):
+            if node_data.get('type') != 'Class':
+                continue
+
+            class_name = node_data.get('name', '')
+            if keyword_lower in class_name.lower():
+                results.append({
+                    "class": class_name,
+                    "module": module_name,
+                    "is_uclass": node_data.get('is_uclass', False),
+                    "file": node_data.get('file_path')
+                })
+
+                if len(results) >= limit:
+                    break
+
+        if len(results) >= limit:
+            break
+
+    return {
+        "keyword": keyword,
+        "found_count": len(results),
+        "results": results
+    }
+
+# ============================================================================
+# 辅助函数
+# ============================================================================
+
+def _find_module_for_class(class_name: str) -> Optional[str]:
+    """查找类所在的模块"""
+    index = _get_global_index()
+
+    # 优先级列表
+    priority_modules = ['Core', 'CoreUObject', 'Engine', 'Renderer', 'RHI']
+
+    # 1. 先搜索优先级模块
+    for module_name in priority_modules:
+        graph = _load_module_graph(module_name)
+        if graph and f"class_{class_name}" in graph.nodes:
+            return module_name
+
+    # 2. 搜索所有 Runtime 模块
+    runtime_modules = index.get_modules_by_category('Runtime')
+    for module_name in runtime_modules:
+        if module_name in priority_modules:
+            continue
+        graph = _load_module_graph(module_name)
+        if graph and f"class_{class_name}" in graph.nodes:
+            return module_name
+
+    # 3. 搜索所有模块（限制前200个）
+    all_modules = index.get_all_modules()
+    for module_name in list(all_modules.keys())[:200]:
+        if module_name in priority_modules or module_name in runtime_modules:
+            continue
+        graph = _load_module_graph(module_name)
+        if graph and f"class_{class_name}" in graph.nodes:
+            return module_name
+
+    return None

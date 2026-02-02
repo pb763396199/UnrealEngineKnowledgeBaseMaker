@@ -12,16 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatic category detection from .Build.cs file path
 - Support for Engine/Platforms modules in addition to Source and Plugins
 - Platform modules tagged with `Platforms.{PlatformName}` category
+- Module graph building for all discovered modules (1757+ modules)
+- Enhanced Skill generation with code-level query capabilities
+- Skill template system (templates/skill.md.template, impl.py.template)
+- Code-level query functions: query_class_info, query_class_hierarchy, search_classes, etc.
+- Module graph caching for performance optimization
 
 ### Changed
-- Simplified scanning logic - single pass search for all .Build.cs files
+- Simplified scanning logic - single pass search for all .Build.cs files using Path.rglob()
 - Removed complex directory traversal in favor of file-based discovery
 - More reliable module discovery that handles any directory structure
+- Skill generation now uses external template files for easier customization
+- Enhanced impl.py with module graph caching and code-level queries
 
 ### Fixed
 - All modules now discovered regardless of directory nesting
 - Plugin modules with non-standard structures are now found
 - Platform modules (Windows, Linux, Android, etc.) are now included
+- Windows path separator compatibility using pathlib.Path.rglob()
+- Module graphs are now properly generated for all modules
+- Skill now fully utilizes both global_index and module_graphs data
 
 ## [2.0.0] - 2026-02-02
 

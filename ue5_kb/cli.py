@@ -210,17 +210,28 @@ def generate_skill(kb_path: Path, skill_path: Path, engine_version: str) -> bool
 
 
 def generate_skill_md(kb_path: Path, engine_version: str) -> str:
-    """生成 skill.md 内容"""
+    """生成 skill.md 内容（从模板）"""
+    template_path = Path(__file__).parent.parent / "templates" / "skill.md.template"
+
+    # 如果模板存在，使用模板
+    if template_path.exists():
+        template_content = template_path.read_text(encoding='utf-8')
+        return template_content.format(
+            ENGINE_VERSION=engine_version,
+            KB_PATH=str(kb_path)
+        )
+
+    # 否则使用内嵌模板（向后兼容）
     return f'''---
 name: ue5kb-{engine_version}
-description: 查询 UE{engine_version} 引擎知识库
+description: 查询 UE{engine_version} 引擎知识库（模块级 + 代码级查询）
 ---
 
 # UE{engine_version} 知识库查询技能
 
 ## 技能说明
 
-此技能用于查询虚幻引擎 {engine_version} 源码知识库。
+此技能用于查询虚幻引擎 {engine_version} 源码知识库，支持**模块级查询**和**代码级查询**。
 
 ## 知识库路径
 
@@ -240,13 +251,18 @@ description: 查询 UE{engine_version} 引擎知识库
 
 
 def generate_impl_py(kb_path: Path, engine_version: str) -> str:
-    """生成 impl.py 内容"""
-    # 计算相对路径（从 Skill 目录到知识库）
-    try:
-        rel_kb_path = Path(os.path.relpath(kb_path, Path("C:/Users/pb763/.claude/skills")))
-    except:
-        rel_kb_path = kb_path
+    """生成 impl.py 内容（从模板）"""
+    template_path = Path(__file__).parent.parent / "templates" / "impl.py.template"
 
+    # 如果模板存在，使用模板
+    if template_path.exists():
+        template_content = template_path.read_text(encoding='utf-8')
+        return template_content.format(
+            ENGINE_VERSION=engine_version,
+            KB_PATH=str(kb_path)
+        )
+
+    # 否则使用内嵌模板（向后兼容）
     return f'''"""
 UE{engine_version} 知识库查询实现
 """
@@ -259,8 +275,9 @@ from pathlib import Path
 KB_PATH = Path(r"{kb_path}")
 
 # 添加知识库路径到 Python 路径
-if str(KB_PATH.parent) not in sys.path:
-    sys.path.insert(0, str(KB_PATH.parent))
+engine_root = KB_PATH.parent
+if str(engine_root) not in sys.path:
+    sys.path.insert(0, str(engine_root))
 
 # 导入知识库模块
 try:
@@ -273,28 +290,6 @@ except ImportError as e:
         f"请确保知识库已正确生成在: {{KB_PATH}}"
     )
 
-def query_knowledge_base(question):
-    """查询知识库
-
-    Args:
-        question: 自然语言问题
-
-    Returns:
-        查询结果
-    """
-    # 创建配置
-    config = Config(str(KB_PATH / "config.yaml"))
-
-    # 使用快速查询接口
-    query_interface = FastQueryInterface()
-
-    # 解析问题并查询
-    result = query_interface.query(question)
-
-    return result
-
-
-# 示例查询函数
 def query_module_dependencies(module_name):
     """查询模块依赖"""
     config = Config(str(KB_PATH / "config.yaml"))
@@ -302,7 +297,7 @@ def query_module_dependencies(module_name):
 
     module_info = index.get_module(module_name)
     if not module_info:
-        return f"未找到模块: {{module_name}}"
+        return {{"error": f"未找到模块: {{module_name}}"}}
 
     deps = module_info.get('dependencies', [])
     return {{
@@ -311,15 +306,28 @@ def query_module_dependencies(module_name):
         "info": module_info
     }}
 
-
 def search_modules(keyword):
     """搜索模块"""
     config = Config(str(KB_PATH / "config.yaml"))
     index = GlobalIndex(config)
 
-    results = index.search_modules(keyword)
-    return results
+    all_modules = index.get_all_modules()
+    results = []
 
+    keyword_lower = keyword.lower()
+    for module_name, info in all_modules.items():
+        if keyword_lower in module_name.lower():
+            results.append({{
+                "name": module_name,
+                "category": info.get('category'),
+                "path": info.get('path')
+            }})
+
+    return {{
+        "keyword": keyword,
+        "found_count": len(results),
+        "results": results[:50]
+    }}
 
 def get_statistics():
     """获取统计信息"""
