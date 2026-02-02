@@ -86,14 +86,15 @@ ue5kb status
    - Martketplace/ - Marketplace 插件 (如 BlueprintAssist_5.1)
    - 以及更多... (所有插件类型)
 
-每个插件模块会被标记为 `Plugins.{PluginType}.{PluginName}` 分类，例如：
-- `Plugins.Editor.ContentBrowser.ContentBrowserAssetDataSource`
-- `Plugins.AI.ModelMass.ModelMass`
-- `Plugins.Martketplace.BlueprintAssist_5_1.BlueprintAssist`
+3. **Engine/Platforms** - 平台模块
+   - Windows/, Linux®, Android®, iOS®, Mac® 等
 
-**插件结构支持**：
-- 标准结构: `Plugin/Source/ModuleName/ModuleName.Build.cs`
-- 直接结构: `Plugin/ModuleName/ModuleName.Build.cs` (较少见)
+**扫描方式**：直接递归搜索所有 `.Build.cs` 文件，然后根据路径自动推导分类标签。
+
+每个模块的分类标签格式：
+- 引擎模块: `{Category}` (如 `Runtime`, `Editor`)
+- 插件模块: `Plugins.{PluginType}.{PluginName}` (如 `Plugins.Editor.ContentBrowser`)
+- 平台模块: `Platforms.{PlatformName}` (如 `Platforms.Windows`)
 
 ### Skill 结构
 
