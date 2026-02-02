@@ -2,16 +2,26 @@
 
 ## ✅ 已完成的功能
 
-### 1. 完整的模块扫描
+### 1. 双模式支持（引擎 + 插件）✨ NEW
+
+#### 引擎模式
 - ✅ Engine/Source (712 个模块)
 - ✅ Engine/Plugins (991 个模块)
 - ✅ Engine/Platforms (54 个模块)
 - **总计**: 1757 个模块
 
+#### 插件模式（2026-02-02 新增）
+- ✅ 为单个插件生成独立知识库
+- ✅ 自动检测插件名称和版本（从 .uplugin 文件）
+- ✅ 知识库存储在插件根目录
+- ✅ 自动生成插件专属 Skill
+- **示例**: AesWorld 插件（40 个模块，2123 文件）
+
 ### 2. 智能分类标签
 - 引擎模块: `Runtime`, `Editor`, `Developer`, `Programs`
 - 插件模块: `Plugins.{Type}.{Name}` (如 `Plugins.Martketplace.BlueprintAssist_5_1`)
 - 平台模块: `Platforms.{Platform}` (如 `Platforms.Windows`)
+- 独立插件: `Plugin.{PluginName}` (如 `Plugin.AesWorld`) ✨ NEW
 
 ### 3. 双层知识库架构
 
@@ -57,12 +67,14 @@
 pip install -e "J:/UE5_KnowledgeBaseMaker"
 ```
 
-### 生成知识库和 Skill
+### 使用方式
+
+#### 方式 1: 引擎模式（扫描整个引擎）
 ```bash
 ue5kb init --engine-path "D:\Unreal Engine\UnrealEngine51_500"
 ```
 
-### 输出结果
+**输出结果**:
 ```
 D:\Unreal Engine\UnrealEngine51_500\
 └── KnowledgeBase\
@@ -77,6 +89,30 @@ D:\Unreal Engine\UnrealEngine51_500\
     └── config.yaml
 
 C:\Users\pb763\.claude\skills\ue5kb-5.1.1\
+├── skill.md                    (Skill 定义)
+└── impl.py                     (增强实现)
+```
+
+#### 方式 2: 插件模式（扫描单个插件）✨ NEW
+```bash
+ue5kb init --plugin-path "F:\ShanghaiP4\neon\Plugins\AesWorld"
+```
+
+**输出结果**:
+```
+F:\ShanghaiP4\neon\Plugins\AesWorld\
+└── KnowledgeBase\
+    ├── global_index/
+    │   ├── index.db           (SQLite)
+    │   ├── global_index.pkl   (Pickle)
+    │   └── global_index.json  (JSON)
+    ├── module_graphs/
+    │   ├── AesAsset.pkl
+    │   ├── AesEarth.pkl
+    │   └── ... (40 files)
+    └── config.yaml
+
+C:\Users\pb763\.claude\skills\aesworld-kb-1.0\
 ├── skill.md                    (Skill 定义)
 └── impl.py                     (增强实现)
 ```
@@ -128,11 +164,53 @@ Recent commits:
 
 ---
 
-## 🚀 下一步
+## 🚀 功能特性
 
-工具已完全就绪，可用于：
-1. 为任何 UE5 引擎版本生成知识库
-2. 自动生成对应的 Claude Skill
-3. 支持模块级和代码级的深入查询
+### 双模式支持
+- ✅ **引擎模式**: 为整个 UE5 引擎生成知识库（1757 个模块）
+- ✅ **插件模式**: 为单个插件生成知识库（独立、轻量）
 
-**工具已重装完成！可以开始使用。**
+### 自动化流程
+- ✅ 自动检测引擎/插件版本
+- ✅ 自动分类和标记模块
+- ✅ 自动生成 Claude Code Skill
+- ✅ 支持多引擎/多插件并存
+
+### 查询能力
+- ✅ 模块级查询：依赖关系、模块搜索、统计信息
+- ✅ 代码级查询：类信息、继承层次、函数搜索
+
+---
+
+## 📝 更新日志
+
+### v2.1.0 (2026-02-02)
+
+**新功能**:
+- ✨ 添加插件模式支持（`--plugin-path`）
+- ✨ 自动检测插件名称和版本（从 .uplugin 文件）
+- ✨ 插件知识库存储在插件根目录
+- ✨ 插件专属 Skill 自动命名（`{plugin-name}-kb-{version}`）
+
+**Bug 修复**:
+- 🐛 修复 `PluginIndexBuilder` 调用错误的解析方法
+- 🐛 修复依赖字典键名不匹配问题
+- 🐛 修复 Windows 控制台 Unicode 编码错误
+
+**技术改进**:
+- 📦 新增 `PluginIndexBuilder` 类
+- 📦 CLI 重构支持双模式
+- 📦 模板支持插件和引擎两种类型
+
+**验证**:
+- ✅ 成功为 AesWorld 插件生成知识库（40 模块，2123 文件）
+- ✅ 所有查询功能正常工作
+
+---
+
+## 🎯 下一步计划
+
+1. **批量插件支持**: 一次性扫描项目所有插件
+2. **增量更新**: 仅更新修改的模块
+3. **插件依赖分析**: 分析插件间依赖关系
+4. **联合查询**: 同时查询引擎和插件知识库

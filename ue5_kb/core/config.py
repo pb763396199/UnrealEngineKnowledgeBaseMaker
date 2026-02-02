@@ -44,17 +44,23 @@ class Config:
 
         self._config = self._load_config()
 
-    def _create_default_config(self, base_path: Optional[str]) -> None:
-        """创建默认配置文件"""
+    def _create_default_config(self, base_path: Optional[str], is_plugin: bool = False) -> None:
+        """创建默认配置文件
+
+        Args:
+            base_path: 基础路径
+            is_plugin: 是否为插件模式
+        """
         if base_path is None:
             raise ValueError("创建默认配置需要指定 base_path")
 
         base_path = Path(base_path)
         base_path.mkdir(parents=True, exist_ok=True)
 
+        # 基础配置（引擎和插件共用）
         default_config = {
             'project': {
-                'name': 'UE5 Knowledge Base',
+                'name': 'UE5 Plugin Knowledge Base' if is_plugin else 'UE5 Knowledge Base',
                 'version': '2.0.0',
             },
             'storage': {
@@ -71,16 +77,19 @@ class Config:
                 'checkpoint_interval': 10,
                 'resume_from_checkpoint': True,
             },
-            'core_modules': [
-                'TraceLog', 'Core', 'CoreUObject',
-                'RHI', 'RenderCore', 'Renderer',
-                'Engine', 'ApplicationCore'
-            ],
-            'module_categories': ['Runtime', 'Editor', 'Developer', 'Programs'],
             'verification': {
                 'coverage_threshold': 95.0,
             }
         }
+
+        # 引擎模式特有的配置
+        if not is_plugin:
+            default_config['core_modules'] = [
+                'TraceLog', 'Core', 'CoreUObject',
+                'RHI', 'RenderCore', 'Renderer',
+                'Engine', 'ApplicationCore'
+            ]
+            default_config['module_categories'] = ['Runtime', 'Editor', 'Developer', 'Programs']
 
         with open(self.config_path, 'w', encoding='utf-8') as f:
             yaml.dump(default_config, f, allow_unicode=True, default_flow_style=False)

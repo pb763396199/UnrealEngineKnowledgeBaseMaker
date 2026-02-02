@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [2.1.0] - 2026-02-02
+
+### Added ✨
+
+- **插件模式支持**: 添加 `--plugin-path` 参数，支持为单个插件生成独立知识库
+- **插件信息自动检测**: 从 `.uplugin` 文件自动读取插件名称和版本
+  - 支持 `VersionName` 和 `Version` 字段
+  - 从文件夹名称推断版本（如 `MyPlugin_1.2.3`）
+- **插件专属 Skill**: 自动生成插件专属的 Claude Code Skill
+  - 命名格式：`{plugin-name}-kb-{version}`
+  - 示例：`aesworld-kb-1.0`
+- **双模式 CLI**: 引擎模式和插件模式自动路由
+- **PluginIndexBuilder**: 新增插件索引构建器类
+  - 专门扫描插件 `Source/` 目录
+  - 模块分类标签：`Plugin.{PluginName}`
+
+### Fixed 🐛
+
+- 修复 `PluginIndexBuilder` 调用错误的解析方法（`parse()` → `parse_file()`）
+- 修复依赖字典键名不匹配（`'public'` / `'private'` vs `'PublicDependencyModuleNames'`）
+- 修复 Windows 控制台 Unicode 编码错误（`✓` → `OK`, `✗` → `X`）
+
+### Changed 📦
+
+- CLI `init` 命令重构，支持 `--engine-path` 和 `--plugin-path` 互斥参数
+- `generate_skill()` 函数支持 `is_plugin` 参数
+- Skill 模板支持插件和引擎两种上下文类型
+
+### Technical Details
+
+**新增文件**:
+- `ue5_kb/builders/plugin_index_builder.py` (~200 行代码)
+
+**修改文件**:
+- `ue5_kb/cli.py` (+150 行)
+  - `init_plugin_mode()` - 插件模式初始化
+  - `detect_plugin_info()` - 插件信息检测
+  - `generate_plugin_knowledge_base()` - 插件知识库生成
+
+**验证测试**:
+```bash
+# 成功为 AesWorld 插件生成知识库
+ue5kb init --plugin-path "F:\ShanghaiP4\neon\Plugins\AesWorld"
+
+# 结果:
+# - 40 个模块
+# - 2,123 个文件
+# - 424,600 行预估代码
+# - 知识库: F:\ShanghaiP4\neon\Plugins\AesWorld\KnowledgeBase
+# - Skill: C:\Users\pb763\.claude\skills\aesworld-kb-1.0
+```
+
+**插件模式 vs 引擎模式**:
+
+| 特性 | 引擎模式 | 插件模式 |
+|------|---------|---------|
+| 扫描范围 | Engine/Source, Engine/Plugins, Engine/Platforms | Plugin/Source/** |
+| 模块数量 | 1757 | 取决于插件规模 |
+| 知识库路径 | `{引擎}/KnowledgeBase/` | `{插件}/KnowledgeBase/` |
+| Skill 命名 | `ue5kb-{version}` | `{name}-kb-{version}` |
+| 模块分类 | Runtime, Editor, Plugins.*, Platforms.* | Plugin.{PluginName} |
+
+---
+
+## [2.0.1] - 2026-02-02 (Earlier)
+
 ### Added
 - Unified module scanning - now recursively searches all .Build.cs files in Engine directory
 - Automatic category detection from .Build.cs file path
@@ -32,6 +100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows path separator compatibility using pathlib.Path.rglob()
 - Module graphs are now properly generated for all modules
 - Skill now fully utilizes both global_index and module_graphs data
+- Module name extraction bug (`.Build.cs` suffix removed correctly)
 
 ## [2.0.0] - 2026-02-02
 
