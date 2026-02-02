@@ -487,3 +487,94 @@ def get_cache_statistics() -> Dict[str, Any]:
         缓存使用情况
     """
     return _result_cache.get_statistics()
+
+
+# ============================================================================
+# Phase 2 查询函数：调用关系和代码示例（v2.3 规划）
+# ============================================================================
+
+def query_function_callers(function_name: str, depth: int = 2) -> Dict[str, Any]:
+    """
+    查询谁调用了此函数（反向依赖分析）
+
+    Args:
+        function_name: 函数名
+        depth: 搜索深度
+
+    Returns:
+        调用链列表
+
+    注意: 需要 call_graphs 数据（Phase 2.1）
+    """
+    # TODO: 集成 CallAnalyzer
+    return {{
+        "function": function_name,
+        "callers": [],
+        "note": "功能开发中 - 需要重新生成知识库以包含调用关系数据"
+    }}
+
+
+def query_function_callees(function_name: str, depth: int = 2) -> Dict[str, Any]:
+    """
+    查询此函数调用了谁（正向依赖分析）
+
+    Args:
+        function_name: 函数名
+        depth: 搜索深度
+
+    Returns:
+        调用链列表
+
+    注意: 需要 call_graphs 数据（Phase 2.1）
+    """
+    # TODO: 集成 CallAnalyzer
+    return {{
+        "function": function_name,
+        "callees": [],
+        "note": "功能开发中 - 需要重新生成知识库以包含调用关系数据"
+    }}
+
+
+def query_usage_examples(entity_name: str, entity_type: str = 'auto', min_quality: float = 0.5) -> Dict[str, Any]:
+    """
+    查询代码使用示例
+
+    Args:
+        entity_name: 实体名称（类名或函数名）
+        entity_type: 实体类型 - 'auto'| 'class' | 'function'
+        min_quality: 最低质量评分
+
+    Returns:
+        代码示例列表
+
+    注意: 需要 code_examples 数据（Phase 2.2）
+    """
+    # TODO: 集成 ExampleExtractor
+    return {{
+        "entity": entity_name,
+        "examples": [],
+        "note": "功能开发中 - 需要重新生成知识库以包含代码示例数据"
+    }}
+
+
+def query_call_chain(from_func: str, to_func: str, max_depth: int = 5) -> Dict[str, Any]:
+    """
+    查询两个函数之间的调用路径
+
+    Args:
+        from_func: 起始函数
+        to_func: 目标函数
+        max_depth: 最大深度
+
+    Returns:
+        调用路径
+
+    注意: 需要 call_graphs 数据（Phase 2.1）
+    """
+    # TODO: 集成 CallAnalyzer
+    return {{
+        "from": from_func,
+        "to": to_func,
+        "path": [],
+        "note": "功能开发中 - 需要重新生成知识库以包含调用关系数据"
+    }}
