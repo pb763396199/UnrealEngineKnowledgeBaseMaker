@@ -58,18 +58,27 @@ class GlobalIndexBuilder:
         print(f"恢复模式: {resume}")
         print("-" * 60)
 
+        # 步骤1: 扫描 Engine/Source 中的模块
         source_path = os.path.join(self.config.engine_path, "Engine/Source")
 
-        if not os.path.exists(source_path):
-            print(f"错误: 引擎源码路径不存在: {source_path}")
-            return self.global_index
+        if os.path.exists(source_path):
+            print("\n[1/2] 扫描 Engine/Source 模块")
+            # 扫描所有分类
+            for category in self.config.module_categories:
+                category_path = os.path.join(source_path, category)
+                if os.path.exists(category_path):
+                    print(f"\n扫描分类: {category}")
+                    self._scan_category(category_path, category)
+        else:
+            print(f"警告: 引擎源码路径不存在: {source_path}")
 
-        # 扫描所有分类
-        for category in self.config.module_categories:
-            category_path = os.path.join(source_path, category)
-            if os.path.exists(category_path):
-                print(f"\n扫描分类: {category}")
-                self._scan_category(category_path, category)
+        # 步骤2: 扫描 Engine/Plugins 中的模块
+        plugins_path = os.path.join(self.config.engine_path, "Engine/Plugins")
+        if os.path.exists(plugins_path):
+            print("\n[2/2] 扫描 Engine/Plugins 模块")
+            self._scan_plugins(plugins_path)
+        else:
+            print(f"警告: 插件路径不存在: {plugins_path}")
 
         # 构建依赖图
         print("\n" + "-" * 60)
@@ -99,6 +108,76 @@ class GlobalIndexBuilder:
             print(f"  {category}: {count} 个模块")
 
         return self.global_index
+
+    def _scan_plugins(self, plugins_path: str) -> None:
+        """
+        扫描 Engine/Plugins 目录下的所有插件模块
+
+        Args:
+            plugins_path: Engine/Plugins 路径
+        """
+        try:
+            plugin_types = os.listdir(plugins_path)
+        except Exception as e:
+            print(f"警告: 无法读取插件目录 {plugins_path}: {e}")
+            return
+
+        for plugin_type in plugin_types:
+            plugin_type_path = os.path.join(plugins_path, plugin_type)
+
+            # 跳过非目录
+            if not os.path.isdir(plugin_type_path):
+                continue
+
+            try:
+                plugins = os.listdir(plugin_type_path)
+            except Exception as e:
+                print(f"警告: 无法读取插件类型目录 {plugin_type_path}: {e}")
+                continue
+
+            for plugin_name in plugins:
+                plugin_path = os.path.join(plugin_type_path, plugin_name)
+
+                if not os.path.isdir(plugin_path):
+                    continue
+
+                # 在插件目录中查找所有模块
+                self._scan_plugin_modules(plugin_path, plugin_type, plugin_name)
+
+    def _scan_plugin_modules(self, plugin_path: str, plugin_type: str, plugin_name: str) -> None:
+        """
+        扫描单个插件中的所有模块
+
+        Args:
+            plugin_path: 插件路径
+            plugin_type: 插件类型 (如 Editor, Runtime)
+            plugin_name: 插件名称
+        """
+        # 插件可能包含多个子目录，每个子目录可能是一个模块
+        try:
+            entries = os.listdir(plugin_path)
+        except Exception as e:
+            print(f"警告: 无法读取插件目录 {plugin_path}: {e}")
+            return
+
+        for entry in entries:
+            entry_path = os.path.join(plugin_path, entry)
+
+            if not os.path.isdir(entry_path):
+                continue
+
+            # 查找 .Build.cs 文件
+            build_cs = BuildCsParser.find_module_build_cs(entry_path)
+
+            if build_cs and os.path.exists(build_cs):
+                # 插件模块的分类: Plugins/{PluginType}/{PluginName}
+                category = f"Plugins.{plugin_type}.{plugin_name}"
+                module_name = Path(build_cs).stem  # 从文件名提取模块名
+                self._process_module(module_name, build_cs, category)
+
+                # 每处理 N 个模块保存一次检查点
+                if self.processed_count % self.config.checkpoint_interval == 0:
+                    self._save_checkpoint()
 
     def _scan_category(self, category_path: str, category: str) -> None:
         """

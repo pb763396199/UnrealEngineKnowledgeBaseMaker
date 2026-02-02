@@ -8,7 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial release of UE5 Knowledge Base Maker v2.0.0
+- Plugin module scanning support - now scans Engine/Plugins directory in addition to Engine/Source
+- Plugin modules are tagged with `Plugins.{PluginType}.{PluginName}` category for easy identification
+- Two-phase scanning: Engine/Source modules first, then Engine/Plugins modules
+
+### Changed
+- Updated `global_index_builder.py` to support plugin directory structure
+- Enhanced module discovery to handle both engine modules and plugin modules
+- Updated README.md with plugin coverage documentation
 
 ## [2.0.0] - 2026-02-02
 

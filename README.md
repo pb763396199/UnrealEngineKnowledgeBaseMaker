@@ -5,7 +5,8 @@
 ## 功能特性
 
 - 🔧 **通用工具** - 支持任何 UE5 引擎版本（5.0, 5.1, 5.2, 5.3, 5.4+）
-- 📊 **知识库生成** - 自动扫描引擎源码，构建模块索引和知识图谱
+- 📊 **知识库生成** - 自动扫描引擎源码和插件，构建模块索引和知识图谱
+- 🔌 **完整覆盖** - 同时扫描 Engine/Source 和 Engine/Plugins 中的所有模块
 - 🤖 **Skill 生成** - 自动生成对应的 Claude Code Skill
 - ⚙️ **灵活配置** - 命令行引导式配置，无需环境变量
 - 🚀 **高性能** - SQLite 存储，36x 性能提升 vs pickle
@@ -61,8 +62,32 @@ ue5kb status
 └── module_graphs/         # 模块知识图谱
     ├── Core.pkl
     ├── Engine.pkl
-    └── ... (1,345+ 个模块)
+    └── ... (1,345+ 个引擎模块 + 插件模块)
 ```
+
+### 模块覆盖范围
+
+工具会自动扫描以下目录中的所有模块：
+
+1. **Engine/Source** - 引擎核心模块
+   - Runtime/ (运行时模块)
+   - Editor/ (编辑器模块)
+   - Developer/ (开发者工具)
+   - Programs/ (独立程序)
+
+2. **Engine/Plugins** - 引擎插件模块
+   - 2D/ - 2D 相关插件
+   - AI/ - AI 相关插件
+   - Animation/ - 动画插件
+   - Audio/ - 音频插件
+   - Editor/ - 编辑器插件
+   - Enterprise/ - 企业级插件
+   - FX/ - 特效插件
+   - 以及更多... (所有插件类型)
+
+每个插件模块会被标记为 `Plugins.{PluginType}.{PluginName}` 分类，例如：
+- `Plugins.Editor.ContentBrowser.ContentBrowserAssetDataSource`
+- `Plugins.AI.ModelMass.ModelMass`
 
 ### Skill 结构
 
