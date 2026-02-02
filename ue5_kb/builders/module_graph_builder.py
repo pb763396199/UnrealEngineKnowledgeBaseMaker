@@ -53,6 +53,18 @@ class ModuleGraphBuilder:
         graph.graph.graph['module'] = module_name
         graph.graph.graph['built_at'] = datetime.now().isoformat()
 
+        # 初始化函数索引（如果启用）
+        func_index = None
+        try:
+            from ue5_kb.core.function_index import FunctionIndex
+            func_index_path = Path(self.config.storage_base_path) / "global_index" / "function_index.db"
+            func_index = FunctionIndex(str(func_index_path))
+        except Exception as e:
+            print(f"  警告: 无法初始化函数索引: {e}")
+
+        # 收集所有函数信息（用于批量插入）
+        all_functions = []
+
         # 扫描所有源文件
         file_count = 0
         for root, dirs, files in os.walk(module_path):
@@ -62,8 +74,16 @@ class ModuleGraphBuilder:
             for file in files:
                 if file.endswith(('.h', '.cpp')):
                     file_path = os.path.join(root, file)
-                    self._parse_source_file(graph, file_path, module_path)
+                    func_infos = self._parse_source_file(graph, file_path, module_path)
+                    if func_infos and func_index:
+                        all_functions.extend(func_infos)
                     file_count += 1
+
+        # 批量添加函数到索引（性能优化）
+        if func_index and all_functions:
+            func_index.add_functions_batch(all_functions)
+            func_index.commit()
+            func_index.close()
 
         # 保存图谱
         graph.save()
@@ -107,7 +127,7 @@ class ModuleGraphBuilder:
 
         return graphs
 
-    def _parse_source_file(self, graph: ModuleGraph, file_path: str, module_path: str) -> None:
+    def _parse_source_file(self, graph: ModuleGraph, file_path: str, module_path: str) -> List[Dict[str, Any]]:
         """
         解析源文件并添加到图谱
 
@@ -115,13 +135,18 @@ class ModuleGraphBuilder:
             graph: 模块图谱
             file_path: 源文件路径
             module_path: 模块路径
+
+        Returns:
+            提取的函数信息列表（用于函数索引）
         """
+        func_infos_for_index = []
+
         try:
             # 解析文件
             classes, functions = self.parser.parse_file(file_path)
 
             # 添加文件节点
-            rel_path = os.path.relpath(file_path, module_path)
+            rel_path = os.path.relpath(file_path module_path)
             safe_path = rel_path.replace('/', '_').replace('\\', '_')
             file_id = f"file_{safe_path}"
             graph.add_node(file_id, ModuleGraph.NODE_TYPE_FILE, name=rel_path, path=file_path)
@@ -161,26 +186,51 @@ class ModuleGraphBuilder:
                     graph.add_node(method_id, ModuleGraph.NODE_TYPE_FUNCTION, name=method, class_name=class_name)
                     graph.add_edge(class_id, method_id, ModuleGraph.REL_TYPE_HAS_METHOD)
 
-            # 添加函数节点
+            # 添加函数节点并收集索引信息
             for func_key, func_info in functions.items():
                 # 跳过类方法（已在类中处理）
                 if func_info.class_name:
                     continue
 
                 func_id = f"function_{func_info.name}_{func_info.line_number}"
+
+                # 添加到图谱
                 graph.add_node(
                     func_id,
                     ModuleGraph.NODE_TYPE_FUNCTION,
                     name=func_info.name,
                     return_type=func_info.return_type,
+                    parameters=func_info.parameters,
                     is_ufunction=func_info.is_ufunction,
+                    is_blueprint_callable=func_info.is_blueprint_callable,
                     file_path=func_info.file_path,
                     line_number=func_info.line_number
                 )
                 graph.add_edge(file_id, func_id, ModuleGraph.REL_TYPE_CONTAINS)
 
+                # 收集函数信息用于索引
+                signature = self.parser.format_function_signature(func_info)
+                func_infos_for_index.append({
+                    'name': func_info.name,
+                    'module': graph.module_name,
+                    'class_name': func_info.class_name,
+                    'return_type': func_info.return_type,
+                    'parameters': [p.to_dict() for p in func_info.parameters],
+                    'signature': signature,
+                    'file_path': func_info.file_path,
+                    'line_number': func_info.line_number,
+                    'is_virtual': func_info.is_virtual,
+                    'is_const': func_info.is_const,
+                    'is_static': func_info.is_static,
+                    'is_override': func_info.is_override,
+                    'is_blueprint_callable': func_info.is_blueprint_callable,
+                    'ufunction_specifiers': func_info.ufunction_specifiers
+                })
+
         except Exception as e:
             print(f"  警告: 解析文件 {file_path} 时出错: {e}")
+
+        return func_infos_for_index
 
 
 def main():

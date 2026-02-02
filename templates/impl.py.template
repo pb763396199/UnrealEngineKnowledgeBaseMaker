@@ -242,10 +242,56 @@ def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, 
         "classes": classes[:100]
     }}
 
-def query_function_info(function_name: str, module_name: str = None) -> Dict[str, Any]:
-    """查询函数信息"""
-    if module_name:
-        modules = [module_name]
+def query_function_info(function_name: str, module_hint: str = None) -> Dict[str, Any]:
+    """查询函数信息（优化版，使用函数索引）
+
+    Args:
+        function_name: 函数名称
+        module_hint: 模块提示（可选，用于加速查询）
+
+    Returns:
+        函数详细信息，包括完整签名、参数、Blueprint信息
+    """
+    # 尝试使用函数索引（性能：< 10ms）
+    try:
+        from ue5_kb.core.function_index import FunctionIndex
+
+        func_index_path = KB_PATH / "global_index" / "function_index.db"
+        if func_index_path.exists():
+            func_index = FunctionIndex(str(func_index_path))
+            results = func_index.query_by_name(function_name, module_hint)
+            func_index.close()
+
+            if results:
+                # 格式化输出
+                formatted_results = []
+                for r in results:
+                    formatted_results.append({{
+                        "function": r['name'],
+                        "module": r['module'],
+                        "class": r['class_name'],
+                        "signature": r['signature'],
+                        "return_type": r['return_type'],
+                        "parameters": r['parameters'],
+                        "location": f"{{r['file_path']}}:{{r['line_number']}}",
+                        "is_blueprint_callable": r['is_blueprint_callable'],
+                        "is_virtual": r['is_virtual'],
+                        "is_const": r['is_const'],
+                        "ufunction_specifiers": r['ufunction_specifiers']
+                    }})
+
+                return {{
+                    "function_name": function_name,
+                    "found_count": len(formatted_results),
+                    "results": formatted_results,
+                    "query_method": "index"
+                }}
+    except Exception as e:
+        print(f"函数索引查询失败，回退到图谱扫描: {{e}}")
+
+    # Fallback: 使用原有的图谱扫描方法（性能：500-2000ms）
+    if module_hint:
+        modules = [module_hint]
     else:
         index = _get_global_index()
         all_modules = index.get_all_modules()
@@ -265,8 +311,10 @@ def query_function_info(function_name: str, module_name: str = None) -> Dict[str
                 results.append({{
                     "function": function_name,
                     "module": mod,
-                    "return_type": node_data.get('return_type'),
+                    "return_type": node_data.get('return_type', ''),
+                    "parameters": node_data.get('parameters', []),
                     "is_ufunction": node_data.get('is_ufunction', False),
+                    "is_blueprint_callable": node_data.get('is_blueprint_callable', False),
                     "file": node_data.get('file_path'),
                     "line": node_data.get('line_number'),
                     "class": node_data.get('class_name')
@@ -275,7 +323,8 @@ def query_function_info(function_name: str, module_name: str = None) -> Dict[str
     return {{
         "function_name": function_name,
         "found_count": len(results),
-        "results": results
+        "results": results,
+        "query_method": "graph_scan"
     }}
 
 def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
