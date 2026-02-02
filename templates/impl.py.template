@@ -27,6 +27,10 @@ try:
     from ue5_kb.core.global_index import GlobalIndex
     from ue5_kb.core.optimized_index import FastQueryInterface
     from ue5_kb.core.module_graph import ModuleGraph
+    # Context Optimization 模块（v2.2 新增）
+    from ue5_kb.query.layered_query import LayeredQueryInterface
+    from ue5_kb.query.result_cache import ResultCache, get_result_cache
+    from ue5_kb.query.token_budget import TokenBudget, get_token_budget, ContextCategory
 except ImportError as e:
     raise ImportError(
         f"无法导入知识库模块: {{{{e}}}}\\n"
@@ -36,6 +40,11 @@ except ImportError as e:
 # 全局缓存
 _global_index = None
 _module_graphs_cache = {{}}
+
+# Context Optimization 实例（v2.2 新增）
+_layered_query = LayeredQueryInterface(str(KB_PATH))
+_result_cache = get_result_cache()
+_token_budget = get_token_budget()
 
 def _get_global_index() -> GlobalIndex:
     """获取全局索引（单例）"""
@@ -401,3 +410,80 @@ def _find_module_for_class(class_name: str) -> Optional[str]:
             return module_name
 
     return None
+
+
+# ============================================================================
+# Context Optimization 查询函数（v2.2 新增）
+# ============================================================================
+
+def query_class_layered(class_name: str, detail_level: str = 'summary') -> Dict[str, Any]:
+    """
+    分层查询类信息（Context 优化版）
+
+    Args:
+        class_name: 类名
+        detail_level: 详情层级 - 'summary' | 'details' | 'source'
+
+    Returns:
+        分层的查询结果
+
+    Token 使用:
+        - summary: ~150 tokens
+        - details: ~800 tokens
+        - source: ~2000+ tokens
+    """
+    return _layered_query.query_class(class_name, detail_level)
+
+
+def query_function_layered(function_name: str, detail_level: str = 'summary') -> Dict[str, Any]:
+    """
+    分层查询函数信息（Context 优化版）
+
+    Args:
+        function_name: 函数名
+        detail_level: 详情层级 - 'summary' | 'details'
+
+    Returns:
+        分层的查询结果
+
+    Token 使用:
+        - summary: ~50 tokens
+        - details: ~300 tokens
+    """
+    return _layered_query.query_function(function_name, detail_level)
+
+
+def get_full_results(ref_id: str) -> Any:
+    """
+    通过引用ID获取完整结果（Observation Masking 支持）
+
+    Args:
+        ref_id: 引用ID（由屏蔽的查询返回）
+
+    Returns:
+        完整的查询结果
+    """
+    result = _result_cache.retrieve(ref_id)
+    if result is None:
+        return {{"error": f"引用ID已过期或不存在: {{ref_id}}"}}
+    return result
+
+
+def get_token_statistics() -> Dict[str, Any]:
+    """
+    获取 Token 预算统计
+
+    Returns:
+        各类别的 Token 使用情况
+    """
+    return _token_budget.get_statistics()
+
+
+def get_cache_statistics() -> Dict[str, Any]:
+    """
+    获取缓存统计
+
+    Returns:
+        缓存使用情况
+    """
+    return _result_cache.get_statistics()
