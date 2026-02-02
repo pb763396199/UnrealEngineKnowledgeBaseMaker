@@ -97,7 +97,7 @@ def init(ctx, engine_path, kb_path, skill_path):
     console.print(f"\n[bold]生成的文件:[/bold]")
     console.print(f"  • 知识库: {kb_path}")
     console.print(f"  • Skill:  {skill_path}")
-    console.print(f"\n[bold cyan]下一步:[/bold]")
+    console.print(f"\n[bold cyan]Next steps:[/bold cyan]")
     console.print(f"  使用 Claude Code 时，可以直接查询关于 UE{engine_version} 源码的问题")
 
 
