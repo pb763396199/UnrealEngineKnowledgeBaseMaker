@@ -112,21 +112,14 @@ class GlobalIndexBuilder:
 
         # 递归搜索所有 .Build.cs 文件
         # 搜索范围: Source/, Plugins/, Platforms/
-        for root, dirs, files in os.walk(engine_path):
-            # 过滤: 只扫描 Source/, Plugins/, Platforms/ 目录
-            rel_path = os.path.relpath(root, engine_path)
-            first_dir = rel_path.split(os.sep)[0] if rel_path != '.' else ''
-
-            if first_dir not in ['Source', 'Plugins', 'Platforms']:
-                # 跳过不在目标范围内的目录
-                dirs[:] = []  # 清空 dirs 列表，阻止 os.walk 继续深入
+        for root_dir in ['Source', 'Plugins', 'Platforms']:
+            target_path = engine_path / root_dir
+            if not target_path.exists():
                 continue
 
-            # 查找 .Build.cs 文件
-            for file in files:
-                if file.endswith('.Build.cs'):
-                    build_cs_path = os.path.join(root, file)
-                    build_cs_files.append(build_cs_path)
+            # 使用 rglob 递归搜索
+            for build_cs in target_path.rglob('*.Build.cs'):
+                build_cs_files.append(str(build_cs))
 
         print(f"  找到 {len(build_cs_files)} 个 .Build.cs 文件")
 
@@ -334,26 +327,19 @@ class GlobalIndexBuilder:
         print("构建核心模块索引...")
 
         engine_path = Path(os.path.join(self.config.engine_path, "Engine"))
+        source_path = engine_path / "Source"
+
+        if not source_path.exists():
+            print("  警告: Engine/Source 目录不存在")
+            return self.global_index
 
         for module_name in self.config.core_modules:
-            # 搜索所有 .Build.cs 文件，匹配模块名
-            for root, dirs, files in os.walk(engine_path):
-                # 只扫描 Source/ 目录
-                rel_path = os.path.relpath(root, engine_path)
-                first_dir = rel_path.split(os.sep)[0] if rel_path != '.' else ''
-                if first_dir != 'Source':
-                    dirs[:] = []
-                    continue
-
-                # 查找匹配的 .Build.cs 文件
-                if f"{module_name}.Build.cs" in files:
-                    build_cs_path = os.path.join(root, f"{module_name}.Build.cs")
-
-                    # 推导分类
-                    category, _ = self._parse_build_cs_path(build_cs_path, engine_path)
-
-                    self._process_module(module_name, build_cs_path, category)
-                    break
+            # 使用 rglob 搜索匹配的 .Build.cs 文件
+            for build_cs in source_path.rglob(f"{module_name}.Build.cs"):
+                # 推导分类
+                category, _ = self._parse_build_cs_path(str(build_cs), engine_path)
+                self._process_module(module_name, str(build_cs), category)
+                break
 
         self.global_index.build_dependency_graph()
         self.global_index.save()
