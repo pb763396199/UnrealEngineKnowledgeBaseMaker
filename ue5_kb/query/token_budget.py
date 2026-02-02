@@ -113,7 +113,7 @@ class TokenBudget:
             budget: 预算上限
         """
         if not self.optimization_triggered[category]:
-            print(f"⚠️  Token 预算警告: {category.value}")
+            print(f"[WARNING]  Token 预算警告: {category.value}")
             print(f"   需要: {required} tokens")
             print(f"   预算: {budget} tokens")
             print(f"   超出: {required - budget} tokens ({(required/budget - 1)*100:.1f}%)")
