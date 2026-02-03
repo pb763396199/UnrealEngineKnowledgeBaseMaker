@@ -147,8 +147,8 @@ class BuildStage(PipelineStage):
         # 保存索引
         global_index.save()
 
-        # 同时创建 OptimizedIndex（SQLite）
-        self._build_optimized_index(global_index, config)
+        # TODO: SQLite 索引构建功能待实现
+        # self._build_optimized_index(global_index, config)
 
         return global_index
 
