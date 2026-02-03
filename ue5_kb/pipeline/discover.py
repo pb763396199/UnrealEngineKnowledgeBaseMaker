@@ -49,8 +49,11 @@ class DiscoverStage(PipelineStage):
         # 保存结果
         self.save_result(result, "modules.json")
 
+        # 格式化输出分类统计
         print(f"[Discover] 完成！发现 {len(modules)} 个模块")
-        print(f"  分类统计: {result['categories']}")
+        print(f"  分类统计:")
+        for category, count in sorted(result['categories'].items()):
+            print(f"    {category}: {count}")
 
         return result
 

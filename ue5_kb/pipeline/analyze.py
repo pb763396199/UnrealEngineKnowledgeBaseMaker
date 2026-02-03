@@ -106,6 +106,12 @@ class AnalyzeStage(PipelineStage):
         print(f"  类: {total_classes}")
         print(f"  函数: {total_functions}")
 
+        # 输出失败的模块列表
+        if failed_modules:
+            print(f"  失败模块列表:")
+            for failed in failed_modules:
+                print(f"    - {failed['name']}: {failed['error']}")
+
         return result
 
     def _find_source_files(self, module_dir: Path) -> List[Path]:

@@ -147,10 +147,80 @@ class BuildStage(PipelineStage):
         # 保存索引
         global_index.save()
 
-        # TODO: SQLite 索引构建功能待实现
-        # self._build_optimized_index(global_index, config)
+        # 同步到 SQLite（供 OptimizedGlobalIndex 查询使用）
+        self._sync_to_sqlite(global_index, config)
 
         return global_index
+
+    def _sync_to_sqlite(self, global_index: GlobalIndex, config: Config) -> None:
+        """
+        将 GlobalIndex 数据同步到 SQLite
+
+        Args:
+            global_index: 全局索引
+            config: 配置对象
+        """
+        import sqlite3
+        import json
+
+        print(f"  同步到 SQLite...")
+
+        # 获取数据库路径
+        db_path = os.path.join(config.global_index_path, "index.db")
+
+        # 连接数据库
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # 创建表（如果不存在）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS modules (
+                name TEXT PRIMARY KEY,
+                path TEXT,
+                category TEXT,
+                plugin TEXT DEFAULT 'Engine',
+                dependencies TEXT,
+                public_dependencies TEXT,
+                private_dependencies TEXT,
+                dynamic_dependencies TEXT,
+                weak_dependencies TEXT,
+                circular_dependencies TEXT,
+                file_count INTEGER,
+                estimated_lines INTEGER,
+                main_classes TEXT,
+                build_cs_path TEXT,
+                indexed_at TEXT
+            )
+        ''')
+
+        # 清空旧数据
+        cursor.execute('DELETE FROM modules')
+
+        # 插入所有模块数据
+        all_modules = global_index.get_all_modules()
+        for module_name, module_info in all_modules.items():
+            dependencies = module_info.get('dependencies', [])
+
+            cursor.execute('''
+                INSERT OR REPLACE INTO modules (
+                    name, path, category, plugin, dependencies,
+                    public_dependencies, private_dependencies, indexed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                module_name,
+                module_info.get('path', ''),
+                module_info.get('category', ''),
+                'Engine',
+                json.dumps(dependencies),
+                json.dumps(dependencies),  # public_dependencies
+                json.dumps(dependencies),  # private_dependencies
+                module_info.get('indexed_at', '')
+            ))
+
+        conn.commit()
+        conn.close()
+
+        print(f"  已同步 {len(all_modules)} 个模块到 SQLite")
 
     def _build_optimized_index(self, global_index: GlobalIndex, config: Config) -> None:
         """
@@ -209,6 +279,11 @@ class BuildStage(PipelineStage):
                 # 加载代码图谱
                 with open(code_graph_file, 'r', encoding='utf-8') as f:
                     code_graph = json.load(f)
+
+                # 保存原始 JSON（便于查看和调试）
+                json_file = graphs_dir / f"{module_name}.json"
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(code_graph, f, indent=2, ensure_ascii=False)
 
                 # 转换为 NetworkX 图
                 graph = self._create_networkx_graph(code_graph)
