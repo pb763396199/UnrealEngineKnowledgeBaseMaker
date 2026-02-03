@@ -4,270 +4,244 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**UE5 Knowledge Base Maker** is a universal tool that generates knowledge bases and Claude Skills for Unreal Engine 5 codebases. It supports two modes:
-- **Engine Mode**: Scans entire UE5 engine (1757+ modules including Source, Plugins, Platforms)
-- **Plugin Mode**: Scans individual UE5 plugins for focused analysis
+**UE5 Knowledge Base Maker** (v2.5.0) is a universal tool that generates knowledge bases and Claude Skills for Unreal Engine 5 codebases.
 
-The tool parses `.Build.cs` files to extract module dependencies, scans C++ source code to build class/function graphs, and generates Claude Code Skills that enable AI-assisted code exploration.
+**Two Modes**:
+- **Engine Mode**: Scans entire UE5 engine (1757+ modules)
+- **Plugin Mode**: Scans individual UE5 plugins
+
+**What it does**: Parses `.Build.cs` files → extracts module dependencies → scans C++ code → generates Claude Skills for AI-assisted code exploration.
+
+---
 
 ## Development Commands
 
 ### Installation
 ```bash
-# Install in editable mode
 pip install -e .
-
-# Reinstall after code changes
-pip install -e . --force-reinstall --no-deps
+pip install -e . --force-reinstall --no-deps  # After code changes
 ```
 
-### Running the CLI
+### CLI Usage
 ```bash
-# Show help
-ue5kb --help
-ue5kb init --help
-
-# Engine mode - scan entire UE5 engine
+# Engine mode
 ue5kb init --engine-path "D:\Unreal Engine\UnrealEngine51_500"
 
-# Plugin mode - scan single plugin
+# Plugin mode
 ue5kb init --plugin-path "F:\MyProject\Plugins\MyPlugin"
 
-# With custom output paths
-ue5kb init --engine-path "D:\UE5.1" --kb-path "J:/CustomKB" --skill-path "J:/Skills"
-
-# Direct module execution (for debugging)
-python -m ue5_kb.cli init --engine-path "D:\Unreal Engine\UnrealEngine51_500"
-```
-
-### Testing
-```bash
-# Test version detection
-python test_init.py
-
-# Test full initialization flow
-python test_full_init.py
-
-# Test BuildCS parser
-python test_scan_buildcs.py
+# Direct execution (debugging)
+python -m ue5_kb.cli init --engine-path "..."
 ```
 
 ### Code Formatting
 ```bash
-# Format code (Black configured for 120 line length)
-black ue5_kb/
+black ue5_kb/  # 120 line length
 ```
 
-## Architecture
+---
 
-### Data Flow
+## Architecture (v2.5.0 - Pipeline System)
+
+### Pipeline Stages
 
 ```
-UE5 Engine/Plugin Source Code
-    ↓
-[1] BuildCS Parser → Parse .Build.cs files
-    ↓
-[2] Global Index Builder → Module metadata, dependencies, stats
-    ↓ (saved to SQLite + Pickle)
-Global Index (global_index/)
-    ↓
-[3] Module Graph Builder → Parse C++ files for each module
-    ↓ (saved to individual Pickle files)
-Module Graphs (module_graphs/*.pkl)
-    ↓
-[4] Skill Generator → Create Claude Code Skill
-    ↓
-Claude Skill (~/.claude/skills/ue5kb-{version}/)
+[1] Discover  → Find .Build.cs files → module_list
+      ↓
+[2] Extract   → Parse metadata → dependencies, classes, functions
+      ↓
+[3] Analyze   → Code relationships → call graphs, examples (Phase 2)
+      ↓
+[4] Build     → SQLite + Pickle → indices
+      ↓
+[5] Generate  → Claude Skills
 ```
 
-### Core Components
+### Pipeline Components
 
-**1. CLI Layer (`cli.py`)**
-- Entry point for all commands
-- Handles dual-mode routing (engine vs plugin)
-- Auto-detects engine/plugin version from Build.version or .uplugin files
-- Generates skill files from templates
+| Component | File | Purpose |
+|-----------|------|---------|
+| **PipelineCoordinator** | `pipeline/coordinator.py` | Orchestrates pipeline, manages state |
+| **DiscoverStage** | `pipeline/discover.py` | Discovers all .Build.cs files |
+| **ExtractStage** | `pipeline/extract.py` | Parses Build.cs and C++ headers |
+| **AnalyzeStage** | `pipeline/analyze.py` | Calls analyzers (call graphs, examples) |
+| **BuildStage** | `pipeline/build.py` | Builds SQLite and Pickle indices |
+| **GenerateStage** | `pipeline/generate.py` | Generates Claude Skills |
+| **PartitionedBuilder** | `builders/partitioned_builder.py` | Multi-agent partitioned builds for large engines |
 
-**2. Parsers (`parsers/`)**
-- `buildcs_parser.py`: Extracts dependencies from `.Build.cs` files using regex
-- `cpp_parser.py`: Extracts classes, functions, inheritance from C++ headers/source
+### Using the Pipeline
 
-**3. Builders (`builders/`)**
-- `global_index_builder.py`: Scans all modules, builds dependency graph (Engine mode)
-- `plugin_index_builder.py`: Scans plugin modules (Plugin mode)
-- `module_graph_builder.py`: Builds detailed code graphs per module (classes, functions, inheritance)
+```python
+from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
-**4. Core (`core/`)**
-- `config.py`: Configuration management with dynamic base_path support
-- `global_index.py`: In-memory global module index with NetworkX dependency graph
-- `optimized_index.py`: SQLite-backed storage (36x faster than pickle-only)
-- `module_graph.py`: Per-module code relationship graph (classes, methods, inheritance)
-- `function_index.py`: SQLite function index with parameter parsing for fast queries
+coordinator = PipelineCoordinator(engine_path)
 
-**5. Query Layer (`query/`)** - Context Optimization
-- `layered_query.py`: Three-tier query system (summary/details/source) for token efficiency
-- `result_cache.py`: Observation masking for large results (stores full results, returns summaries)
-- `token_budget.py`: Explicit token budget tracking and optimization triggers
+# Run complete pipeline
+results = coordinator.run_all()
 
-**6. Analyzers (`analyzers/`)**
-- `call_analyzer.py`: Analyzes function call patterns
-- `example_extractor.py`: Extracts usage examples from code
+# Run specific stage
+result = coordinator.run_stage('extract', force=True)
 
-### Storage Architecture
-
-**Global Index** (`global_index/`)
-```
-index.db              # SQLite: module metadata, fast queries
-global_index.pkl      # Pickle: complete data structure (fallback)
-global_index.json     # JSON: human-readable export
+# Check state
+state = coordinator.state
+print(state.completed_stages)  # ['discover', 'extract', ...]
 ```
 
-**Module Graphs** (`module_graphs/`)
+### Phase 2: Analyzers Framework
+
+| Analyzer | File | Purpose |
+|----------|------|---------|
+| **CallAnalyzer** | `analyzers/call_analyzer.py` | Function call relationships |
+| **ExampleExtractor** | `analyzers/example_extractor.py` | Usage examples from code |
+
+### Query System (`ue5_kb/query/`)
+
+| Module | File | Purpose |
+|--------|------|---------|
+| **LayeredQueryInterface** | `layered_query.py` | Progressive disclosure queries (summary → details → source) |
+| **ResultCache** | `result_cache.py` | LRU caching and observation masking |
+| **TokenBudget** | `token_budget.py` | Token budget tracking per category |
+
+---
+
+## Storage & Output
+
+### Knowledge Base Structure
 ```
-Core.pkl              # Pickle: class/function graph for Core module
-Engine.pkl            # Pickle: class/function graph for Engine module
-... (1757+ files)     # One per module
+{Engine}/
+├── data/                     # Pipeline working data
+│   ├── discover/             # modules.json (found modules)
+│   ├── extract/              # per-module dependencies
+│   ├── analyze/              # per-module code graphs
+│   ├── build/                # build outputs
+│   └── generate/             # skill_generated.txt
+├── .pipeline_state           # Pipeline state (hidden file)
+└── KnowledgeBase/            # Final outputs
+    ├── global_index/
+    │   ├── index.db              # SQLite: fast queries
+    │   ├── global_index.pkl      # Pickle: complete data
+    │   └── global_index.json     # JSON: human-readable
+    └── module_graphs/
+        ├── Core.pkl              # Per-module code graphs
+        ├── Engine.pkl
+        └── ... (1757+ files)
 ```
 
-**Config** (`config.yaml`)
-- Created automatically on first run
-- Stores base_path, build settings, module categories
-
-### Module Classification
-
-Engine modules are auto-categorized from path:
-- `Runtime`, `Editor`, `Developer`, `Programs` - from `Engine/Source/{Category}/`
-- `Plugins.{Type}.{Name}` - from `Engine/Plugins/{Type}/{Name}/`
-- `Platforms.{OS}` - from `Engine/Platforms/{OS}/`
-- `Plugin.{Name}` - for standalone plugin mode
-
-### Generated Skill Structure
-
-Skills are created at `~/.claude/skills/{skill-name}/`:
+### Generated Skills
 ```
-skill.md         # Skill definition (when to use, capabilities)
-impl.py          # Implementation with query functions:
-                 # - query_module_dependencies()
-                 # - search_modules()
-                 # - query_class_info() / query_class_hierarchy()
-                 # - query_function_info()
-                 # - search_classes()
+~/.claude/skills/{skill-name}/
+├── skill.md     # Skill definition
+└── impl.py      # Query functions (hardcoded KB_PATH)
 ```
 
-The `impl.py` hardcodes the KB_PATH pointing to the knowledge base location.
+---
 
-## Key Design Patterns
+## Context Optimization
 
-### Path Handling
-- All internal paths use `pathlib.Path` for cross-platform compatibility
-- `.rglob('**/*.Build.cs')` used for recursive module discovery
-- Windows path separators handled automatically
-
-### Module Discovery Strategy
-1. Recursively find all `.Build.cs` files using Path.rglob()
-2. Extract module name from filename (remove `.Build.cs` suffix)
-3. Infer category from file path (Engine/Source/Runtime → "Runtime")
-4. Parse dependencies using regex patterns
-5. Build NetworkX graph of module relationships
-
-### Performance Optimizations
-- **SQLite Storage**: 36x faster queries vs pickle-only
-- **LRU Cache**: Hot data queries < 1ms
-- **Module Graph Caching**: Loaded on-demand, cached in memory
-- **Context Optimization** (v2.2+):
-  - Layered queries reduce token usage by 80-85%
-  - Observation masking for large results (e.g., 100 results → 5 sample + ref_id)
-  - Token budget tracking prevents context overflow
-
-### Dual-Mode Support
-- Engine mode: Scans `Engine/Source/`, `Engine/Plugins/`, `Engine/Platforms/`
-- Plugin mode: Scans `Plugin/Source/**`, reads `.uplugin` for metadata
-- Shared builders and parsers with mode-specific configuration
-
-## Context Optimization System
-
-Based on Context Engineering principles (see `docs/CONTEXT_OPTIMIZATION.md`):
-
-**Problem**: Raw queries can return 1000+ tokens for class info, causing context bloat.
+**Problem**: Raw queries return 1000+ tokens, causing context bloat.
 
 **Solution**: Three-tier progressive disclosure:
 1. **Summary** (~200 tokens): Key info + ref_id
 2. **Details** (~1000 tokens): Full data using ref_id
 3. **Source** (~5000 tokens): Raw C++ code
 
-**Observation Masking**: Large result sets (e.g., 100 functions) return first 5 + ref_id, reducing tokens by 87%.
+**Observation Masking**: Large results return first 5 + ref_id (87% token reduction).
 
-**Token Budget**: Explicit budget per category (system prompt, tools, results, history) with automatic optimization triggers.
+**Token Budget**: Explicit budget tracking per category.
 
-## Important Technical Notes
+See `docs/CONTEXT_OPTIMIZATION.md` for details.
 
-### Version Detection Priority
-1. `Engine/Build/Build.version` JSON file (most accurate)
-2. Directory name parsing (e.g., `UnrealEngine51_500` → "5.1.500")
-3. `.uplugin` file for plugins (VersionName or Version field)
+---
 
-### BuildCS Parsing Limitations
-- Uses regex, not full C# parser
-- Handles most common dependency patterns
-- May miss complex conditional dependencies
+## Key Design Patterns
 
-### C++ Parsing Limitations
-- Regex-based, not full C++ parser (no Clang AST)
-- Focuses on class definitions, inheritance, method signatures
-- May miss template specializations or macro-heavy code
+### Path Handling
+- Use `pathlib.Path` for cross-platform compatibility
+- `.rglob('**/*.Build.cs')` for recursive discovery
+
+### Performance
+- **SQLite Storage**: 36x faster than pickle-only
+- **LRU Cache**: Hot data queries <1ms
+- **Context Optimization**: 80-85% token reduction
+
+### Module Classification
+Auto-categorized from path:
+- `Runtime`, `Editor`, `Developer`, `Programs` → `Engine/Source/{Category}/`
+- `Plugins.{Type}.{Name}` → `Engine/Plugins/{Type}/{Name}/`
+- `Platforms.{OS}` → `Engine/Platforms/{OS}/`
+- `Plugin.{Name}` → Plugin mode
+
+---
+
+## Technical Notes
+
+### Version Detection
+1. `Engine/Build/Build.version` JSON (most accurate)
+2. Directory name (`UnrealEngine51_500` → "5.1.500")
+3. `.uplugin` file for plugins
+
+### Parsing Limitations
+- **Build.cs**: Regex-based (not full C# parser)
+- **C++**: Regex-based, focuses on class/function signatures
+- May miss complex templates or macro-heavy code
 
 ### Skill Generation
-- Templates in `templates/skill.md.template` and `templates/impl.py.template`
-- Skill name format: `ue5kb-{version}` (engine) or `{plugin-name}-kb-{version}` (plugin)
-- KB_PATH is hardcoded in generated impl.py (not dynamic lookup)
+- Templates: `templates/skill.md.template`, `templates/impl.py.template`
+- Skill format: `ue5kb-{version}` (engine) or `{plugin-name}-kb-{version}` (plugin)
+- KB_PATH is hardcoded in generated impl.py
 
-## Common Development Workflows
+### Latest Fixes (v2.5.0)
+- **C++ Parser**: Fixed regex for UE5 style (`class MYPROJECT_API AMyActor`)
+- **Empty Module Graphs**: Fixed C++ parser to properly extract class info
+- **Pipeline Integration**: CLI now uses PipelineCoordinator
 
-### Adding a New Query Function
+---
+
+## Common Workflows
+
+### Adding a Query Function
 1. Add function to `ue5_kb/core/global_index.py` or `module_graph.py`
-2. Update `templates/impl.py.template` to expose it in the Skill
-3. Test with existing knowledge base
+2. Update `templates/impl.py.template`
+3. Test with existing KB
 4. Regenerate skill: `ue5kb init --engine-path ...`
 
-### Updating Parser Logic
-1. Modify `parsers/buildcs_parser.py` or `cpp_parser.py`
-2. Test with `test_scan_buildcs.py` or specific test case
-3. Rebuild knowledge base to see changes
-4. Consider backward compatibility with existing pickles
+### Debugging KB Issues
+```python
+from ue5_kb.core.config import Config
+from ue5_kb.core.global_index import GlobalIndex
 
-### Debugging Knowledge Base Issues
-1. Check `config.yaml` in KB directory for correct paths
-2. Verify `.db` and `.pkl` files exist in `global_index/`
-3. Use Python REPL to load GlobalIndex directly:
-   ```python
-   from ue5_kb.core.config import Config
-   from ue5_kb.core.global_index import GlobalIndex
-   cfg = Config(base_path="D:/UE5Engine/KnowledgeBase")
-   idx = GlobalIndex(cfg)
-   idx.load()
-   print(idx.get_statistics())
-   ```
+cfg = Config(base_path="D:/UE5Engine/KnowledgeBase")
+idx = GlobalIndex(cfg)
+idx.load()
+print(idx.get_statistics())
+```
 
-### Supporting New UE5 Versions
-- No code changes needed (version-agnostic design)
-- Just run `ue5kb init --engine-path` with new engine path
-- Tool auto-detects version and creates independent KB + Skill
+### Pipeline Development
+- Add stage: Inherit from `PipelineStage`, implement `execute()`
+- Register in `PipelineCoordinator`
+- State automatically persisted to `pipeline_state.json`
+
+---
 
 ## Dependencies
 
-Core runtime:
-- `pyyaml>=6.0` - Config file parsing
-- `networkx>=3.0` - Dependency graph storage
-- `click>=8.1.0` - CLI framework
-- `rich>=13.0.0` - Terminal UI (console, prompts, tables)
+**Core**: `pyyaml>=6.0`, `networkx>=3.0`, `click>=8.1.0`, `rich>=13.0.0`
+**Dev**: `pytest>=7.0`, `black>=23.0`, `mypy>=1.0`
 
-Optional dev:
-- `pytest>=7.0` - Testing
-- `black>=23.0` - Code formatting
-- `mypy>=1.0` - Type checking
+---
 
-## Python Version Support
+## Python Version
 
-- **Required**: Python 3.9+
-- **Tested on**: 3.9, 3.10, 3.11, 3.12
-- Uses `pathlib` (3.4+), f-strings (3.6+), type hints (3.9+ for modern syntax)
+**Required**: 3.9+ | **Tested**: 3.9, 3.10, 3.11, 3.12
+
+Uses `pathlib` (3.4+), f-strings (3.6+), type hints (3.9+).
+
+---
+
+## Getting Help
+
+For complex tasks, use project Skill: `/ue5kb-dev-guide`
+
+For detailed Context Optimization: `docs/CONTEXT_OPTIMIZATION.md`
+
+For OpenSpec workflow: `openspec/AGENTS.md`
