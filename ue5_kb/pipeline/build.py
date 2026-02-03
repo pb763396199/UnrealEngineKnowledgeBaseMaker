@@ -7,6 +7,7 @@ Pipeline 阶段 4: Build (构建索引)
 from pathlib import Path
 from typing import Dict, Any, List
 import json
+import os
 import pickle
 import networkx as nx
 from .base import PipelineStage
