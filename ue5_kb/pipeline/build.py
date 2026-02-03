@@ -130,12 +130,15 @@ class BuildStage(PipelineStage):
 
             # 添加到索引
             global_index.add_module(
-                name=module_name,
-                path=module['path'],
-                category=module['category'],
-                dependencies=dependencies.get('PublicDependencyModuleNames', []),
-                public_dependencies=dependencies.get('PublicDependencyModuleNames', []),
-                private_dependencies=dependencies.get('PrivateDependencyModuleNames', [])
+                module_name,
+                {
+                    'name': module_name,
+                    'path': module['path'],
+                    'category': module['category'],
+                    'dependencies': dependencies.get('PublicDependencyModuleNames', []),
+                    'public_dependencies': dependencies.get('PublicDependencyModuleNames', []),
+                    'private_dependencies': dependencies.get('PrivateDependencyModuleNames', [])
+                }
             )
 
         # 构建依赖图
