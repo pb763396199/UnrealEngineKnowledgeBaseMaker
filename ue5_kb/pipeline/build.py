@@ -206,15 +206,15 @@ class BuildStage(PipelineStage):
                 INSERT OR REPLACE INTO modules (
                     name, path, category, plugin, dependencies,
                     public_dependencies, private_dependencies, indexed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 module_name,
                 module_info.get('path', ''),
                 module_info.get('category', ''),
                 'Engine',
                 json.dumps(dependencies),
-                json.dumps(dependencies),  # public_dependencies
-                json.dumps(dependencies),  # private_dependencies
+                json.dumps(module_info.get('public_dependencies', [])),
+                json.dumps(module_info.get('private_dependencies', [])),
                 module_info.get('indexed_at', '')
             ))
 
@@ -323,30 +323,63 @@ class BuildStage(PipelineStage):
         # 添加类节点
         for cls in code_graph.get('classes', []):
             class_name = cls['name']
+
+            # 兼容不同的字段名
+            file_path = cls.get('file') or cls.get('file_path', '')
+            line_num = cls.get('line') or cls.get('line_number', 0)
+
+            # 处理 parent_class (单个字符串) 和 parent_classes (列表)
+            parent_class = cls.get('parent_class')
+            parent_classes = cls.get('parent_classes', [])
+            if parent_class and not parent_classes:
+                parent_classes = [parent_class] if parent_class else []
+
             graph.add_node(
                 f"class_{class_name}",
                 type='class',
                 name=class_name,
-                file=cls.get('file', ''),
-                line=cls.get('line', 0),
-                parent_classes=cls.get('parent_classes', []),
-                methods=cls.get('methods', [])
+                file=file_path,
+                line=line_num,
+                parent_classes=parent_classes,
+                methods=cls.get('methods', []),
+                is_uclass=cls.get('is_uclass', False),
+                is_struct=cls.get('is_struct', False),
+                is_interface=cls.get('is_interface', False)
             )
 
             # 添加继承边
-            for parent in cls.get('parent_classes', []):
+            for parent in parent_classes:
                 graph.add_edge(f"class_{class_name}", f"class_{parent}", type='inherits')
 
         # 添加函数节点
         for func in code_graph.get('functions', []):
             func_name = func['name']
+
+            # 兼容不同的字段名
+            file_path = func.get('file') or func.get('file_path', '')
+            line_num = func.get('line') or func.get('line_number', 0)
+
+            # 构建函数签名
+            signature = func.get('signature', '')
+            if not signature:
+                # 从 return_type 和 parameters 构建签名
+                return_type = func.get('return_type', '')
+                params = func.get('parameters', [])
+                params_str = ', '.join([f"{p.get('type', 'unknown')} {p.get('name', 'param')}" for p in params])
+                signature = f"{return_type} {func_name}({params_str})"
+
             graph.add_node(
                 f"function_{func_name}",
                 type='function',
                 name=func_name,
-                file=func.get('file', ''),
-                line=func.get('line', 0),
-                signature=func.get('signature', '')
+                file=file_path,
+                line=line_num,
+                signature=signature,
+                return_type=func.get('return_type', ''),
+                parameters=func.get('parameters', []),
+                class_name=func.get('class_name', ''),
+                is_ufunction=func.get('is_ufunction', False),
+                is_blueprint_callable=func.get('is_blueprint_callable', False)
             )
 
         return graph

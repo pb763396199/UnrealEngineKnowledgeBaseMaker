@@ -468,5 +468,33 @@ class CppParser:
 
         return signature
 
+    def extract_classes(self, content: str, file_path: str = "") -> List[Dict[str, Any]]:
+        """
+        提取代码中的所有类（供 Pipeline analyze 阶段使用）
+
+        Args:
+            content: C++ 代码内容
+            file_path: 文件路径
+
+        Returns:
+            类信息字典列表
+        """
+        classes, _ = self.parse_content(content, file_path)
+        return [info.to_dict() for info in classes.values()]
+
+    def extract_functions(self, content: str, file_path: str = "") -> List[Dict[str, Any]]:
+        """
+        提取代码中的所有函数（供 Pipeline analyze 阶段使用）
+
+        Args:
+            content: C++ 代码内容
+            file_path: 文件路径
+
+        Returns:
+            函数信息字典列表
+        """
+        _, functions = self.parse_content(content, file_path)
+        return [info.to_dict() for info in functions.values()]
+
     def __repr__(self) -> str:
         return f"CppParser(classes={len(self.classes)}, functions={len(self.functions)})"
