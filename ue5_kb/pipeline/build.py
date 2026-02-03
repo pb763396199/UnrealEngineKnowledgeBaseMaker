@@ -1,0 +1,273 @@
+"""
+Pipeline 阶段 4: Build (构建索引)
+
+将 JSON 数据转换为优化的存储格式（SQLite + Pickle）
+"""
+
+from pathlib import Path
+from typing import Dict, Any, List
+import json
+import pickle
+import networkx as nx
+from .base import PipelineStage
+from ..core.config import Config
+from ..core.global_index import GlobalIndex
+from ..core.optimized_index import OptimizedGlobalIndex
+
+
+class BuildStage(PipelineStage):
+    """
+    构建阶段
+
+    将前面阶段的 JSON 数据转换为最终的索引格式
+    """
+
+    @property
+    def stage_name(self) -> str:
+        return "build"
+
+    def get_output_path(self) -> Path:
+        # 输出到 KnowledgeBase 目录
+        return self.base_path / "KnowledgeBase"
+
+    def is_completed(self) -> bool:
+        # 检查 KnowledgeBase 目录是否存在且有 global_index
+        kb_path = self.get_output_path()
+        global_index_db = kb_path / "global_index" / "index.db"
+        return global_index_db.exists()
+
+    def run(self, **kwargs) -> Dict[str, Any]:
+        """
+        构建全局索引和模块图谱
+
+        Returns:
+            构建统计
+        """
+        print(f"[Build] 构建知识库索引...")
+
+        # 1. 创建配置
+        kb_path = self.get_output_path()
+        kb_path.mkdir(parents=True, exist_ok=True)
+
+        config = self._create_config(kb_path)
+
+        # 2. 构建全局索引
+        global_index = self._build_global_index(config)
+
+        # 3. 构建模块图谱
+        modules_built = self._build_module_graphs(kb_path)
+
+        # 4. 保存统计信息
+        stats = global_index.get_statistics()
+
+        result = {
+            'kb_path': str(kb_path),
+            'global_index_created': True,
+            'module_graphs_created': modules_built,
+            'statistics': stats
+        }
+
+        # 保存构建摘要
+        self.save_result(result, "build_summary.json")
+
+        print(f"[Build] 完成！")
+        print(f"  知识库路径: {kb_path}")
+        print(f"  总模块数: {stats.get('total_modules', 0)}")
+        print(f"  模块图谱: {modules_built} 个")
+
+        return result
+
+    def _create_config(self, kb_path: Path) -> Config:
+        """
+        创建配置对象
+
+        Args:
+            kb_path: 知识库路径
+
+        Returns:
+            Config 对象
+        """
+        config = Config(base_path=str(kb_path))
+        config.save()
+        return config
+
+    def _build_global_index(self, config: Config) -> GlobalIndex:
+        """
+        构建全局索引
+
+        Args:
+            config: 配置对象
+
+        Returns:
+            GlobalIndex 对象
+        """
+        print(f"  构建全局索引...")
+
+        global_index = GlobalIndex(config)
+
+        # 加载 discover 和 extract 的结果
+        discover_result = self.load_previous_stage_result('discover', 'modules.json')
+        extract_dir = self.data_dir / 'extract'
+
+        if not discover_result:
+            raise RuntimeError("Discover 阶段结果不存在")
+
+        modules = discover_result['modules']
+
+        # 添加模块到索引
+        for module in modules:
+            module_name = module['name']
+
+            # 加载依赖信息
+            dep_file = extract_dir / module_name / "dependencies.json"
+            if not dep_file.exists():
+                # 没有依赖信息，使用空依赖
+                dependencies = {}
+            else:
+                with open(dep_file, 'r', encoding='utf-8') as f:
+                    dep_data = json.load(f)
+                    dependencies = dep_data.get('dependencies', {})
+
+            # 添加到索引
+            global_index.add_module(
+                name=module_name,
+                path=module['path'],
+                category=module['category'],
+                dependencies=dependencies.get('PublicDependencyModuleNames', []),
+                public_dependencies=dependencies.get('PublicDependencyModuleNames', []),
+                private_dependencies=dependencies.get('PrivateDependencyModuleNames', [])
+            )
+
+        # 构建依赖图
+        global_index.build_dependency_graph()
+
+        # 保存索引
+        global_index.save()
+
+        # 同时创建 OptimizedIndex（SQLite）
+        self._build_optimized_index(global_index, config)
+
+        return global_index
+
+    def _build_optimized_index(self, global_index: GlobalIndex, config: Config) -> None:
+        """
+        构建优化索引（SQLite）
+
+        Args:
+            global_index: 全局索引
+            config: 配置对象
+        """
+        print(f"  构建 SQLite 索引...")
+
+        optimized = OptimizedGlobalIndex(config)
+
+        # 将数据从 GlobalIndex 转移到 SQLite
+        all_modules = global_index.get_all_modules()
+
+        for module_name, module_info in all_modules.items():
+            optimized.add_module(module_name, module_info)
+
+        optimized.build_indices()
+
+    def _build_module_graphs(self, kb_path: Path) -> int:
+        """
+        构建模块图谱
+
+        Args:
+            kb_path: 知识库路径
+
+        Returns:
+            构建的图谱数量
+        """
+        print(f"  构建模块图谱...")
+
+        analyze_dir = self.data_dir / 'analyze'
+        if not analyze_dir.exists():
+            print(f"    警告: 分析阶段结果不存在，跳过模块图谱构建")
+            return 0
+
+        graphs_dir = kb_path / "module_graphs"
+        graphs_dir.mkdir(parents=True, exist_ok=True)
+
+        built_count = 0
+
+        # 遍历分析结果
+        for module_dir in analyze_dir.iterdir():
+            if not module_dir.is_dir():
+                continue
+
+            code_graph_file = module_dir / "code_graph.json"
+            if not code_graph_file.exists():
+                continue
+
+            module_name = module_dir.name
+
+            try:
+                # 加载代码图谱
+                with open(code_graph_file, 'r', encoding='utf-8') as f:
+                    code_graph = json.load(f)
+
+                # 转换为 NetworkX 图
+                graph = self._create_networkx_graph(code_graph)
+
+                # 保存为 pickle
+                output_file = graphs_dir / f"{module_name}.pkl"
+                with open(output_file, 'wb') as f:
+                    pickle.dump({
+                        'module': module_name,
+                        'graph': graph,
+                        'metadata': {
+                            'class_count': len(code_graph.get('classes', [])),
+                            'function_count': len(code_graph.get('functions', []))
+                        }
+                    }, f)
+
+                built_count += 1
+
+            except Exception as e:
+                print(f"    警告: 构建 {module_name} 图谱失败: {e}")
+
+        return built_count
+
+    def _create_networkx_graph(self, code_graph: Dict[str, Any]) -> nx.DiGraph:
+        """
+        从代码图谱创建 NetworkX 图
+
+        Args:
+            code_graph: 代码图谱数据
+
+        Returns:
+            NetworkX 有向图
+        """
+        graph = nx.DiGraph()
+
+        # 添加类节点
+        for cls in code_graph.get('classes', []):
+            class_name = cls['name']
+            graph.add_node(
+                f"class_{class_name}",
+                type='class',
+                name=class_name,
+                file=cls.get('file', ''),
+                line=cls.get('line', 0),
+                parent_classes=cls.get('parent_classes', []),
+                methods=cls.get('methods', [])
+            )
+
+            # 添加继承边
+            for parent in cls.get('parent_classes', []):
+                graph.add_edge(f"class_{class_name}", f"class_{parent}", type='inherits')
+
+        # 添加函数节点
+        for func in code_graph.get('functions', []):
+            func_name = func['name']
+            graph.add_node(
+                f"function_{func_name}",
+                type='function',
+                name=func_name,
+                file=func.get('file', ''),
+                line=func.get('line', 0),
+                signature=func.get('signature', '')
+            )
+
+        return graph

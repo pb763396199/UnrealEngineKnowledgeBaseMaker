@@ -134,3 +134,50 @@ Thumbs.db
 *.pkl
 *.db
 ue5kb_config.yaml
+
+# Security sensitive files
+*.key
+*.pem
+*.p12
+*.pfx
+*.cer
+*.crt
+*.der
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+.ssh/
+secrets/
+credentials/
+*secret*
+*credential*
+*.env.local
+*.env.*.local
+
+# Backup files that might contain sensitive data
+*.bak
+*.backup
+*.old
+*.orig
+
+# Archives that might contain sensitive data
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Database files with potential sensitive data
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Configuration files that might contain secrets
+config.local.yaml
+config.local.yml
+config.local.json
+local_config.*

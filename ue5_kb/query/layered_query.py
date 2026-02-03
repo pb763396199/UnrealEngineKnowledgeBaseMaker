@@ -253,14 +253,110 @@ class LayeredQueryInterface:
         return f"ref_{hash_val}"
 
     def _load_class_info(self, class_name: str) -> Optional[Dict[str, Any]]:
-        """加载类信息（占位符，实际会调用现有接口）"""
-        # TODO: 集成现有的 query_class_info
-        return None
+        """
+        加载类信息（真实实现）
+
+        从 module_graphs 中加载类的详细信息
+        """
+        import pickle
+        from ..core.config import Config
+        from ..core.global_index import GlobalIndex
+
+        try:
+            # 1. 加载 global_index 查找模块
+            config = Config(str(self.kb_path / "config.yaml"))
+            global_index = GlobalIndex(config)
+
+            # 2. 遍历所有模块图谱查找类
+            graphs_dir = self.kb_path / "module_graphs"
+            if not graphs_dir.exists():
+                return None
+
+            for graph_file in graphs_dir.glob("*.pkl"):
+                try:
+                    with open(graph_file, 'rb') as f:
+                        data = pickle.load(f)
+                        graph = data.get('graph')
+
+                        if not graph:
+                            continue
+
+                        # 查找类节点
+                        class_node = f"class_{class_name}"
+                        if class_node not in graph.nodes:
+                            continue
+
+                        # 找到了！提取信息
+                        node_data = graph.nodes[class_node]
+                        module_name = data.get('module', 'unknown')
+
+                        # 提取父类
+                        parent_classes = []
+                        for pred in graph.predecessors(class_node):
+                            if pred.startswith('class_'):
+                                parent_classes.append(graph.nodes[pred].get('name', pred))
+
+                        # 提取方法
+                        methods = []
+                        for succ in graph.successors(class_node):
+                            if succ.startswith('method_') or succ.startswith('function_'):
+                                methods.append(graph.nodes[succ].get('name', succ))
+
+                        return {
+                            'name': class_name,
+                            'module': module_name,
+                            'parent_classes': parent_classes,
+                            'methods': methods,
+                            'file': node_data.get('file', ''),
+                            'line': node_data.get('line', 0),
+                            'is_uclass': node_data.get('is_uclass', False),
+                            'is_blueprint': node_data.get('is_blueprint', False),
+                            'properties': node_data.get('properties', [])
+                        }
+
+                except Exception as e:
+                    # 单个文件失败不影响其他文件
+                    continue
+
+            # 没找到
+            return None
+
+        except Exception as e:
+            print(f"警告: 加载类信息失败: {e}")
+            return None
 
     def _load_source_code(self, class_name: str) -> str:
-        """加载源代码（占位符）"""
-        # TODO: 从文件系统读取源码
-        return "// Source code placeholder"
+        """
+        加载源代码（真实实现）
+
+        从文件系统读取类的源代码
+        """
+        # 先获取类信息（包含文件路径）
+        class_info = self._load_class_info(class_name)
+        if not class_info:
+            return f"// 未找到类 {class_name}"
+
+        file_path = class_info.get('file')
+        if not file_path:
+            return f"// 类 {class_name} 没有关联的源文件"
+
+        # 尝试读取文件
+        try:
+            # 文件路径可能是相对路径，需要结合引擎路径
+            full_path = Path(file_path)
+            if not full_path.is_absolute():
+                # 尝试从 kb_path 的父目录解析
+                engine_path = self.kb_path.parent
+                full_path = engine_path / file_path
+
+            if not full_path.exists():
+                return f"// 源文件不存在: {file_path}"
+
+            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read()
+
+        except Exception as e:
+            return f"// 读取源文件失败: {e}"
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """获取缓存统计"""
