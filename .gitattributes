@@ -1,0 +1,21 @@
+# 防止敏感文件被意外提交
+*.key filter=git-crypt diff=git-crypt
+*.pem filter=git-crypt diff=git-crypt
+*.p12 filter=git-crypt diff=git-crypt
+*.pfx filter=git-crypt diff=git-crypt
+.env filter=git-crypt diff=git-crypt
+*secret* filter=git-crypt diff=git-crypt
+*credential* filter=git-crypt diff=git-crypt
+
+# 行尾规范化
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+
+# 二进制文件
+*.pkl binary
+*.db binary
+*.pyc binary
