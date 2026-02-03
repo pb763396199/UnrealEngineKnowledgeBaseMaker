@@ -16,17 +16,42 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="2.1.0")
+@click.version_option(version="2.5.0")
 def cli():
     """UE5 Knowledge Base Builder - UE5 知识库生成工具
 
+    \b
     支持双模式：
-    - 引擎模式: 为整个 UE5 引擎生成知识库
+    - 引擎模式: 为整个 UE5 引擎生成知识库（1757+ 模块）
     - 插件模式: 为单个插件生成独立知识库
 
-    示例:
+    \b
+    可用命令：
+      ue5kb init            初始化并生成知识库和 Skill
+      ue5kb status          显示当前状态
+
+    \b
+    Pipeline 高级命令：
+      ue5kb pipeline run              运行完整 Pipeline
+      ue5kb pipeline status           查看 Pipeline 状态
+      ue5kb pipeline clean            清除特定阶段的输出
+      ue5kb pipeline partitioned      使用分区模式构建（大型引擎）
+      ue5kb pipeline partition-status 查看分区构建状态
+
+    \b
+    常用示例：
+      # 引擎模式 - 快速开始
       ue5kb init --engine-path "D:\\Unreal Engine\\UE5.1"
-      ue5kb init --plugin-path "F:\\MyPlugin"
+
+      # 插件模式
+      ue5kb init --plugin-path "F:\\MyProject\\Plugins\\MyPlugin"
+
+      # 高级选项
+      ue5kb init --engine-path "D:\\UE5" --force
+      ue5kb init --engine-path "D:\\UE5" --stage build
+
+      # Pipeline 状态查看
+      ue5kb pipeline status --engine-path "D:\\UE5"
     """
     pass
 
@@ -320,7 +345,12 @@ def display_pipeline_results(results: dict) -> None:
 def status():
     """显示当前状态和已生成的知识库
 
+    \b
     显示系统中已生成的所有知识库和 Skill。
+
+    \b
+    示例：
+      ue5kb status
     """
     console.print("\n[bold cyan]UE5 Knowledge Base Builder 状态[/bold cyan]\n")
 
@@ -416,10 +446,33 @@ def pipeline():
     5. generate - 生成 Skill
 
     \b
-    示例：
+    可用命令：
+      ue5kb pipeline run              运行完整 Pipeline
+      ue5kb pipeline status           查看各阶段完成状态
+      ue5kb pipeline clean            清除特定阶段的输出
+      ue5kb pipeline partitioned      分区模式（大型引擎）
+      ue5kb pipeline partition-status 查看分区状态
+
+    \b
+    常用示例：
+      # 运行完整 Pipeline
       ue5kb pipeline run --engine-path "D:\\UE5"
+
+      # 强制重新运行所有阶段
+      ue5kb pipeline run --engine-path "D:\\UE5" --force
+
+      # 并行处理
+      ue5kb pipeline run --engine-path "D:\\UE5" --parallel 4
+
+      # 查看状态
       ue5kb pipeline status --engine-path "D:\\UE5"
+
+      # 清除特定阶段
       ue5kb pipeline clean --engine-path "D:\\UE5" discover
+      ue5kb pipeline clean --engine-path "D:\\UE5" --all
+
+      # 分区模式（仅处理特定分区）
+      ue5kb pipeline partitioned --engine-path "D:\\UE5" --partition runtime --partition editor
     """
     pass
 
@@ -428,9 +481,20 @@ def pipeline():
 @click.option('--engine-path', type=click.Path(exists=True), required=True,
               help='UE5 引擎路径')
 @click.option('--force', is_flag=True, help='强制重新运行所有阶段')
-@click.option('--parallel', type=int, default=1, help='并行度（用于 analyze 阶段）')
+@click.option('--parallel', type=int, default=1, help='并行度（用于 analyze 阶段，默认: 1）')
 def pipeline_run(engine_path, force, parallel):
-    """运行完整 Pipeline"""
+    """运行完整 Pipeline
+
+    \b
+    按顺序执行所有阶段：discover → extract → analyze → build → generate
+    已完成的阶段会自动跳过，使用 --force 强制重新运行。
+
+    \b
+    示例：
+      ue5kb pipeline run --engine-path "D:\\UE5"
+      ue5kb pipeline run --engine-path "D:\\UE5" --force
+      ue5kb pipeline run --engine-path "D:\\UE5" --parallel 4
+    """
     from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
     console.print(f"\n[bold cyan]=== Pipeline 运行 ===[/bold cyan]")
@@ -486,7 +550,15 @@ def pipeline_run(engine_path, force, parallel):
 @click.option('--engine-path', type=click.Path(exists=True), required=True,
               help='UE5 引擎路径')
 def pipeline_status(engine_path):
-    """查看 Pipeline 状态"""
+    """查看 Pipeline 状态
+
+    \b
+    显示各阶段的完成状态、完成时间和摘要信息。
+
+    \b
+    示例：
+      ue5kb pipeline status --engine-path "D:\\UE5"
+    """
     from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
     coordinator = PipelineCoordinator(Path(engine_path))
@@ -532,6 +604,10 @@ def pipeline_status(engine_path):
 @click.option('--all', is_flag=True, help='清除所有阶段')
 def pipeline_clean(engine_path, stage_name, all):
     """清除特定阶段的输出
+
+    \b
+    清除指定阶段的输出文件，以便重新运行该阶段。
+    可用阶段: discover, extract, analyze, build, generate
 
     \b
     示例：
@@ -644,7 +720,15 @@ def pipeline_partitioned(engine_path, partition, parallel):
 @click.option('--engine-path', type=click.Path(exists=True), required=True,
               help='UE5 引擎路径')
 def pipeline_partition_status(engine_path):
-    """查看分区构建状态"""
+    """查看分区构建状态
+
+    \b
+    显示各分区的完成状态和说明。
+
+    \b
+    示例：
+      ue5kb pipeline partition-status --engine-path "D:\\UE5"
+    """
     from ue5_kb.builders.partitioned_builder import PartitionedBuilder, PartitionConfig
 
     builder = PartitionedBuilder(Path(engine_path))
