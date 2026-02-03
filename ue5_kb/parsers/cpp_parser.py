@@ -2,6 +2,7 @@
 UE5 知识库系统 - C++ 代码解析器
 
 负责解析 C++ 源文件，提取类、函数、继承关系等信息
+优化版本 - 支持 UE5 代码风格
 """
 
 import re
@@ -113,13 +114,6 @@ class CppParser:
     UPROPERTY_PATTERN = r'UPROPERTY\s*\(([^)]*)\)'
     UINTERFACE_PATTERN = r'UINTERFACE\s*\(([^)]*)\)'
 
-    # 类/结构体声明模式
-    CLASS_DECL_PATTERN = r'class\s+([A-Z_][A-Z0-9_]*)\s*:\s*public\s+([A-Z_][A-Z0-9_]*)'
-    STRUCT_DECL_PATTERN = r'struct\s+([A-Z_][A-Z0-9_]*)\s*:\s*public\s+([A-Z_][A-Z0-9_]*)'
-
-    # 函数声明模式
-    FUNCTION_DECL_PATTERN = r'([A-Z_][A-Z0-9_<>:*&\s]+)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)'
-
     def __init__(self):
         """初始化解析器"""
         self.classes: Dict[str, ClassInfo] = {}
@@ -138,8 +132,11 @@ class CppParser:
         if not os.path.exists(file_path):
             return {}, {}
 
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except Exception:
+            return {}, {}
 
         return self.parse_content(content, file_path)
 
@@ -157,124 +154,191 @@ class CppParser:
         self.classes = {}
         self.functions = {}
 
-        # 移除注释
-        content = self._remove_comments(content)
+        # 预处理代码
+        content = self._preprocess_content(content)
 
-        # 移除字符串字面量
-        content = re.sub(r'"[^"]*"', '""', content)
-
-        # 解析类
-        self._parse_classes(content, file_path)
+        # 解析类和结构体
+        self._parse_classes_and_structs(content, file_path)
 
         # 解析函数
         self._parse_functions(content, file_path)
 
         return self.classes, self.functions
 
-    def _remove_comments(self, content: str) -> str:
-        """移除注释"""
+    def _preprocess_content(self, content: str) -> str:
+        """预处理代码内容"""
         # 移除单行注释
         content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
         # 移除多行注释
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-        return content
+        # 标准化空白
+        content = re.sub(r'\s+', ' ', content)
+        return content.strip()
 
-    def _parse_classes(self, content: str, file_path: str) -> None:
-        """解析类定义"""
+    def _parse_classes_and_structs(self, content: str, file_path: str) -> None:
+        """解析类和结构体定义"""
         lines = content.split('\n')
 
-        for line_num, line in enumerate(lines, 1):
-            # 检查是否有 UCLASS 宏
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # 检查是否有 UE5 宏
             is_uclass = bool(re.search(self.UCLASS_PATTERN, line))
             is_ustruct = bool(re.search(self.USTRUCT_PATTERN, line))
             is_uinterface = bool(re.search(self.UINTERFACE_PATTERN, line))
 
-            if is_uclass or is_ustruct or is_uinterface:
-                # 尝试在下一行找到类声明
-                if line_num < len(lines):
-                    next_line = lines[line_num]
-                    self._extract_class_declaration(next_line, file_path, line_num, is_uclass, is_ustruct, is_uinterface)
+            # 查找类/结构体声明
+            # 支持以下格式:
+            # - class AMyActor : public AActor
+            # - class MYPROJECT_API AMyActor : public AActor
+            # - class AMyActor : public AActor, public IInterface
+            # - struct FMyStruct : public FMyBase
 
-            # 也检查普通类声明
-            match = re.search(self.CLASS_DECL_PATTERN, line)
+            class_pattern = r'\b(class|struct)\s+((?:[A-Z_]+_API\s+)?[A-Z][A-Za-z0-9_]*)\s*:\s*(?:public\s+)?([A-Z][A-Za-z0-9_<>*&:\s]*)'
+
+            match = re.search(class_pattern, line)
             if match:
-                class_name = match.group(1)
-                parent_class = match.group(2)
+                decl_type = match.group(1)  # class or struct
+                full_name = match.group(2).strip()
+                parent_part = match.group(3).strip()
 
+                # 清理 API 宏
+                class_name = full_name.split()[-1] if ' ' in full_name else full_name
+
+                # 提取父类
+                parent_class = None
+                if parent_part and parent_part != '':
+                    # 移除可能的继承访问修饰符
+                    parent_clean = re.sub(r'\b(public|private|protected)\s+', '', parent_part)
+                    parent_clean = parent_clean.strip().split()[0] if parent_clean else None
+                    if parent_clean:
+                        parent_class = parent_clean
+
+                # 确定类型标志
+                if decl_type == 'struct':
+                    is_struct = True
+                    is_uclass = is_ustruct
+                else:
+                    is_struct = False
+                    # 如果前面检测到 UCLASS 宏，使用它
+                    is_uclass = is_uclass
+
+                is_interface = is_uinterface
+
+                # 创建或更新类信息
                 if class_name not in self.classes:
                     self.classes[class_name] = ClassInfo(
                         name=class_name,
                         parent_class=parent_class,
+                        is_uclass=is_uclass,
+                        is_struct=is_struct,
+                        is_interface=is_interface,
                         file_path=file_path,
-                        line_number=line_num
+                        line_number=i + 1
                     )
+                else:
+                    # 更新现有类信息
+                    info = self.classes[class_name]
+                    if is_uclass:
+                        info.is_uclass = True
+                    if is_struct:
+                        info.is_struct = True
+                    if is_interface:
+                        info.is_interface = True
+                    if parent_class and not info.parent_class:
+                        info.parent_class = parent_class
 
-    def _extract_class_declaration(self, line: str, file_path: str, line_num: int,
-                                   is_uclass: bool, is_ustruct: bool, is_uinterface: bool) -> None:
-        """从行中提取类声明"""
-        # 匹配 class ClassName : public ParentClass
-        match = re.search(r'class\s+([A-Z_][A-Z0-9_]*)\s*:\s*public\s+([A-Z_][A-Z0-9_]*)', line)
-
-        if match:
-            class_name = match.group(1)
-            parent_class = match.group(2)
-
-            if class_name not in self.classes:
-                self.classes[class_name] = ClassInfo(
-                    name=class_name,
-                    parent_class=parent_class,
-                    is_uclass=is_uclass,
-                    is_struct=is_ustruct,
-                    is_interface=is_uinterface,
-                    file_path=file_path,
-                    line_number=line_num
-                )
-            else:
-                # 更新现有类信息
-                info = self.classes[class_name]
-                info.is_uclass = is_uclass
-                info.is_struct = is_ustruct
-                info.is_interface = is_uinterface
+            i += 1
 
     def _parse_functions(self, content: str, file_path: str) -> None:
         """解析函数声明"""
         lines = content.split('\n')
+
         ufunction_specifiers = {}
 
-        for line_num, line in enumerate(lines, 1):
+        for i, line in enumerate(lines, 1):
+            line_stripped = line.strip()
+
             # 检查是否有 UFUNCTION 宏
-            ufunction_match = re.search(self.UFUNCTION_PATTERN, line)
+            ufunction_match = re.search(self.UFUNCTION_PATTERN, line_stripped)
             if ufunction_match:
                 ufunction_specifiers = self._parse_ufunction_specifiers(ufunction_match.group(1))
+                continue
 
-            # 尝试匹配函数声明
-            match = re.search(self.FUNCTION_DECL_PATTERN, line)
+            # 跳过明显不是函数声明的行
+            if not line_stripped or line_stripped.startswith('//'):
+                continue
+
+            # 跳过关键字
+            if line_stripped.split()[0] in ['if', 'for', 'while', 'switch', 'return', 'class', 'struct', 'enum', 'namespace']:
+                continue
+
+            # 函数声明模式
+            # 支持格式:
+            # - void FunctionName();
+            # - virtual void FunctionName() override;
+            # - static float FunctionName(int32 value);
+            # - UFUNCTION(BlueprintCallable) void MyFunction();
+            # - void FunctionName() const;
+
+            # 首先处理行尾的修饰符
+            const_override_part = ''
+            if ' const' in line_stripped:
+                const_override_part = ' const'
+                line_stripped = line_stripped.replace(' const', '')
+            if ' override' in line_stripped:
+                const_override_part += ' override'
+                line_stripped = line_stripped.replace(' override', '')
+            if ' final' in line_stripped:
+                const_override_part += ' final'
+                line_stripped = line_stripped.replace(' final', '')
+
+            # 函数签名模式
+            # 返回类型 + 函数名 + 参数列表
+            func_pattern = r'^([A-Za-z_][A-Za-z0-9_<>*&:\s]*?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:=\s*0\s*)?;?$'
+
+            match = re.match(func_pattern, line_stripped.strip())
             if match:
                 return_type = match.group(1).strip()
                 func_name = match.group(2)
                 params = match.group(3)
 
                 # 过滤掉非函数的关键字
-                if func_name in ['if', 'for', 'while', 'switch', 'return', 'class', 'struct']:
+                if func_name in ['if', 'for', 'while', 'switch', 'return', 'class', 'struct', 'enum', 'namespace', 'operator']:
                     continue
 
                 # 检测修饰符
                 is_virtual = 'virtual' in return_type
                 is_static = 'static' in return_type
-                is_const = 'const' in line[match.end():]
-                is_override = 'override' in line[match.end():]
+                is_const = ' const' in const_override_part
+                is_override = ' override' in const_override_part
 
                 # 清理返回类型（移除修饰符）
-                return_type = return_type.replace('virtual', '').replace('static', '').replace('inline', '').strip()
+                return_type_clean = return_type.replace('virtual', '').replace('static', '').strip()
 
                 # Blueprint callable 检测
-                is_blueprint_callable = ufunction_specifiers.get('BlueprintCallable', False) or \
-                                      ufunction_specifiers.get('BlueprintPure', False)
+                is_blueprint_callable = (
+                    ufunction_specifiers.get('BlueprintCallable', False) or
+                    ufunction_specifiers.get('BlueprintPure', False) or
+                    ufunction_specifiers.get('BlueprintImplementableEvent', False) or
+                    ufunction_specifiers.get('BlueprintNativeEvent', False)
+                )
 
-                func_key = f"{func_name}_{line_num}"
+                # 跳过纯虚函数声明
+                if '= 0' in params or '= delete' in params:
+                    ufunction_specifiers = {}
+                    continue
+
+                # 跳过明显不是函数的
+                if not params and not return_type_clean:
+                    ufunction_specifiers = {}
+                    continue
+
+                func_key = f"{func_name}_{i}"
                 self.functions[func_key] = FunctionInfo(
                     name=func_name,
-                    return_type=return_type,
+                    return_type=return_type_clean,
                     parameters=self._parse_parameters(params),
                     is_ufunction=bool(ufunction_specifiers),
                     is_static=is_static,
@@ -284,21 +348,14 @@ class CppParser:
                     is_blueprint_callable=is_blueprint_callable,
                     ufunction_specifiers=ufunction_specifiers if ufunction_specifiers else {},
                     file_path=file_path,
-                    line_number=line_num
+                    line_number=i
                 )
 
-                # 重置 UFUNCTION 解析结果（避免影响下一个函数）
+                # 重置 UFUNCTION 解析结果
                 ufunction_specifiers = {}
 
     def _parse_parameters(self, params_str: str) -> List[ParameterInfo]:
-        """解析函数参数列表
-
-        支持格式：
-        - "int32 MyParam"
-        - "const FString& MyParam"
-        - "float MyParam = 0.0f"
-        - "TArray<int32> MyArray"
-        """
+        """解析函数参数列表"""
         if not params_str or params_str.strip() == 'void':
             return []
 
@@ -309,7 +366,6 @@ class CppParser:
                 continue
 
             # 匹配：类型 参数名 = 默认值
-            # 支持模板类型（如 TArray<int32>）
             match = re.match(r'^(.+?)\s+(\w+)(?:\s*=\s*(.*))?$', param)
             if match:
                 param_type = match.group(1).strip()
@@ -322,7 +378,7 @@ class CppParser:
                     default_value=default_value
                 ))
             else:
-                # 无法解析的参数，保留原始文本
+                # 无法解析的参数
                 params.append(ParameterInfo(
                     type='unknown',
                     name=param,
@@ -332,10 +388,7 @@ class CppParser:
         return params
 
     def _parse_ufunction_specifiers(self, spec_str: str) -> Dict[str, Any]:
-        """解析 UFUNCTION 宏参数
-
-        示例：BlueprintCallable, Category="MyCategory", meta=(ToolTip="...")
-        """
+        """解析 UFUNCTION 宏参数"""
         specifiers = {}
 
         if not spec_str:
@@ -344,7 +397,7 @@ class CppParser:
         # 提取简单标志位
         flags = ['BlueprintCallable', 'BlueprintPure', 'BlueprintImplementableEvent',
                 'BlueprintNativeEvent', 'Exec', 'Server', 'Client', 'NetMulticast',
-                'Reliable', 'Unreliable', 'CallInEditor']
+                'Reliable', 'Unreliable', 'CallInEditor', 'BlueprintInternalUseOnly']
 
         for flag in flags:
             if flag in spec_str:
@@ -360,8 +413,6 @@ class CppParser:
         if meta_match:
             meta_content = meta_match.group(1)
             specifiers['meta'] = {}
-
-            # 解析 meta 中的键值对
             for kv_match in re.finditer(r'(\w+)\s*=\s*"([^"]*)"', meta_content):
                 specifiers['meta'][kv_match.group(1)] = kv_match.group(2)
 
@@ -382,58 +433,8 @@ class CppParser:
             if info.is_uclass
         ]
 
-    def _parse_uproperty_specifiers(self, spec_str: str) -> Dict[str, Any]:
-        """解析 UPROPERTY 宏参数
-
-        示例：EditAnywhere, BlueprintReadWrite, Category="MyCategory", meta=(ClampMin=0, ClampMax=10)
-        """
-        specifiers = {}
-
-        if not spec_str:
-            return specifiers
-
-        # 提取简单标志位
-        flags = ['EditAnywhere', 'EditDefaultsOnly', 'EditInstanceOnly', 'EditFixedSize',
-                'VisibleAnywhere', 'VisibleDefaultsOnly', 'VisibleInstanceOnly',
-                'BlueprintReadWrite', 'BlueprintReadOnly', 'BlueprintGetter', 'BlueprintSetter',
-                'Transient', 'DuplicateTransient', 'TextExportTransien', 'NonPIEDuplicateTransient',
-                'Export', 'EditInline', 'NoClear', 'SimpleDisplay', 'AdvancedDisplay',
-                'SaveGame', 'AssetRegistrySearchable', 'Interp', 'NonTransactional',
-                'Instanced', 'GlobalConfig', 'Config', 'Localized']
-
-        for flag in flags:
-            if flag in spec_str:
-                specifiers[flag] = True
-
-        # 提取 Category
-        cat_match = re.search(r'Category\s*=\s*"([^"]*)"', spec_str)
-        if cat_match:
-            specifiers['Category'] = cat_match.group(1)
-
-        # 提取 meta 参数
-        meta_match = re.search(r'meta\s*=\s*\(([^)]+)\)', spec_str)
-        if meta_match:
-            meta_content = meta_match.group(1)
-            specifiers['meta'] = {}
-
-            # 解析 meta 中的键值对（支持带引号和不带引号）
-            for kv_match in re.finditer(r'(\w+)\s*=\s*("[^"]*"|[^,)]+)', meta_content):
-                key = kv_match.group(1)
-                value = kv_match.group(2).strip('"')
-                specifiers['meta'][key] = value
-
-        return specifiers
-
     def get_inheritance_chain(self, class_name: str) -> List[str]:
-        """
-        获取类的继承链
-
-        Args:
-            class_name: 类名
-
-        Returns:
-            继承链 [父类, ..., 当前类]
-        """
+        """获取类的继承链"""
         chain = [class_name]
         current = class_name
 
@@ -447,20 +448,14 @@ class CppParser:
         return list(reversed(chain))
 
     def format_function_signature(self, func_info: FunctionInfo) -> str:
-        """格式化函数签名为可读字符串
-
-        示例输出: "bool LoadTerrainData(const FString& FilePath, int32 LOD = 0)"
-        """
-        # 构建参数列表
+        """格式化函数签名为可读字符串"""
         params_str = ", ".join([
             f"{p.type} {p.name}" + (f" = {p.default_value}" if p.default_value else "")
             for p in func_info.parameters
         ])
 
-        # 构建完整签名
         signature = f"{func_info.return_type} {func_info.name}({params_str})"
 
-        # 添加修饰符
         if func_info.is_const:
             signature += " const"
         if func_info.is_override:

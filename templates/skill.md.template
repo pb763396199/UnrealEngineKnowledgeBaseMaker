@@ -1,76 +1,64 @@
 ---
 name: ue5kb-{ENGINE_VERSION}
-description: 查询 UE{ENGINE_VERSION} 引擎知识库（模块级 + 代码级查询）
+description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函数信息
 ---
 
-# UE{ENGINE_VERSION} 知识库查询技能
+# UE{ENGINE_VERSION} 引擎源码知识库查询
 
-## 技能说明
+## 何时使用此技能
 
-此技能用于查询虚幻引擎 {ENGINE_VERSION} 源码知识库，支持**模块级查询**和**代码级查询**。
+当用户询问关于 **虚幻引擎 {ENGINE_VERSION} 源码** 的问题时，使用此技能。常见的查询模式包括：
+
+### 模块相关查询
+- "Core 模块有哪些依赖？"
+- "列出所有 Runtime 模块"
+- "搜索包含 'Network' 的模块"
+- "Engine 模块依赖哪些其他模块？"
+
+### 类相关查询
+- "AActor 类的继承关系是什么？"
+- "UObject 类有哪些方法？"
+- "查找包含 'Character' 的类"
+- "FString 类在哪个模块？"
+- "哪些类继承自 AActor？"
+
+### 函数相关查询
+- "BeginPlay 函数的定义是什么？"
+- "GetWorld 函数在哪些模块中定义？"
+- "查找 Blueprint 可调用的函数"
+- "ProcessEvent 函数的签名是什么？"
+
+## 可用的查询函数
+
+### 模块级查询
+- `query_module_dependencies(module_name)` - 查询模块依赖关系
+- `search_modules(keyword)` - 搜索包含关键字的模块
+- `get_statistics()` - 获取知识库统计信息
+
+### 代码级查询
+- `query_class_info(class_name)` - 查询类的详细信息
+- `query_class_hierarchy(class_name, depth=3)` - 查询类的继承层次
+- `query_module_classes(module_name, class_type=None)` - 查询模块中的所有类
+- `query_function_info(function_name, module_hint=None)` - 查询函数信息
+- `search_classes(keyword, limit=50)` - 搜索包含关键字的类
+
+## 使用建议
+
+1. **优先使用精确查询**：如果知道具体的类名或模块名，直接调用对应的查询函数
+2. **使用搜索功能**：如果只知道关键字，使用 `search_modules` 或 `search_classes`
+3. **结果限制**：大型查询结果会自动截断，如需完整结果请使用更精确的查询条件
 
 ## 知识库路径
 
-知识库存储在: `{KB_PATH}`
+知识库位于: `{KB_PATH}`
 
-## 功能特性
+## 示例对话
 
-### 1. 模块级查询（使用 global_index）
+**用户**: "AActor 类继承自什么？"
+**助手**: 查询 AActor 的继承关系... (调用 `query_class_hierarchy("AActor")`)
 
-- 查询模块依赖关系
-- 查询模块分类和统计信息
-- 搜索模块
+**用户**: "Core 模块有哪些依赖？"
+**助手**: 查询 Core 模块的依赖关系... (调用 `query_module_dependencies("Core")`)
 
-### 2. 代码级查询（使用 module_graphs）
-
-- 查询类的继承关系
-- 查询类的方法列表
-- 查询函数定义
-- 搜索类和函数
-- 查询文件信息
-
-## 使用示例
-
-### 模块级查询
-
-```
-"Core 模块有哪些依赖？"
-"列出所有 Runtime 模块"
-"搜索包含 Mass 的模块"
-"引擎有多少个模块？"
-```
-
-### 代码级查询
-
-```
-"AActor 类继承自什么？"
-"AActor 类有哪些方法？"
-"查询 FString 类的详细信息"
-"搜索包含 Player 的类"
-"Core 模块中有哪些 UCLASS？"
-"查询 BeginPlay 函数在哪些模块中定义"
-```
-
-## 主要函数
-
-### 模块查询
-- `query_module_dependencies(module_name)` - 查询模块依赖
-- `search_modules(keyword)` - 搜索模块
-- `get_statistics()` - 获取统计信息
-
-### 代码查询
-- `query_class_info(class_name)` - 查询类信息
-- `query_class_hierarchy(class_name)` - 查询类继承层次
-- `query_module_classes(module_name)` - 查询模块中的所有类
-- `query_function_info(function_name)` - 查询函数信息
-- `search_classes(keyword)` - 搜索类
-
-## 性能优化
-
-- **智能缓存**: 已加载的模块图谱会缓存在内存中
-- **优先级搜索**: 优先搜索核心模块（Core, Engine等）
-- **结果限制**: 大型查询结果会自动截断，避免超时
-
-## 自动加载
-
-知识库会自动从 `{KB_PATH}` 加载。
+**用户**: "查找所有包含 PlayerController 的类"
+**助手**: 搜索包含 PlayerController 的类... (调用 `search_classes("PlayerController")`)

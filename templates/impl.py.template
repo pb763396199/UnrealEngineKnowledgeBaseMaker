@@ -1,14 +1,12 @@
 """
-UE{ENGINE_VERSION} 知识库查询实现 - 增强版
+UE{ENGINE_VERSION} 知识库查询实现
 
-功能:
-1. 模块级查询 - 使用 global_index (SQLite)
-2. 代码级查询 - 使用 module_graphs (PKL)
+提供模块级查询和代码级查询功能
 """
 
 import os
-import sys
 import pickle
+import sqlite3
 import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -16,43 +14,26 @@ from typing import Dict, List, Any, Optional
 # 知识库路径 (绝对路径)
 KB_PATH = Path(r"{KB_PATH}")
 
-# 添加知识库路径到 Python 路径
-engine_root = KB_PATH.parent
-if str(engine_root) not in sys.path:
-    sys.path.insert(0, str(engine_root))
-
-# 导入知识库模块
-try:
-    from ue5_kb.core.config import Config
-    from ue5_kb.core.global_index import GlobalIndex
-    from ue5_kb.core.optimized_index import FastQueryInterface
-    from ue5_kb.core.module_graph import ModuleGraph
-    # Context Optimization 模块（v2.2 新增）
-    from ue5_kb.query.layered_query import LayeredQueryInterface
-    from ue5_kb.query.result_cache import ResultCache, get_result_cache
-    from ue5_kb.query.token_budget import TokenBudget, get_token_budget, ContextCategory
-except ImportError as e:
-    raise ImportError(
-        f"无法导入知识库模块: {{{{e}}}}\\n"
-        f"请确保知识库已正确生成在: {{{KB_PATH}}}"
-    )
-
 # 全局缓存
-_global_index = None
+_global_index_cache = None
 _module_graphs_cache = {{}}
+_db_connection = None
 
-# Context Optimization 实例（v2.2 新增）
-_layered_query = LayeredQueryInterface(str(KB_PATH))
-_result_cache = get_result_cache()
-_token_budget = get_token_budget()
 
-def _get_global_index() -> GlobalIndex:
-    """获取全局索引（单例）"""
-    global _global_index
-    if _global_index is None:
-        config = Config(str(KB_PATH / "config.yaml"))
-        _global_index = GlobalIndex(config)
-    return _global_index
+# ============================================================================
+# 辅助函数
+# ============================================================================
+
+def _get_db_connection() -> sqlite3.Connection:
+    """获取 SQLite 数据库连接"""
+    global _db_connection
+    if _db_connection is None:
+        db_path = KB_PATH / "global_index" / "index.db"
+        if not db_path.exists():
+            raise FileNotFoundError(f"数据库不存在: {{db_path}}")
+        _db_connection = sqlite3.connect(str(db_path))
+    return _db_connection
+
 
 def _load_module_graph(module_name: str) -> Optional[Any]:
     """加载模块图谱（带缓存）"""
@@ -70,45 +51,73 @@ def _load_module_graph(module_name: str) -> Optional[Any]:
             _module_graphs_cache[module_name] = graph
             return graph
     except Exception as e:
-        print(f"警告: 加载模块图谱 {{module_name}} 失败: {{e}}")
         return None
 
+
+def _get_global_modules() -> Dict[str, Any]:
+    """获取所有模块信息（从 SQLite）"""
+    global _global_index_cache
+    if _global_index_cache is not None:
+        return _global_index_cache
+
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT name, path, category, dependencies, public_dependencies, private_dependencies
+        FROM modules
+    ''')
+
+    result = {{}}
+    for row in cursor.fetchall():
+        name, path, category, deps, pub_deps, priv_deps = row
+        result[name] = {{
+            'name': name,
+            'path': path,
+            'category': category,
+            'dependencies': json.loads(deps) if deps else [],
+            'public_dependencies': json.loads(pub_deps) if pub_deps else [],
+            'private_dependencies': json.loads(priv_deps) if priv_deps else []
+        }}
+
+    _global_index_cache = result
+    return result
+
+
 # ============================================================================
-# 模块级查询功能 - 使用 global_index
+# 模块级查询功能
 # ============================================================================
 
 def query_module_dependencies(module_name: str) -> Dict[str, Any]:
-    """查询模块依赖"""
-    index = _get_global_index()
+    """查询模块依赖关系"""
+    all_modules = _get_global_modules()
 
-    module_info = index.get_module(module_name)
-    if not module_info:
-        return {{"error": f"未找到模块: {{module_name}}"}}
+    if module_name not in all_modules:
+        return {{"error": f"未找到模块: {{module_name}}", "suggestions": list(all_modules.keys())[:10]}}
 
-    deps = module_info.get('dependencies', [])
+    info = all_modules[module_name]
     return {{
         "module": module_name,
-        "dependencies": deps,
-        "public_dependencies": module_info.get('public_dependencies', []),
-        "private_dependencies": module_info.get('private_dependencies', []),
-        "category": module_info.get('category'),
-        "file_count": module_info.get('file_count'),
-        "estimated_lines": module_info.get('estimated_lines')
+        "path": info['path'],
+        "category": info['category'],
+        "dependencies": info['dependencies'],
+        "public_dependencies": info['public_dependencies'],
+        "private_dependencies": info['private_dependencies']
     }}
 
+
 def search_modules(keyword: str) -> Dict[str, Any]:
-    """搜索模块"""
-    index = _get_global_index()
-    all_modules = index.get_all_modules()
+    """搜索包含关键字的模块"""
+    all_modules = _get_global_modules()
     results = []
 
     keyword_lower = keyword.lower()
-    for module_name, info in all_modules.items():
-        if keyword_lower in module_name.lower():
+    for name, info in all_modules.items():
+        if keyword_lower in name.lower():
             results.append({{
-                "name": module_name,
-                "category": info.get('category'),
-                "path": info.get('path')
+                "name": name,
+                "category": info['category'],
+                "path": info['path']
             }})
 
     return {{
@@ -117,13 +126,25 @@ def search_modules(keyword: str) -> Dict[str, Any]:
         "results": results[:50]
     }}
 
+
 def get_statistics() -> Dict[str, Any]:
-    """获取统计信息"""
-    index = _get_global_index()
-    return index.get_statistics()
+    """获取知识库统计信息"""
+    all_modules = _get_global_modules()
+
+    # 统计分类
+    categories = {{}}
+    for info in all_modules.values():
+        cat = info['category'] or 'Unknown'
+        categories[cat] = categories.get(cat, 0) + 1
+
+    return {{
+        "total_modules": len(all_modules),
+        "categories": categories
+    }}
+
 
 # ============================================================================
-# 代码级查询功能 - 使用 module_graphs
+# 代码级查询功能
 # ============================================================================
 
 def query_class_info(class_name: str) -> Dict[str, Any]:
@@ -146,48 +167,17 @@ def query_class_info(class_name: str) -> Dict[str, Any]:
     # 提取类信息
     node_data = graph.nodes[class_node]
 
-    # 查找父类
-    parent_classes = []
-    for source, target, edge_data in graph.edges(class_node, data=True):
-        if edge_data.get('type') == 'INHERITS':
-            parent_name = target.replace('class_', '')
-            parent_classes.append(parent_name)
-
-    # 查找接口
-    interfaces = []
-    for source, target, edge_data in graph.edges(class_node, data=True):
-        if edge_data.get('type') == 'IMPLEMENTS':
-            interface_name = target.replace('class_', '')
-            interfaces.append(interface_name)
-
-    # 查找方法
-    methods = []
-    for source, target, edge_data in graph.edges(class_node, data=True):
-        if edge_data.get('type') == 'HAS_METHOD':
-            method_data = graph.nodes.get(target, {{}})
-            methods.append(method_data.get('name', target))
-
-    # 查找所在文件
-    defined_in_file = None
-    for source, target in graph.in_edges(class_node):
-        source_data = graph.nodes.get(source, {{}})
-        if source_data.get('type') == 'File':
-            defined_in_file = source_data.get('name', source)
-            break
-
     return {{
         "class_name": class_name,
         "module": module_name,
-        "parent_classes": parent_classes,
-        "interfaces": interfaces,
-        "methods": methods[:50],
-        "total_methods": len(methods),
-        "file": defined_in_file,
+        "file": node_data.get('file', ''),
+        "line": node_data.get('line', 0),
+        "parent_classes": node_data.get('parent_classes', []),
         "is_uclass": node_data.get('is_uclass', False),
         "is_struct": node_data.get('is_struct', False),
-        "is_interface": node_data.get('is_interface', False),
-        "line_number": node_data.get('line_number')
+        "is_interface": node_data.get('is_interface', False)
     }}
+
 
 def query_class_hierarchy(class_name: str, depth: int = 3) -> Dict[str, Any]:
     """查询类的继承层次结构"""
@@ -218,6 +208,7 @@ def query_class_hierarchy(class_name: str, depth: int = 3) -> Dict[str, Any]:
         "depth": len(result)
     }}
 
+
 def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, Any]:
     """查询模块中的所有类"""
     graph = _load_module_graph(module_name)
@@ -226,7 +217,7 @@ def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, 
 
     classes = []
     for node, node_data in graph.nodes(data=True):
-        if node_data.get('type') != 'Class':
+        if node_data.get('type') != 'class':
             continue
 
         if class_type == 'uclass' and not node_data.get('is_uclass'):
@@ -241,8 +232,7 @@ def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, 
             "name": class_name,
             "is_uclass": node_data.get('is_uclass', False),
             "is_struct": node_data.get('is_struct', False),
-            "is_interface": node_data.get('is_interface', False),
-            "file": node_data.get('file_path')
+            "file": node_data.get('file', '')
         }})
 
     return {{
@@ -251,69 +241,26 @@ def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, 
         "classes": classes[:100]
     }}
 
+
 def query_function_info(function_name: str, module_hint: str = None) -> Dict[str, Any]:
-    """查询函数信息（优化版，使用函数索引）
+    """查询函数信息"""
+    results = []
 
-    Args:
-        function_name: 函数名称
-        module_hint: 模块提示（可选，用于加速查询）
-
-    Returns:
-        函数详细信息，包括完整签名、参数、Blueprint信息
-    """
-    # 尝试使用函数索引（性能：< 10ms）
-    try:
-        from ue5_kb.core.function_index import FunctionIndex
-
-        func_index_path = KB_PATH / "global_index" / "function_index.db"
-        if func_index_path.exists():
-            func_index = FunctionIndex(str(func_index_path))
-            results = func_index.query_by_name(function_name, module_hint)
-            func_index.close()
-
-            if results:
-                # 格式化输出
-                formatted_results = []
-                for r in results:
-                    formatted_results.append({{
-                        "function": r['name'],
-                        "module": r['module'],
-                        "class": r['class_name'],
-                        "signature": r['signature'],
-                        "return_type": r['return_type'],
-                        "parameters": r['parameters'],
-                        "location": f"{{r['file_path']}}:{{r['line_number']}}",
-                        "is_blueprint_callable": r['is_blueprint_callable'],
-                        "is_virtual": r['is_virtual'],
-                        "is_const": r['is_const'],
-                        "ufunction_specifiers": r['ufunction_specifiers']
-                    }})
-
-                return {{
-                    "function_name": function_name,
-                    "found_count": len(formatted_results),
-                    "results": formatted_results,
-                    "query_method": "index"
-                }}
-    except Exception as e:
-        print(f"函数索引查询失败，回退到图谱扫描: {{e}}")
-
-    # Fallback: 使用原有的图谱扫描方法（性能：500-2000ms）
+    # 确定要搜索的模块
     if module_hint:
         modules = [module_hint]
     else:
-        index = _get_global_index()
-        all_modules = index.get_all_modules()
+        all_modules = _get_global_modules()
         modules = list(all_modules.keys())[:50]
 
-    results = []
+    # 搜索函数
     for mod in modules:
         graph = _load_module_graph(mod)
         if not graph:
             continue
 
         for node, node_data in graph.nodes(data=True):
-            if node_data.get('type') != 'Function':
+            if node_data.get('type') != 'function':
                 continue
 
             if node_data.get('name') == function_name:
@@ -324,23 +271,21 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
                     "parameters": node_data.get('parameters', []),
                     "is_ufunction": node_data.get('is_ufunction', False),
                     "is_blueprint_callable": node_data.get('is_blueprint_callable', False),
-                    "file": node_data.get('file_path'),
-                    "line": node_data.get('line_number'),
-                    "class": node_data.get('class_name')
+                    "file": node_data.get('file', ''),
+                    "line": node_data.get('line', 0),
+                    "class": node_data.get('class_name', '')
                 }})
 
     return {{
         "function_name": function_name,
         "found_count": len(results),
-        "results": results,
-        "query_method": "graph_scan"
+        "results": results[:20]
     }}
+
 
 def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
     """搜索包含关键字的类"""
-    index = _get_global_index()
-    all_modules = index.get_all_modules()
-
+    all_modules = _get_global_modules()
     results = []
     keyword_lower = keyword.lower()
 
@@ -350,7 +295,7 @@ def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
             continue
 
         for node, node_data in graph.nodes(data=True):
-            if node_data.get('type') != 'Class':
+            if node_data.get('type') != 'class':
                 continue
 
             class_name = node_data.get('name', '')
@@ -359,7 +304,7 @@ def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
                     "class": class_name,
                     "module": module_name,
                     "is_uclass": node_data.get('is_uclass', False),
-                    "file": node_data.get('file_path')
+                    "file": node_data.get('file', '')
                 }})
 
                 if len(results) >= limit:
@@ -374,13 +319,14 @@ def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
         "results": results
     }}
 
+
 # ============================================================================
-# 辅助函数
+# 内部辅助函数
 # ============================================================================
 
 def _find_module_for_class(class_name: str) -> Optional[str]:
     """查找类所在的模块"""
-    index = _get_global_index()
+    all_modules = _get_global_modules()
 
     # 优先级列表
     priority_modules = ['Core', 'CoreUObject', 'Engine', 'Renderer', 'RHI']
@@ -392,189 +338,20 @@ def _find_module_for_class(class_name: str) -> Optional[str]:
             return module_name
 
     # 2. 搜索所有 Runtime 模块
-    runtime_modules = index.get_modules_by_category('Runtime')
-    for module_name in runtime_modules:
+    for module_name, info in all_modules.items():
+        if info.get('category') == 'Runtime':
+            if module_name in priority_modules:
+                continue
+            graph = _load_module_graph(module_name)
+            if graph and f"class_{{class_name}}" in graph.nodes:
+                return module_name
+
+    # 3. 搜索所有模块（限制前200个）
+    for module_name in list(all_modules.keys())[:200]:
         if module_name in priority_modules:
             continue
         graph = _load_module_graph(module_name)
         if graph and f"class_{{class_name}}" in graph.nodes:
             return module_name
 
-    # 3. 搜索所有模块（限制前200个）
-    all_modules = index.get_all_modules()
-    for module_name in list(all_modules.keys())[:200]:
-        if module_name in priority_modules or module_name in runtime_modules:
-            continue
-        graph = _load_module_graph(module_name)
-        if graph and f"class_{{class_name}}" in graph.nodes:
-            return module_name
-
     return None
-
-
-# ============================================================================
-# Context Optimization 查询函数（v2.2 新增）
-# ============================================================================
-
-def query_class_layered(class_name: str, detail_level: str = 'summary') -> Dict[str, Any]:
-    """
-    分层查询类信息（Context 优化版）
-
-    Args:
-        class_name: 类名
-        detail_level: 详情层级 - 'summary' | 'details' | 'source'
-
-    Returns:
-        分层的查询结果
-
-    Token 使用:
-        - summary: ~150 tokens
-        - details: ~800 tokens
-        - source: ~2000+ tokens
-    """
-    return _layered_query.query_class(class_name, detail_level)
-
-
-def query_function_layered(function_name: str, detail_level: str = 'summary') -> Dict[str, Any]:
-    """
-    分层查询函数信息（Context 优化版）
-
-    Args:
-        function_name: 函数名
-        detail_level: 详情层级 - 'summary' | 'details'
-
-    Returns:
-        分层的查询结果
-
-    Token 使用:
-        - summary: ~50 tokens
-        - details: ~300 tokens
-    """
-    return _layered_query.query_function(function_name, detail_level)
-
-
-def get_full_results(ref_id: str) -> Any:
-    """
-    通过引用ID获取完整结果（Observation Masking 支持）
-
-    Args:
-        ref_id: 引用ID（由屏蔽的查询返回）
-
-    Returns:
-        完整的查询结果
-    """
-    result = _result_cache.retrieve(ref_id)
-    if result is None:
-        return {{"error": f"引用ID已过期或不存在: {{ref_id}}"}}
-    return result
-
-
-def get_token_statistics() -> Dict[str, Any]:
-    """
-    获取 Token 预算统计
-
-    Returns:
-        各类别的 Token 使用情况
-    """
-    return _token_budget.get_statistics()
-
-
-def get_cache_statistics() -> Dict[str, Any]:
-    """
-    获取缓存统计
-
-    Returns:
-        缓存使用情况
-    """
-    return _result_cache.get_statistics()
-
-
-# ============================================================================
-# Phase 2 查询函数：调用关系和代码示例（v2.3 规划）
-# ============================================================================
-
-def query_function_callers(function_name: str, depth: int = 2) -> Dict[str, Any]:
-    """
-    查询谁调用了此函数（反向依赖分析）
-
-    Args:
-        function_name: 函数名
-        depth: 搜索深度
-
-    Returns:
-        调用链列表
-
-    注意: 需要 call_graphs 数据（Phase 2.1）
-    """
-    # TODO: 集成 CallAnalyzer
-    return {{
-        "function": function_name,
-        "callers": [],
-        "note": "功能开发中 - 需要重新生成知识库以包含调用关系数据"
-    }}
-
-
-def query_function_callees(function_name: str, depth: int = 2) -> Dict[str, Any]:
-    """
-    查询此函数调用了谁（正向依赖分析）
-
-    Args:
-        function_name: 函数名
-        depth: 搜索深度
-
-    Returns:
-        调用链列表
-
-    注意: 需要 call_graphs 数据（Phase 2.1）
-    """
-    # TODO: 集成 CallAnalyzer
-    return {{
-        "function": function_name,
-        "callees": [],
-        "note": "功能开发中 - 需要重新生成知识库以包含调用关系数据"
-    }}
-
-
-def query_usage_examples(entity_name: str, entity_type: str = 'auto', min_quality: float = 0.5) -> Dict[str, Any]:
-    """
-    查询代码使用示例
-
-    Args:
-        entity_name: 实体名称（类名或函数名）
-        entity_type: 实体类型 - 'auto'| 'class' | 'function'
-        min_quality: 最低质量评分
-
-    Returns:
-        代码示例列表
-
-    注意: 需要 code_examples 数据（Phase 2.2）
-    """
-    # TODO: 集成 ExampleExtractor
-    return {{
-        "entity": entity_name,
-        "examples": [],
-        "note": "功能开发中 - 需要重新生成知识库以包含代码示例数据"
-    }}
-
-
-def query_call_chain(from_func: str, to_func: str, max_depth: int = 5) -> Dict[str, Any]:
-    """
-    查询两个函数之间的调用路径
-
-    Args:
-        from_func: 起始函数
-        to_func: 目标函数
-        max_depth: 最大深度
-
-    Returns:
-        调用路径
-
-    注意: 需要 call_graphs 数据（Phase 2.1）
-    """
-    # TODO: 集成 CallAnalyzer
-    return {{
-        "from": from_func,
-        "to": to_func,
-        "path": [],
-        "note": "功能开发中 - 需要重新生成知识库以包含调用关系数据"
-    }}
