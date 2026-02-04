@@ -355,3 +355,103 @@ def _find_module_for_class(class_name: str) -> Optional[str]:
             return module_name
 
     return None
+
+
+# ============================================================================
+# 命令行接口 (CLI)
+# ============================================================================
+
+if __name__ == "__main__":
+    import sys
+    import json
+
+    def _print_usage():
+        print("Usage: python impl.py <command> [args...]", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Commands:", file=sys.stderr)
+        print("  query_class_info <class_name>              - 查询类信息", file=sys.stderr)
+        print("  query_class_hierarchy <class_name> [depth] - 查询类继承关系", file=sys.stderr)
+        print("  query_module_dependencies <module_name>    - 查询模块依赖", file=sys.stderr)
+        print("  query_module_classes <module_name> [type]  - 查询模块中的类", file=sys.stderr)
+        print("  query_function_info <function_name> [hint] - 查询函数信息", file=sys.stderr)
+        print("  search_classes <keyword> [limit]           - 搜索类", file=sys.stderr)
+        print("  search_modules <keyword>                   - 搜索模块", file=sys.stderr)
+        print("  get_statistics                             - 获取统计信息", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Examples:", file=sys.stderr)
+        print('  python impl.py query_class_info AActor', file=sys.stderr)
+        print('  python impl.py query_class_hierarchy AActor 5', file=sys.stderr)
+        print('  python impl.py search_classes "Player" 20', file=sys.stderr)
+        sys.exit(1)
+
+    if len(sys.argv) < 2:
+        _print_usage()
+
+    command = sys.argv[1]
+
+    try:
+        if command == "query_class_info":
+            if len(sys.argv) < 3:
+                print("Error: Missing class_name argument", file=sys.stderr)
+                _print_usage()
+            result = query_class_info(sys.argv[2])
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_class_hierarchy":
+            if len(sys.argv) < 3:
+                print("Error: Missing class_name argument", file=sys.stderr)
+                _print_usage()
+            depth = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+            result = query_class_hierarchy(sys.argv[2], depth)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_module_dependencies":
+            if len(sys.argv) < 3:
+                print("Error: Missing module_name argument", file=sys.stderr)
+                _print_usage()
+            result = query_module_dependencies(sys.argv[2])
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_module_classes":
+            if len(sys.argv) < 3:
+                print("Error: Missing module_name argument", file=sys.stderr)
+                _print_usage()
+            class_type = sys.argv[3] if len(sys.argv) > 3 else None
+            result = query_module_classes(sys.argv[2], class_type)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_function_info":
+            if len(sys.argv) < 3:
+                print("Error: Missing function_name argument", file=sys.stderr)
+                _print_usage()
+            module_hint = sys.argv[3] if len(sys.argv) > 3 else None
+            result = query_function_info(sys.argv[2], module_hint)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "search_classes":
+            if len(sys.argv) < 3:
+                print("Error: Missing keyword argument", file=sys.stderr)
+                _print_usage()
+            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 50
+            result = search_classes(sys.argv[2], limit)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "search_modules":
+            if len(sys.argv) < 3:
+                print("Error: Missing keyword argument", file=sys.stderr)
+                _print_usage()
+            result = search_modules(sys.argv[2])
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "get_statistics":
+            result = get_statistics()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        else:
+            print(f"Error: Unknown command '{command}'", file=sys.stderr)
+            _print_usage()
+
+    except Exception as e:
+        error_result = {"error": str(e), "command": command, "args": sys.argv[2:]}
+        print(json.dumps(error_result, ensure_ascii=False, indent=2))
+        sys.exit(1)

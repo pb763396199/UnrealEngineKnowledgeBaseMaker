@@ -180,6 +180,7 @@ class GenerateStage(PipelineStage):
         variables = {
             'ENGINE_VERSION': engine_version,
             'KB_PATH': str(kb_path).replace('\\', '\\\\'),
+            'SKILL_PATH': str(skill_path),
             'PLUGIN_NAME': self.plugin_name or 'Unknown',
         }
 

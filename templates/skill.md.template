@@ -1,13 +1,16 @@
 ---
 name: ue5kb-{ENGINE_VERSION}
-description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函数信息
+description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函数信息。当用户询问虚幻引擎{ENGINE_VERSION}源码问题时，使用此技能并通过 impl.py CLI 查询知识库，不要直接使用Glob/Grep搜索源码。
 ---
 
 # UE{ENGINE_VERSION} 引擎源码知识库查询
 
 ## 何时使用此技能
 
-当用户询问关于 **虚幻引擎 {ENGINE_VERSION} 源码** 的问题时，使用此技能。常见的查询模式包括：
+当用户询问关于 **虚幻引擎 {ENGINE_VERSION} 源码** 的问题时，使用此技能。
+
+**重要**: 始终使用下面的 CLI 命令查询知识库，不要直接使用 Glob/Grep 搜索源码。
+
 
 ### 模块相关查询
 - "Core 模块有哪些依赖？"
@@ -28,37 +31,85 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 - "查找 Blueprint 可调用的函数"
 - "ProcessEvent 函数的签名是什么？"
 
-## 可用的查询函数
+## 如何查询（重要）
 
-### 模块级查询
-- `query_module_dependencies(module_name)` - 查询模块依赖关系
-- `search_modules(keyword)` - 搜索包含关键字的模块
-- `get_statistics()` - 获取知识库统计信息
+**必须使用 CLI 命令查询知识库，不要使用 Glob/Grep 搜索源码。**
 
-### 代码级查询
-- `query_class_info(class_name)` - 查询类的详细信息
-- `query_class_hierarchy(class_name, depth=3)` - 查询类的继承层次
-- `query_module_classes(module_name, class_type=None)` - 查询模块中的所有类
-- `query_function_info(function_name, module_hint=None)` - 查询函数信息
-- `search_classes(keyword, limit=50)` - 搜索包含关键字的类
+### 查询步骤
+
+1. **使用 Bash 工具执行 impl.py 脚本:**
+   ```bash
+   python "{SKILL_PATH}/impl.py" <command> [args...]
+   ```
+
+2. **解析返回的 JSON 结果**
+
+3. **向用户展示结果**
+
+### 可用 CLI 命令
+
+| 命令 | 参数 | 说明 |
+|------|------|------|
+| `query_class_info` | `<class_name>` | 查询类的详细信息 |
+| `query_class_hierarchy` | `<class_name> [depth=3]` | 查询类的继承层次 |
+| `query_module_dependencies` | `<module_name>` | 查询模块依赖关系 |
+| `query_module_classes` | `<module_name> [class_type]` | 查询模块中的所有类 |
+| `query_function_info` | `<function_name> [module_hint]` | 查询函数信息 |
+| `search_classes` | `<keyword> [limit=50]` | 搜索包含关键字的类 |
+| `search_modules` | `<keyword>` | 搜索包含关键字的模块 |
+| `get_statistics` | - | 获取知识库统计信息 |
+
+### 查询示例
+
+```bash
+# 查询类信息
+python "{SKILL_PATH}/impl.py" query_class_info AActor
+
+# 查询类继承关系（深度5层）
+python "{SKILL_PATH}/impl.py" query_class_hierarchy AActor 5
+
+# 查询模块依赖
+python "{SKILL_PATH}/impl.py" query_module_dependencies Core
+
+# 搜索类（限制20个结果）
+python "{SKILL_PATH}/impl.py" search_classes Player 20
+
+# 获取统计信息
+python "{SKILL_PATH}/impl.py" get_statistics
+```
 
 ## 使用建议
 
-1. **优先使用精确查询**：如果知道具体的类名或模块名，直接调用对应的查询函数
-2. **使用搜索功能**：如果只知道关键字，使用 `search_modules` 或 `search_classes`
-3. **结果限制**：大型查询结果会自动截断，如需完整结果请使用更精确的查询条件
+1. **始终使用 CLI 查询**：不要直接使用 Glob/Grep 搜索源码，知识库查询更快更准确
+2. **优先使用精确查询**：如果知道具体的类名或模块名，使用 `query_class_info` 或 `query_module_dependencies`
+3. **使用搜索功能**：如果只知道关键字，使用 `search_modules` 或 `search_classes`
+4. **处理错误结果**：如果返回的 JSON 包含 `error` 字段，说明查询失败
 
 ## 知识库路径
 
 知识库位于: `{KB_PATH}`
 
+Skill 路径: `{SKILL_PATH}`
+
 ## 示例对话
 
 **用户**: "AActor 类继承自什么？"
-**助手**: 查询 AActor 的继承关系... (调用 `query_class_hierarchy("AActor")`)
+**助手**:
+```bash
+python "{SKILL_PATH}/impl.py" query_class_hierarchy AActor
+```
+→ 解析 JSON 结果并展示继承链
 
 **用户**: "Core 模块有哪些依赖？"
-**助手**: 查询 Core 模块的依赖关系... (调用 `query_module_dependencies("Core")`)
+**助手**:
+```bash
+python "{SKILL_PATH}/impl.py" query_module_dependencies Core
+```
+→ 解析 JSON 结果并展示依赖列表
 
 **用户**: "查找所有包含 PlayerController 的类"
-**助手**: 搜索包含 PlayerController 的类... (调用 `search_classes("PlayerController")`)
+**助手**:
+```bash
+python "{SKILL_PATH}/impl.py" search_classes PlayerController
+```
+→ 解析 JSON 结果并展示匹配的类

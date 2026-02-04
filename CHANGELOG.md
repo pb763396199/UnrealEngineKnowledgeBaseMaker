@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added ✨
 
+**Skill CLI 接口**
+- **命令行查询接口**: 为 impl.py 添加完整的 CLI 接口，支持通过 Bash 直接调用查询函数
+- **8 个查询命令**: query_class_info, query_class_hierarchy, query_module_dependencies, query_module_classes, query_function_info, search_classes, search_modules, get_statistics
+- **JSON 输出格式**: 所有查询命令返回结构化 JSON，便于 Claude Code 解析
+- **使用指导文档**: skill.md 添加明确的 CLI 调用指导，避免 Claude Code 使用 Glob/Grep 搜索源码
+- **SKILL_PATH 变量**: 生成的 skill.md 包含正确的 Skill 路径，用于 CLI 命令示例
+
+### Fixed 🐛
+
+- **Skill 执行问题**: 修复 Claude Code 无法使用 Skill 脚本检索代码的问题，现在通过 CLI 接口直接查询知识库
+
+### Changed 📦
+
+- impl.py 模板添加 `if __name__ == "__main__":` CLI 入口点
+- skill.md 模板添加 "如何查询" 章节，包含命令表格和示例
+- generate.py 添加 SKILL_PATH 变量替换
+
+**Phase 2: C++ Parser 增强模块图谱内容**
+
 **Phase 2: C++ Parser 增强模块图谱内容**
 - **多重继承解析**: 解析完整的继承列表，支持 `class A : public B, public IInterface, public IOther`
 - **接口识别**: 自动识别接口类（I 开头的类名），填充 `interfaces` 字段
