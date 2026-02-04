@@ -18,6 +18,8 @@ KB_PATH = Path(r"{KB_PATH}")
 _global_index_cache = None
 _module_graphs_cache = {{}}
 _db_connection = None
+_class_index_cache = None
+_function_index_cache = None
 
 
 # ============================================================================
@@ -84,6 +86,28 @@ def _get_global_modules() -> Dict[str, Any]:
     return result
 
 
+def _get_class_index():
+    """获取类索引"""
+    global _class_index_cache
+    if _class_index_cache is None:
+        from ue5_kb.core.class_index import ClassIndex
+        db_path = KB_PATH / "global_index" / "class_index.db"
+        if db_path.exists():
+            _class_index_cache = ClassIndex(str(db_path))
+    return _class_index_cache
+
+
+def _get_function_index():
+    """获取函数索引"""
+    global _function_index_cache
+    if _function_index_cache is None:
+        from ue5_kb.core.function_index import FunctionIndex
+        db_path = KB_PATH / "global_index" / "function_index.db"
+        if db_path.exists():
+            _function_index_cache = FunctionIndex(str(db_path))
+    return _function_index_cache
+
+
 # ============================================================================
 # 模块级查询功能
 # ============================================================================
@@ -93,7 +117,12 @@ def query_module_dependencies(module_name: str) -> Dict[str, Any]:
     all_modules = _get_global_modules()
 
     if module_name not in all_modules:
-        return {{"error": f"未找到模块: {{module_name}}", "suggestions": list(all_modules.keys())[:10]}}
+        return {{
+            "error": f"未找到模块: {{module_name}}",
+            "fallback_command": f"search_modules {{module_name}}",
+            "hint": "模块名可能已变更或拼写不同，建议使用模糊搜索",
+            "suggestions": list(all_modules.keys())[:10]
+        }}
 
     info = all_modules[module_name]
     return {{
@@ -152,7 +181,11 @@ def query_class_info(class_name: str) -> Dict[str, Any]:
     # 查找类所在的模块
     module_name = _find_module_for_class(class_name)
     if not module_name:
-        return {{"error": f"未找到类: {{class_name}}"}}
+        return {{
+            "error": f"未找到类: {{class_name}}",
+            "fallback_command": f"search_classes {{class_name}}",
+            "hint": "类名可能已变更或拼写不同，建议使用模糊搜索"
+        }}
 
     # 加载模块图谱
     graph = _load_module_graph(module_name)
@@ -276,6 +309,15 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
                     "class": node_data.get('class_name', '')
                 }})
 
+    if not results:
+        # 提取关键字用于模糊搜索
+        keyword = function_name[:8] if len(function_name) > 8 else function_name
+        return {{
+            "error": f"未找到函数: {{function_name}}",
+            "fallback_command": f"search_functions {{keyword}}",
+            "hint": "函数名可能已变更或拼写不同，建议使用模糊搜索"
+        }}
+
     return {{
         "function_name": function_name,
         "found_count": len(results),
@@ -285,39 +327,101 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
 
 def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
     """搜索包含关键字的类"""
-    all_modules = _get_global_modules()
-    results = []
-    keyword_lower = keyword.lower()
+    class_idx = _get_class_index()
 
-    for module_name in list(all_modules.keys())[:100]:
-        graph = _load_module_graph(module_name)
-        if not graph:
-            continue
+    if class_idx:
+        # 使用索引搜索（快速 < 10ms）
+        results = class_idx.search_by_keyword(keyword, limit)
+        return {{
+            "keyword": keyword,
+            "found_count": len(results),
+            "results": results
+        }}
+    else:
+        # 回退到遍历搜索（慢速 ~5s）
+        all_modules = _get_global_modules()
+        results = []
+        keyword_lower = keyword.lower()
 
-        for node, node_data in graph.nodes(data=True):
-            if node_data.get('type') != 'class':
+        for module_name in list(all_modules.keys())[:100]:
+            graph = _load_module_graph(module_name)
+            if not graph:
                 continue
 
-            class_name = node_data.get('name', '')
-            if keyword_lower in class_name.lower():
-                results.append({{
-                    "class": class_name,
-                    "module": module_name,
-                    "is_uclass": node_data.get('is_uclass', False),
-                    "file": node_data.get('file', '')
-                }})
+            for node, node_data in graph.nodes(data=True):
+                if node_data.get('type') != 'class':
+                    continue
 
-                if len(results) >= limit:
-                    break
+                class_name = node_data.get('name', '')
+                if keyword_lower in class_name.lower():
+                    results.append({{
+                        "class": class_name,
+                        "module": module_name,
+                        "is_uclass": node_data.get('is_uclass', False),
+                        "file": node_data.get('file', '')
+                    }})
 
-        if len(results) >= limit:
-            break
+                    if len(results) >= limit:
+                        break
 
-    return {{
-        "keyword": keyword,
-        "found_count": len(results),
-        "results": results
-    }}
+            if len(results) >= limit:
+                break
+
+        return {{
+            "keyword": keyword,
+            "found_count": len(results),
+            "results": results
+        }}
+
+
+def search_functions(keyword: str, limit: int = 50) -> Dict[str, Any]:
+    """搜索包含关键字的函数"""
+    func_idx = _get_function_index()
+
+    if func_idx:
+        # 使用索引搜索（快速 < 10ms）
+        results = func_idx.search_by_keyword(keyword, limit)
+        return {{
+            "keyword": keyword,
+            "found_count": len(results),
+            "results": results
+        }}
+    else:
+        # 回退到遍历搜索（慢速 ~8s）
+        all_modules = _get_global_modules()
+        results = []
+        keyword_lower = keyword.lower()
+
+        for module_name in list(all_modules.keys())[:100]:
+            graph = _load_module_graph(module_name)
+            if not graph:
+                continue
+
+            for node, node_data in graph.nodes(data=True):
+                if node_data.get('type') != 'function':
+                    continue
+
+                function_name = node_data.get('name', '')
+                if keyword_lower in function_name.lower():
+                    results.append({{
+                        "function": function_name,
+                        "module": module_name,
+                        "return_type": node_data.get('return_type', ''),
+                        "file": node_data.get('file', ''),
+                        "class": node_data.get('class_name', '')
+                    }})
+
+                    if len(results) >= limit:
+                        break
+
+            if len(results) >= limit:
+                break
+
+        return {{
+            "keyword": keyword,
+            "found_count": len(results),
+            "results": results
+        }}
 
 
 # ============================================================================
@@ -374,6 +478,7 @@ if __name__ == "__main__":
         print("  query_module_dependencies <module_name>    - 查询模块依赖", file=sys.stderr)
         print("  query_module_classes <module_name> [type]  - 查询模块中的类", file=sys.stderr)
         print("  query_function_info <function_name> [hint] - 查询函数信息", file=sys.stderr)
+        print("  search_functions <keyword> [limit]         - 搜索函数", file=sys.stderr)
         print("  search_classes <keyword> [limit]           - 搜索类", file=sys.stderr)
         print("  search_modules <keyword>                   - 搜索模块", file=sys.stderr)
         print("  get_statistics                             - 获取统计信息", file=sys.stderr)
@@ -426,6 +531,14 @@ if __name__ == "__main__":
                 _print_usage()
             module_hint = sys.argv[3] if len(sys.argv) > 3 else None
             result = query_function_info(sys.argv[2], module_hint)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "search_functions":
+            if len(sys.argv) < 3:
+                print("Error: Missing keyword argument", file=sys.stderr)
+                _print_usage()
+            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 50
+            result = search_functions(sys.argv[2], limit)
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         elif command == "search_classes":

@@ -194,6 +194,27 @@ class FunctionIndex:
 
         return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def search_by_keyword(self, keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        按关键字模糊搜索函数
+
+        Args:
+            keyword: 搜索关键字
+            limit: 限制返回数量
+
+        Returns:
+            函数信息列表
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM function_index
+            WHERE name LIKE ?
+            ORDER BY is_blueprint_callable DESC, name ASC
+            LIMIT ?
+        """, (f'%{keyword}%', limit))
+
+        return [self._row_to_dict(row) for row in cursor.fetchall()]
+
     def query_blueprint_callable(self, limit: int = 100) -> List[Dict[str, Any]]:
         """
         查询所有 Blueprint 可调用的函数

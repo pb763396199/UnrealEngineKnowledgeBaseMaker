@@ -177,20 +177,27 @@ class CppParser:
         Returns:
             (类信息字典, 函数信息字典)
         """
-        self.classes = {}
-        self.functions = {}
+        try:
+            self.classes = {}
+            self.functions = {}
 
-        # 预处理代码（保持行结构用于类体解析）
-        content_lines = self._preprocess_content_lines(content)
+            # 预处理代码（保持行结构用于类体解析）
+            content_lines = self._preprocess_content_lines(content)
 
-        # 解析类和结构体
-        self._parse_classes_and_structs(content_lines, file_path)
+            # 解析类和结构体
+            self._parse_classes_and_structs(content_lines, file_path)
 
-        # 同时使用压缩版本用于函数解析（向后兼容）
-        content_flat = '\n'.join(content_lines)
-        self._parse_functions(content_flat, file_path)
+            # 同时使用压缩版本用于函数解析（向后兼容）
+            content_flat = '\n'.join(content_lines)
+            self._parse_functions(content_flat, file_path)
 
-        return self.classes, self.functions
+            return self.classes, self.functions
+        except Exception as e:
+            # 捕获解析异常，避免整个文件解析失败
+            from pathlib import Path
+            file_name = Path(file_path).name if file_path else "unknown"
+            print(f"    [错误] 解析失败 {file_name}: {e}")
+            return {}, {}
 
     def _preprocess_content_lines(self, content: str) -> List[str]:
         """
@@ -415,6 +422,13 @@ class CppParser:
         Returns:
             类体结束的行号
         """
+        # 边界检查：防止索引越界
+        if start_line >= len(lines):
+            return len(lines) - 1 if lines else 0
+
+        # 最大花括号深度限制（防止无限循环或过深嵌套）
+        MAX_BRACE_DEPTH = 100
+
         # 假设类定义行已经包含开始大括号
         brace_count = 1
         found_opening_brace = True
@@ -423,9 +437,12 @@ class CppParser:
         for i in range(start_line, len(lines)):
             line = lines[i].strip()
 
-            # 查找开始大括号（处理嵌套类或初始化列表）
+            # 检查花括号深度
             if '{' in line:
                 brace_count += line.count('{')
+                if brace_count > MAX_BRACE_DEPTH:
+                    print(f"    [警告] 花括号嵌套过深 ({brace_count})，跳过类体解析: {class_name}")
+                    return i
 
             # 查找结束大括号
             if '}' in line:

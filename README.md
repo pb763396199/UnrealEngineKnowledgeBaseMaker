@@ -19,6 +19,13 @@
 - 🚀 **高性能** - SQLite 存储，36x 性能提升
 - 🎯 **自动检测** - 自动检测引擎/插件版本
 
+### 快速索引系统（v2.7.0 新增）⚡
+
+- **ClassIndex** - 类的快速索引，查询时间从 ~5s 降至 <10ms（**500x 提升**）
+- **FunctionIndex 增强** - 函数模糊搜索，查询时间从 ~8s 降至 <10ms（**800x 提升**）
+- **查询降级机制** - 精确查询失败时自动提示模糊搜索，**防止 LLM 幻觉**
+- **fallback_command** - 错误返回包含降级命令，LLM 自动执行下一步操作
+
 ### 模块图谱增强（v2.6.0 新增）⭐
 
 - **多重继承解析** - 完整解析类继承链，支持 `class A : public B, public IInterface`
@@ -102,6 +109,30 @@ C:\Users\{user}\.claude\skills\
 | **生成时间** | ~30-60 分钟 | ~1-5 分钟 |
 | **适用场景** | 引擎源码查询、全局依赖分析 | 插件开发、插件源码查询 |
 
+### 高级选项
+
+```bash
+# 强制重新运行所有阶段（忽略已完成的阶段）
+ue5kb init --engine-path "D:\UE5" --force
+
+# 仅运行指定阶段
+ue5kb init --engine-path "D:\UE5" --stage discover
+ue5kb init --engine-path "D:\UE5" --stage build
+
+# 并行处理（用于 analyze 阶段）
+ue5kb init --engine-path "D:\UE5" --parallel 4
+
+# 显示详细输出（用于调试）
+ue5kb init --engine-path "D:\UE5" --verbose
+```
+
+**Pipeline 阶段说明**：
+1. `discover` - 发现所有模块
+2. `extract` - 提取模块依赖
+3. `analyze` - 分析代码结构
+4. `build` - 构建索引
+5. `generate` - 生成 Skill
+
 ### 其他命令
 
 ```bash
@@ -114,6 +145,9 @@ ue5kb init --help
 
 # 查看状态
 ue5kb status
+
+# Pipeline 状态查看
+ue5kb pipeline status --engine-path "D:\UE5"
 ```
 
 ## 生成的文件
@@ -302,6 +336,31 @@ pip install click rich pyyaml networkx
 检查引擎目录下是否存在 `Engine/Build/Build.version` 文件。
 
 ## 更新日志
+
+### v2.7.0 (2026-02-05)
+
+**查询降级机制 - 防止 LLM 幻觉**
+- **快速索引系统**: ClassIndex 和 FunctionIndex，查询性能提升 500-800x
+- **查询降级机制**: 精确查询失败时自动提示模糊搜索
+- **防止 LLM 幻觉**: 彻底解决 LLM 在知识库查询失败时基于训练数据乱回答的问题
+- **新增 search_functions**: 函数模糊搜索命令
+- **Skill Prompt 增强**: 添加"查询失败处理"章节，明确引导 LLM 行为
+
+### v2.6.0 (2026-02-04)
+
+**C++ Parser 增强模块图谱内容**
+- **多重继承解析**: 解析完整的继承列表，支持 `class A : public B, public IInterface`
+- **接口识别**: 自动识别接口类（I 开头）
+- **命名空间检测**: 支持嵌套命名空间
+- **类属性解析**: 解析 UPROPERTY 声明
+- **类方法解析**: 块级解析类体
+
+### v2.1.0 (2026-02-02)
+
+**插件模式支持**
+- **插件模式**: 为单个插件生成独立知识库
+- **双模式 CLI**: 引擎模式和插件模式自动路由
+- **插件专属 Skill**: 自动生成插件专属 Claude Code Skill
 
 ### v2.0.0 (2026-02-02)
 

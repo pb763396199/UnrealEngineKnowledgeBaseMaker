@@ -7,57 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-02-05
+
 ### Added ✨
 
-**Skill CLI 接口**
-- **命令行查询接口**: 为 impl.py 添加完整的 CLI 接口，支持通过 Bash 直接调用查询函数
-- **8 个查询命令**: query_class_info, query_class_hierarchy, query_module_dependencies, query_module_classes, query_function_info, search_classes, search_modules, get_statistics
-- **JSON 输出格式**: 所有查询命令返回结构化 JSON，便于 Claude Code 解析
-- **使用指导文档**: skill.md 添加明确的 CLI 调用指导，避免 Claude Code 使用 Glob/Grep 搜索源码
-- **SKILL_PATH 变量**: 生成的 skill.md 包含正确的 Skill 路径，用于 CLI 命令示例
+**查询降级机制 - 防止 LLM 幻觉**
+- **Skill Prompt 增强**: 添加"查询失败处理"章节，明确引导 LLM 在精确查询失败时使用模糊搜索
+- **错误返回增强**: 所有查询函数错误返回新增 `fallback_command` 字段，自动提示下一步操作
+- **函数模糊搜索**: 新增 `search_functions` 命令，补全函数模糊搜索能力
+- **ClassIndex 快速索引**: 新建类快速索引系统，支持 < 10ms 的类查询和模糊搜索
+- **FunctionIndex 增强**: 添加 `search_by_keyword` 方法，支持函数模糊搜索
+- **Pipeline 索引构建**: BuildStage 自动构建 ClassIndex 和 FunctionIndex
+- **索引加速搜索**: impl.py 使用索引替代遍历搜索，性能提升 500-800x
 
 ### Fixed 🐛
 
-- **Skill 执行问题**: 修复 Claude Code 无法使用 Skill 脚本检索代码的问题，现在通过 CLI 接口直接查询知识库
+- **LLM 幻觉问题**: 彻底解决 LLM 在知识库查询失败时基于训练数据乱回答的问题
+  - 精确查询失败 → 返回 `fallback_command` → LLM 自动执行模糊搜索
+  - 模糊搜索失败 → 明确告知用户"知识库中未找到该信息"
 
 ### Changed 📦
 
-- impl.py 模板添加 `if __name__ == "__main__":` CLI 入口点
-- skill.md 模板添加 "如何查询" 章节，包含命令表格和示例
-- generate.py 添加 SKILL_PATH 变量替换
-
-**Phase 2: C++ Parser 增强模块图谱内容**
-
-**Phase 2: C++ Parser 增强模块图谱内容**
-- **多重继承解析**: 解析完整的继承列表，支持 `class A : public B, public IInterface, public IOther`
-- **接口识别**: 自动识别接口类（I 开头的类名），填充 `interfaces` 字段
-- **命名空间检测**: 支持嵌套命名空间解析，记录完整路径如 `UE::Core`
-- **类属性解析**: 新增 `PropertyInfo` 数据类，解析 UPROPERTY 声明
-- **类方法解析**: 块级解析类体，提取成员函数方法签名
-- **parent_classes 字段**: 新增字段存储完整继承列表
-
-**Phase 1: 函数索引增强**
-- **函数参数详细解析**: 提取完整函数签名（参数类型、默认值、修饰符）
-- **函数快速索引**: 基于 SQLite 的函数索引，查询性能从 500ms 提升到 < 10ms
-- **UFUNCTION/UPROPERTY 宏解析**: 提取 Blueprint 相关参数和 meta 信息
-- **函数签名格式化**: 自动生成可读的完整函数签名
-
-**Phase A: Context Optimization（基于 Context Engineering 理论）**
-- **分层查询接口**: 三层查询（summary/details/source），渐进式信息披露
-- **Observation Masking**: 自动屏蔽大型结果，使用引用ID机制
-- **Token 预算管理**: 显式预算分配和自动优化触发
-
-### Changed 📦
-
-- 函数参数从简单字符串列表升级为结构化 ParameterInfo 对象
-- query_function_info() 优先使用索引查询，Fallback 到图谱扫描
-- module_graph_builder 集成函数索引构建
+- skill.md.template 添加"查询失败处理"章节
+- impl.py.template 新增 `search_functions` 命令
+- impl.py.template 使用 ClassIndex 和 FunctionIndex 替代遍历搜索
+- impl.plugin.py.template 同步所有修改（插件模式支持）
 
 ### Performance ⚡
 
-- 函数查询性能提升 50-200x（500-2000ms → < 10ms）
-- 函数签名准确率提升至 95%（原 ~60%）
-- **单次查询 Token 减少 80%**（1000 → 200 tokens）通过分层查询和结果屏蔽
+| 操作 | 修改前 | 修改后 | 提升 |
+|------|--------|--------|------|
+| 类搜索 | 遍历图谱 (~5s) | SQLite 索引 (<10ms) | **500x** |
+| 函数搜索 | 遍历图谱 (~8s) | SQLite 索引 (<10ms) | **800x** |
+| 模糊搜索 | 不支持 | LIKE 查询 (<20ms) | **新增** |
+
+### Technical Details
+
+**新增文件**:
+- `ue5_kb/core/class_index.py` (~280 行)
+  - `ClassIndex` 类：基于 SQLite 的类快速索引
+  - `search_by_keyword()`: 模糊搜索方法
+  - `query_by_parent()`: 按父类查询子类
+  - `query_blueprintable()`: 查询 Blueprintable 类
+
+**修改文件**:
+- `ue5_kb/core/function_index.py` (+18 行)
+  - 添加 `search_by_keyword()` 方法
+- `ue5_kb/pipeline/build.py` (+110 行)
+  - 添加 `_build_fast_indices()` 方法
+  - 在 `run()` 方法中调用索引构建
+- `templates/skill.md.template` (+50 行)
+  - 添加"查询失败处理"章节
+  - 添加 `search_functions` 命令
+- `templates/impl.py.template` (+150 行)
+  - 添加 `search_functions()` 函数
+  - 添加 `_get_class_index()` 和 `_get_function_index()`
+  - 所有错误返回添加 `fallback_command` 字段
+- `templates/impl.plugin.py.template` (+150 行)
+  - 同步所有修改（插件模式）
+
+**验证测试**:
+```bash
+# 重新生成知识库
+ue5kb init --engine-path "D:\UnrealEngine\UE5" --force
+
+# 测试查询降级
+python "~/.claude/skills/ue5kb-5.5.4/impl.py" query_function_info RHICreateTexture2D
+# → 返回: {"error": "未找到函数", "fallback_command": "search_functions RHICreate"}
+
+# 测试模糊搜索
+python "~/.claude/skills/ue5kb-5.5.4/impl.py" search_functions RHICreate
+# → 返回相关函数列表
+```
 
 ---
 

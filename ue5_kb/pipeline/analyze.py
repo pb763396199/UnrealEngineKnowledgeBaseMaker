@@ -30,12 +30,13 @@ class AnalyzeStage(PipelineStage):
         summary_file = self.stage_dir / "summary.json"
         return summary_file.exists()
 
-    def run(self, parallel: int = 1, **kwargs) -> Dict[str, Any]:
+    def run(self, parallel: int = 1, verbose: bool = False, **kwargs) -> Dict[str, Any]:
         """
         分析所有模块的代码结构
 
         Args:
             parallel: 并行度（暂未实现）
+            verbose: 是否显示详细输出
 
         Returns:
             包含分析统计的结果
@@ -55,10 +56,11 @@ class AnalyzeStage(PipelineStage):
         failed_modules = []
         total_classes = 0
         total_functions = 0
+        all_failed_files = []  # 收集所有失败文件
 
         for i, module in enumerate(modules):
-            if (i + 1) % 50 == 0:
-                print(f"  进度: {i + 1}/{len(modules)} ({success_count} 成功)")
+            # 每个模块都显示进度（改进用户体验）
+            print(f"  [{i+1}/{len(modules)}] 正在分析: {module['name']}...")
 
             try:
                 # 获取模块目录
@@ -72,8 +74,8 @@ class AnalyzeStage(PipelineStage):
                     # 没有源文件，跳过
                     continue
 
-                # 解析源文件
-                code_graph = self._analyze_module(module['name'], source_files, parser)
+                # 解析源文件（传递 verbose 参数）
+                code_graph = self._analyze_module(module['name'], source_files, parser, verbose)
 
                 # 保存结果
                 self._save_code_graph(module['name'], code_graph)
@@ -81,6 +83,10 @@ class AnalyzeStage(PipelineStage):
                 success_count += 1
                 total_classes += len(code_graph.get('classes', []))
                 total_functions += len(code_graph.get('functions', []))
+
+                # 收集失败文件
+                if code_graph.get('failed_files'):
+                    all_failed_files.extend(code_graph['failed_files'])
 
             except Exception as e:
                 # 分析失败不应该中断整个流程
@@ -95,7 +101,8 @@ class AnalyzeStage(PipelineStage):
             'failed_count': len(failed_modules),
             'total_classes': total_classes,
             'total_functions': total_functions,
-            'failed_modules': failed_modules[:10]  # 只保存前10个失败的
+            'failed_modules': failed_modules[:10],  # 只保存前10个失败的模块
+            'failed_files_sample': all_failed_files[:20]  # 保存前20个失败文件
         }
 
         # 保存摘要
@@ -136,7 +143,8 @@ class AnalyzeStage(PipelineStage):
         self,
         module_name: str,
         source_files: List[Path],
-        parser: CppParser
+        parser: CppParser,
+        verbose: bool = False
     ) -> Dict[str, Any]:
         """
         分析单个模块
@@ -145,14 +153,24 @@ class AnalyzeStage(PipelineStage):
             module_name: 模块名
             source_files: 源文件列表
             parser: C++ 解析器
+            verbose: 是否显示详细输出
 
         Returns:
             代码图谱
         """
         classes = []
         functions = []
+        failed_files = []
 
-        for source_file in source_files:
+        for file_idx, source_file in enumerate(source_files):
+            # 文件级进度（仅当文件数量较多时）
+            if len(source_files) > 10 and (file_idx + 1) % 10 == 0:
+                print(f"    文件进度: {file_idx + 1}/{len(source_files)}")
+
+            # verbose 模式显示每个文件
+            if verbose:
+                print(f"      解析: {source_file.name}")
+
             try:
                 # 解析文件
                 with open(source_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -167,14 +185,21 @@ class AnalyzeStage(PipelineStage):
                 functions.extend(file_functions)
 
             except Exception as e:
-                # 单个文件解析失败不影响其他文件
-                pass
+                # 记录文件解析失败（不再静默忽略）
+                print(f"    [警告] 文件解析失败: {source_file.name}")
+                print(f"      错误: {e}")
+                failed_files.append({
+                    'file': str(source_file),
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                })
 
         return {
             'module': module_name,
             'source_file_count': len(source_files),
             'classes': classes,
-            'functions': functions
+            'functions': functions,
+            'failed_files': failed_files[:10]  # 只保存前10个失败文件
         }
 
     def _save_code_graph(self, module_name: str, code_graph: Dict[str, Any]) -> None:

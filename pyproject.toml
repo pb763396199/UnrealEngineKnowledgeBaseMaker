@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ue5-kb"
-version = "2.6.0"
+version = "2.7.0"
 description = "UE5 Knowledge Base Builder - 为任何 UE5 引擎生成知识库和 Claude Skill"
 readme = "README.md"
 requires-python = ">=3.9"

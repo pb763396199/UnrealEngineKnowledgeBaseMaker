@@ -58,7 +58,10 @@ class BuildStage(PipelineStage):
         # 3. 构建模块图谱
         modules_built = self._build_module_graphs(kb_path)
 
-        # 4. 保存统计信息
+        # 4. 构建快速索引
+        self._build_fast_indices(config)
+
+        # 5. 保存统计信息
         stats = global_index.get_statistics()
 
         result = {
@@ -222,6 +225,113 @@ class BuildStage(PipelineStage):
         conn.close()
 
         print(f"  已同步 {len(all_modules)} 个模块到 SQLite")
+
+    def _build_fast_indices(self, config: Config) -> None:
+        """
+        构建快速索引（ClassIndex 和 FunctionIndex）
+
+        Args:
+            config: 配置对象
+        """
+        from ..core.class_index import ClassIndex
+        from ..core.function_index import FunctionIndex
+
+        print(f"  构建快速索引...")
+
+        # 创建索引文件路径（确保使用 Path 对象）
+        global_index_path = Path(config.global_index_path)
+        class_index_db = global_index_path / "class_index.db"
+        function_index_db = global_index_path / "function_index.db"
+
+        class_idx = ClassIndex(str(class_index_db))
+        func_idx = FunctionIndex(str(function_index_db))
+
+        # 遍历所有模块图谱，收集类和函数信息
+        graphs_dir = Path(config.module_graphs_path)
+
+        if not graphs_dir.exists():
+            print(f"    警告: 模块图谱目录不存在，跳过快速索引构建")
+            return
+
+        classes_batch = []
+        functions_batch = []
+
+        for graph_file in graphs_dir.glob("*.pkl"):
+            module_name = graph_file.stem
+
+            try:
+                with open(graph_file, 'rb') as f:
+                    data = pickle.load(f)
+                    graph = data.get('graph')
+
+                if not graph:
+                    continue
+
+                # 收集类信息
+                for node, node_data in graph.nodes(data=True):
+                    if node_data.get('type') == 'class':
+                        class_info = {
+                            'name': node_data.get('name', ''),
+                            'module': module_name,
+                            'namespace': node_data.get('namespace', ''),
+                            'parent_classes': node_data.get('parent_classes', []),
+                            'interfaces': node_data.get('interfaces', []),
+                            'file_path': node_data.get('file', ''),
+                            'line_number': node_data.get('line', 0),
+                            'is_uclass': node_data.get('is_uclass', False),
+                            'is_struct': node_data.get('is_struct', False),
+                            'is_interface': node_data.get('is_interface', False),
+                            'is_blueprintable': node_data.get('is_blueprintable', False),
+                            'method_count': len(node_data.get('methods', [])),
+                            'property_count': len(node_data.get('properties', []))
+                        }
+                        classes_batch.append(class_info)
+
+                    elif node_data.get('type') == 'function':
+                        func_info = {
+                            'name': node_data.get('name', ''),
+                            'module': module_name,
+                            'class_name': node_data.get('class_name', ''),
+                            'return_type': node_data.get('return_type', ''),
+                            'parameters': node_data.get('parameters', []),
+                            'signature': node_data.get('signature', ''),
+                            'file_path': node_data.get('file', ''),
+                            'line_number': node_data.get('line', 0),
+                            'is_virtual': node_data.get('is_virtual', False),
+                            'is_const': node_data.get('is_const', False),
+                            'is_static': node_data.get('is_static', False),
+                            'is_blueprint_callable': node_data.get('is_blueprint_callable', False),
+                            'ufunction_specifiers': node_data.get('ufunction_specifiers', {})
+                        }
+                        functions_batch.append(func_info)
+
+                # 批量提交（每 1000 条）
+                if len(classes_batch) >= 1000:
+                    class_idx.add_classes_batch(classes_batch)
+                    classes_batch.clear()
+
+                if len(functions_batch) >= 1000:
+                    func_idx.add_functions_batch(functions_batch)
+                    functions_batch.clear()
+
+            except Exception as e:
+                print(f"    警告: 处理 {module_name} 图谱失败: {e}")
+
+        # 提交剩余数据
+        if classes_batch:
+            class_idx.add_classes_batch(classes_batch)
+        if functions_batch:
+            func_idx.add_functions_batch(functions_batch)
+
+        class_idx.commit()
+        func_idx.commit()
+
+        # 输出统计
+        class_stats = class_idx.get_statistics()
+        func_stats = func_idx.get_statistics()
+
+        print(f"    类索引: {class_stats['total_classes']} 个类")
+        print(f"    函数索引: {func_stats['total_functions']} 个函数")
 
     def _build_optimized_index(self, global_index: GlobalIndex, config: Config) -> None:
         """
