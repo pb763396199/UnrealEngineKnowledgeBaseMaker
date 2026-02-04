@@ -154,6 +154,9 @@ class GenerateStage(PipelineStage):
         for key, value in variables.items():
             impl_py_content = impl_py_content.replace(f'{{{key}}}', value)
 
+        # 修复：将模板中的 {{ 和 }} 转换为单花括号（Python 字典语法）
+        impl_py_content = impl_py_content.replace('{{', '{').replace('}}', '}')
+
         with open(skill_path / "impl.py", 'w', encoding='utf-8') as f:
             f.write(impl_py_content)
 

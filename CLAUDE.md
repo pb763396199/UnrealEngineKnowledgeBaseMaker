@@ -197,6 +197,28 @@ Auto-categorized from path:
 
 ---
 
+## Git Practices
+
+### Commit Messages
+
+When creating git commits, follow these guidelines:
+
+- **Write clear, concise commit messages** that describe what was changed and why
+- **Use imperative mood** ("fix bug", "add feature", not "fixed bug", "added feature")
+- **PROHIBITED: Co-Authored-By information** - Never add `Co-Authored-By:` trailers or similar attribution to commit messages
+- Commit messages should reflect the actual author of the changes in this repository
+
+Example:
+```
+feat: add namespace detection to C++ parser
+
+- Added namespace stack tracking for nested namespaces
+- Support both traditional and C++17 namespace syntax
+- Record full namespace path in ClassInfo.namespace field
+```
+
+---
+
 ## Common Workflows
 
 ### Adding a Query Function
