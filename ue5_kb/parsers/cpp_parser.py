@@ -8,8 +8,32 @@ UE5 知识库系统 - C++ 代码解析器
 import re
 import os
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Set, Tuple
+from typing import Dict, List, Any, Optional, Set, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
+
+# 使用 TYPE_CHECKING 来避免循环引用问题
+if TYPE_CHECKING:
+    from typing import ForwardRef
+else:
+    # 运行时使用字符串类型注解
+    List_PropertyInfo = 'List[PropertyInfo]'
+    PropertyInfo = 'PropertyInfo'
+
+
+@dataclass
+class PropertyInfo:
+    """属性信息（基础版本）"""
+    name: str
+    type: str
+    is_uproperty: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            'name': self.name,
+            'type': self.type,
+            'is_uproperty': self.is_uproperty
+        }
 
 
 @dataclass
@@ -20,9 +44,10 @@ class ClassInfo:
     is_struct: bool = False
     is_interface: bool = False
     parent_class: Optional[str] = None
+    parent_classes: List[str] = field(default_factory=list)  # 完整继承列表
     interfaces: List[str] = field(default_factory=list)
     methods: List[str] = field(default_factory=list)
-    properties: List[str] = field(default_factory=list)
+    properties: List[PropertyInfo] = field(default_factory=list)  # 使用 PropertyInfo 类型
     file_path: str = ""
     line_number: int = 0
     namespace: str = ""
@@ -35,9 +60,10 @@ class ClassInfo:
             'is_struct': self.is_struct,
             'is_interface': self.is_interface,
             'parent_class': self.parent_class,
+            'parent_classes': self.parent_classes,
             'interfaces': self.interfaces,
             'methods': self.methods,
-            'properties': self.properties,
+            'properties': [p.to_dict() for p in self.properties],
             'file_path': self.file_path,
             'line_number': self.line_number,
             'namespace': self.namespace
@@ -154,19 +180,42 @@ class CppParser:
         self.classes = {}
         self.functions = {}
 
-        # 预处理代码
-        content = self._preprocess_content(content)
+        # 预处理代码（保持行结构用于类体解析）
+        content_lines = self._preprocess_content_lines(content)
 
         # 解析类和结构体
-        self._parse_classes_and_structs(content, file_path)
+        self._parse_classes_and_structs(content_lines, file_path)
 
-        # 解析函数
-        self._parse_functions(content, file_path)
+        # 同时使用压缩版本用于函数解析（向后兼容）
+        content_flat = '\n'.join(content_lines)
+        self._parse_functions(content_flat, file_path)
 
         return self.classes, self.functions
 
+    def _preprocess_content_lines(self, content: str) -> List[str]:
+        """
+        预处理代码内容，返回行列表（保持行结构用于类体解析）
+
+        Returns:
+            预处理后的代码行列表
+        """
+        # 移除单行注释（保持行）
+        lines = content.split('\n')
+        processed_lines = []
+
+        for line in lines:
+            # 移除行内注释
+            line = re.sub(r'//.*$', '', line)
+            # 移除多行注释标记（简化处理）
+            line = re.sub(r'/\*.*?\*/', '', line)
+            # 标准化行内空白，但保留行结构
+            line = re.sub(r'[ \t]+', ' ', line)
+            processed_lines.append(line.rstrip())
+
+        return processed_lines
+
     def _preprocess_content(self, content: str) -> str:
-        """预处理代码内容"""
+        """预处理代码内容（旧方法，用于函数解析）"""
         # 移除单行注释
         content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
         # 移除多行注释
@@ -175,13 +224,82 @@ class CppParser:
         content = re.sub(r'\s+', ' ', content)
         return content.strip()
 
-    def _parse_classes_and_structs(self, content: str, file_path: str) -> None:
-        """解析类和结构体定义"""
+    def _parse_namespace_stack(self, content: str) -> List[str]:
+        """
+        解析命名空间栈，跟踪当前命名空间上下文
+
+        Returns:
+            命名空间栈列表，每个元素是命名空间名称
+        """
+        namespace_stack = []
         lines = content.split('\n')
+
+        for line in lines:
+            line = line.strip()
+
+            # 匹配 namespace 开始
+            # 支持两种语法:
+            # 1. namespace Name {
+            # 2. namespace Name::Nested {
+            ns_start_match = re.search(r'namespace\s+([A-Za-z_][A-Za-z0-9_:]*)\s*\{', line)
+            if ns_start_match:
+                ns_name = ns_start_match.group(1)
+                # 处理嵌套命名空间语法如 "UE::Core"
+                if '::' in ns_name:
+                    parts = ns_name.split('::')
+                    namespace_stack.extend(parts)
+                else:
+                    namespace_stack.append(ns_name)
+                continue
+
+            # 简单匹配 namespace 结束 (匹配单独的 } )
+            # 注意：这是一种简化处理，可能无法处理所有复杂情况
+            if line == '}':
+                if namespace_stack:
+                    namespace_stack.pop()
+
+        return namespace_stack
+
+    def _build_namespace_path(self, namespace_stack: List[str]) -> str:
+        """从命名空间栈构建完整路径"""
+        return '::'.join(namespace_stack) if namespace_stack else ""
+
+    def _parse_classes_and_structs(self, lines: List[str], file_path: str) -> None:
+        """
+        解析类和结构体定义（增强版）
+
+        支持:
+        - 多重继承 (multiple inheritance)
+        - 命名空间检测
+        - 类体解析 (方法和属性)
+
+        Args:
+            lines: 预处理后的代码行列表
+            file_path: 文件路径
+        """
+        # 跟踪命名空间栈
+        namespace_stack = []
 
         i = 0
         while i < len(lines):
             line = lines[i].strip()
+
+            # 处理命名空间声明
+            ns_start_match = re.search(r'namespace\s+([A-Za-z_][A-Za-z0-9_:]*)\s*\{', line)
+            if ns_start_match:
+                ns_name = ns_start_match.group(1)
+                if '::' in ns_name:
+                    namespace_stack.extend(ns_name.split('::'))
+                else:
+                    namespace_stack.append(ns_name)
+
+            # 简单匹配 namespace 结束
+            if line == '}' and (i + 1 >= len(lines) or 'namespace' not in lines[i + 1]):
+                if namespace_stack:
+                    namespace_stack.pop()
+
+            # 构建当前命名空间路径
+            current_namespace = self._build_namespace_path(namespace_stack)
 
             # 检查是否有 UE5 宏
             is_uclass = bool(re.search(self.UCLASS_PATTERN, line))
@@ -194,26 +312,48 @@ class CppParser:
             # - class MYPROJECT_API AMyActor : public AActor
             # - class AMyActor : public AActor, public IInterface
             # - struct FMyStruct : public FMyBase
+            # - class UObject (无继承)
 
-            class_pattern = r'\b(class|struct)\s+((?:[A-Z_]+_API\s+)?[A-Z][A-Za-z0-9_]*)\s*:\s*(?:public\s+)?([A-Z][A-Za-z0-9_<>*&:\s]*)'
+            # 更新正则以捕获所有父类，继承部分变为可选
+            class_pattern = r'\b(class|struct)\s+((?:[A-Z_]+_API\s+)?[A-Z][A-Za-z0-9_]*)(?:\s*:\s*(.*))?'
 
             match = re.search(class_pattern, line)
             if match:
                 decl_type = match.group(1)  # class or struct
                 full_name = match.group(2).strip()
-                parent_part = match.group(3).strip()
+                inheritance_part = match.group(3).strip() if match.group(3) else ""
 
                 # 清理 API 宏
                 class_name = full_name.split()[-1] if ' ' in full_name else full_name
 
-                # 提取父类
+                # 解析继承列表
+                parent_classes = []
+                interfaces = []
+
+                if inheritance_part:
+                    # 移除可能的访问修饰符并分割逗号
+                    parents = [p.strip() for p in re.split(r',', inheritance_part)]
+                    for parent in parents:
+                        # 移除 public/private/protected
+                        parent_clean = re.sub(r'\b(public|private|protected)\s+', '', parent)
+                        parent_clean = parent_clean.strip()
+                        if parent_clean and parent_clean not in ['public', 'private', 'protected']:
+                            # 过滤掉单独的访问修饰符
+                            parent_classes.append(parent_clean)
+                            # 检查是否是接口（I 开头的类名通常是接口）
+                            if parent_clean.startswith('I') and parent_clean[1].isupper():
+                                interfaces.append(parent_clean)
+
+                # 确定主父类 (第一个非接口的父类)
                 parent_class = None
-                if parent_part and parent_part != '':
-                    # 移除可能的继承访问修饰符
-                    parent_clean = re.sub(r'\b(public|private|protected)\s+', '', parent_part)
-                    parent_clean = parent_clean.strip().split()[0] if parent_clean else None
-                    if parent_clean:
-                        parent_class = parent_clean
+                for pc in parent_classes:
+                    if not pc.startswith('I') or not pc[1].isupper():
+                        parent_class = pc
+                        break
+
+                # 如果没有非接口父类，使用第一个父类
+                if parent_class is None and parent_classes:
+                    parent_class = parent_classes[0]
 
                 # 确定类型标志
                 if decl_type == 'struct':
@@ -221,7 +361,6 @@ class CppParser:
                     is_uclass = is_ustruct
                 else:
                     is_struct = False
-                    # 如果前面检测到 UCLASS 宏，使用它
                     is_uclass = is_uclass
 
                 is_interface = is_uinterface
@@ -231,9 +370,12 @@ class CppParser:
                     self.classes[class_name] = ClassInfo(
                         name=class_name,
                         parent_class=parent_class,
+                        parent_classes=parent_classes,
+                        interfaces=interfaces,
                         is_uclass=is_uclass,
                         is_struct=is_struct,
                         is_interface=is_interface,
+                        namespace=current_namespace,
                         file_path=file_path,
                         line_number=i + 1
                     )
@@ -248,8 +390,134 @@ class CppParser:
                         info.is_interface = True
                     if parent_class and not info.parent_class:
                         info.parent_class = parent_class
+                    if parent_classes and not info.parent_classes:
+                        info.parent_classes = parent_classes
+                    if interfaces and not info.interfaces:
+                        info.interfaces = interfaces
+                    if current_namespace and not info.namespace:
+                        info.namespace = current_namespace
+
+                # 解析类体内的内容（方法和属性）
+                self._parse_class_body(lines, i + 1, class_name, file_path)
 
             i += 1
+
+    def _parse_class_body(self, lines: List[str], start_line: int, class_name: str, file_path: str) -> int:
+        """
+        解析类体内容，提取方法和属性
+
+        Args:
+            lines: 所有代码行
+            start_line: 类定义开始的下一行
+            class_name: 当前类名
+            file_path: 文件路径
+
+        Returns:
+            类体结束的行号
+        """
+        # 假设类定义行已经包含开始大括号
+        brace_count = 1
+        found_opening_brace = True
+        uproperty_pending = False  # 追踪 UPROPERTY 宏是否在上一行出现
+
+        for i in range(start_line, len(lines)):
+            line = lines[i].strip()
+
+            # 查找开始大括号（处理嵌套类或初始化列表）
+            if '{' in line:
+                brace_count += line.count('{')
+
+            # 查找结束大括号
+            if '}' in line:
+                brace_count -= line.count('}')
+                if brace_count <= 0:
+                    return i  # 类体结束
+
+            # 检查是否有 UPROPERTY 宏
+            has_uproperty = bool(re.search(self.UPROPERTY_PATTERN, line))
+            if has_uproperty:
+                uproperty_pending = True
+                # 如果 UPROPERTY 和属性在同一行，直接解析
+                if ';' in line:
+                    prop = self._try_parse_property(line, True)
+                    if prop and class_name in self.classes:
+                        self.classes[class_name].properties.append(prop)
+                    uproperty_pending = False
+                continue
+
+            # 尝试解析属性声明
+            if ';' in line and not any(kw in line for kw in ['class', 'struct', 'enum', 'typedef', 'friend']):
+                prop = self._try_parse_property(line, uproperty_pending)
+                if prop and class_name in self.classes:
+                    self.classes[class_name].properties.append(prop)
+                uproperty_pending = False  # 重置标志
+
+            # 尝试解析方法声明
+            method = self._try_parse_method(line, class_name)
+            if method and class_name in self.classes:
+                self.classes[class_name].methods.append(method)
+
+        return len(lines) - 1
+
+    def _try_parse_property(self, line: str, has_uproperty: bool) -> Optional[PropertyInfo]:
+        """尝试解析一行属性声明"""
+        # 移除 UPROPERTY 宏（如果有）
+        line = re.sub(self.UPROPERTY_PATTERN, '', line)
+        line = line.strip()
+
+        # 如果行包含 ( )，则可能是方法声明，跳过
+        if '(' in line and ')' in line:
+            return None
+
+        # 基本属性声明模式: type name;
+        # 支持复杂的 UE5 类型: TArray<FString>, TMap<K,V>, etc.
+        prop_pattern = r'^([A-Za-z_][A-Za-z0-9_:<>*&\s]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;'
+
+        match = re.match(prop_pattern, line)
+        if match:
+            prop_type = match.group(1).strip()
+            prop_name = match.group(2)
+
+            # 过滤掉关键字
+            if prop_name in ['if', 'for', 'while', 'switch', 'return', 'class', 'struct', 'enum', 'operator']:
+                return None
+
+            return PropertyInfo(
+                name=prop_name,
+                type=prop_type,
+                is_uproperty=has_uproperty
+            )
+
+        return None
+
+    def _try_parse_method(self, line: str, class_name: str) -> Optional[str]:
+        """尝试解析一行方法声明，返回方法签名字符串"""
+        # 跳过明显不是方法的行
+        if ';' not in line or '=' in line:
+            return None
+
+        # 方法声明模式: return_type method_name(params);
+        # 支持 const, override, final 等修饰符
+        method_pattern = r'^([A-Za-z_][A-Za-z0-9_<>*&:\s]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:const)?\s*(?:override|final)?\s*;'
+
+        match = re.match(method_pattern, line)
+        if match:
+            return_type = match.group(1).strip()
+            method_name = match.group(2)
+            params = match.group(3)
+
+            # 过滤掉关键字
+            if method_name in ['if', 'for', 'while', 'switch', 'return', 'class', 'struct', 'enum']:
+                return None
+
+            # 过滤掉纯虚函数
+            if '= 0' in params or '= delete' in line:
+                return None
+
+            # 构建方法签名
+            return f"{return_type} {method_name}({params})"
+
+        return None
 
     def _parse_functions(self, content: str, file_path: str) -> None:
         """解析函数声明"""

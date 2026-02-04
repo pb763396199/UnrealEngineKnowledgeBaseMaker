@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added ✨
 
+**Phase 2: C++ Parser 增强模块图谱内容**
+- **多重继承解析**: 解析完整的继承列表，支持 `class A : public B, public IInterface, public IOther`
+- **接口识别**: 自动识别接口类（I 开头的类名），填充 `interfaces` 字段
+- **命名空间检测**: 支持嵌套命名空间解析，记录完整路径如 `UE::Core`
+- **类属性解析**: 新增 `PropertyInfo` 数据类，解析 UPROPERTY 声明
+- **类方法解析**: 块级解析类体，提取成员函数方法签名
+- **parent_classes 字段**: 新增字段存储完整继承列表
+
 **Phase 1: 函数索引增强**
 - **函数参数详细解析**: 提取完整函数签名（参数类型、默认值、修饰符）
 - **函数快速索引**: 基于 SQLite 的函数索引，查询性能从 500ms 提升到 < 10ms
@@ -31,6 +39,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 函数查询性能提升 50-200x（500-2000ms → < 10ms）
 - 函数签名准确率提升至 95%（原 ~60%）
 - **单次查询 Token 减少 80%**（1000 → 200 tokens）通过分层查询和结果屏蔽
+
+---
+
+## [2.6.0] - 2026-02-04
+
+### Added ✨
+
+**C++ Parser 增强模块图谱内容**
+- **多重继承解析**: 解析完整的继承列表，支持 `class A : public B, public IInterface, public IOther`
+- **接口识别**: 自动识别接口类（I 开头的类名），填充 `interfaces` 字段
+- **命名空间检测**: 支持嵌套命名空间解析（传统语法和 C++17 简化语法），记录完整路径如 `UE::Core`
+- **类属性解析**: 新增 `PropertyInfo` 数据类，解析 UPROPERTY 声明（基础版本：名称、类型、是否 UPROPERTY）
+- **类方法解析**: 块级解析类体，提取成员函数方法签名
+- **parent_classes 字段**: 新增字段存储完整继承列表
+
+### Changed 📦
+
+- `ClassInfo.properties` 类型从 `List[str]` 改为 `List[PropertyInfo]`
+- `ClassInfo` 新增 `parent_classes` 字段存储完整继承列表
+- NetworkX 图构建支持新字段：`interfaces`、`properties`、`namespace`
+
+### Technical Details
+
+**新增数据类**:
+- `PropertyInfo`: 存储属性信息（名称、类型、是否 UPROPERTY）
+
+**修改文件**:
+- `ue5_kb/parsers/cpp_parser.py` (+200 行)
+  - `_parse_classes_and_structs()`: 重写以支持多重继承和命名空间
+  - `_parse_class_body()`: 新增方法解析类体内容
+  - `_try_parse_property()`: 新增方法解析属性声明
+  - `_try_parse_method()`: 新增方法解析方法声明
+  - `_preprocess_content_lines()`: 新增方法保持行结构
+- `ue5_kb/pipeline/build.py` (+30 行)
+  - `_create_networkx_graph()`: 更新以支持新数据结构
+
+**验证测试**:
+```python
+# 测试结果验证
+类: UObject
+  namespace: UE::Core
+  methods: ['void GetName()']
+  properties: [MyProperty: int32 (UPROPERTY: True)]
+
+类: AActor
+  parent_classes: ['UObject', 'IInterface']
+  interfaces: ['IInterface']
+  methods: ['void Tick(float DeltaTime)']
+  properties: [Location: FVector (UPROPERTY: True)]
+```
 
 ---
 

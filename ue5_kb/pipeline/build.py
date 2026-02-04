@@ -334,6 +334,18 @@ class BuildStage(PipelineStage):
             if parent_class and not parent_classes:
                 parent_classes = [parent_class] if parent_class else []
 
+            # 处理 properties - 新格式是 PropertyInfo 列表，旧格式是字符串列表
+            properties = cls.get('properties', [])
+            # 转换为统一的字典格式
+            properties_dict = []
+            for prop in properties:
+                if isinstance(prop, dict):
+                    # 新格式 PropertyInfo
+                    properties_dict.append(prop)
+                elif isinstance(prop, str):
+                    # 旧格式字符串（向后兼容）
+                    properties_dict.append({'name': prop, 'type': 'unknown', 'is_uproperty': False})
+
             graph.add_node(
                 f"class_{class_name}",
                 type='class',
@@ -341,7 +353,10 @@ class BuildStage(PipelineStage):
                 file=file_path,
                 line=line_num,
                 parent_classes=parent_classes,
+                interfaces=cls.get('interfaces', []),  # 新增：接口列表
                 methods=cls.get('methods', []),
+                properties=properties_dict,  # 更新：PropertyInfo 列表
+                namespace=cls.get('namespace', ''),  # 新增：命名空间
                 is_uclass=cls.get('is_uclass', False),
                 is_struct=cls.get('is_struct', False),
                 is_interface=cls.get('is_interface', False)
@@ -350,6 +365,10 @@ class BuildStage(PipelineStage):
             # 添加继承边
             for parent in parent_classes:
                 graph.add_edge(f"class_{class_name}", f"class_{parent}", type='inherits')
+
+            # 添加接口实现边
+            for interface in cls.get('interfaces', []):
+                graph.add_edge(f"class_{class_name}", f"class_{interface}", type='implements')
 
         # 添加函数节点
         for func in code_graph.get('functions', []):
