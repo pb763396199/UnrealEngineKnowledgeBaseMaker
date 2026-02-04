@@ -266,7 +266,7 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, paralle
     try:
         from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
-        coordinator = PipelineCoordinator(plugin_path)
+        coordinator = PipelineCoordinator(plugin_path, is_plugin=True, plugin_name=plugin_name)
 
         if stage:
             console.print(f"运行阶段: [cyan]{stage}[/cyan]\n")

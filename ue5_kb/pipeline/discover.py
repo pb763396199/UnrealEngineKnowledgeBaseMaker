@@ -33,12 +33,22 @@ class DiscoverStage(PipelineStage):
         """
         print(f"[Discover] 扫描模块...")
 
+        # 检测模式：检查是否存在 Engine 子目录
         engine_dir = self.base_path / "Engine"
-        if not engine_dir.exists():
-            raise FileNotFoundError(f"引擎目录不存在: {engine_dir}")
+        if engine_dir.exists():
+            # 引擎模式
+            search_dir = engine_dir
+            print(f"[Discover] 检测到引擎模式")
+        else:
+            # 插件模式：直接在 base_path 下搜索
+            search_dir = self.base_path
+            print(f"[Discover] 检测到插件模式")
+
+        if not search_dir.exists():
+            raise FileNotFoundError(f"目录不存在: {search_dir}")
 
         # 查找所有 .Build.cs 文件
-        modules = self._discover_modules(engine_dir)
+        modules = self._discover_modules(search_dir)
 
         result = {
             'modules': modules,

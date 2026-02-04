@@ -1,0 +1,59 @@
+---
+name: {PLUGIN_NAME}-kb-{ENGINE_VERSION}
+description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息
+---
+
+# {PLUGIN_NAME} 插件知识库查询
+
+## 何时使用此技能
+
+当用户询问关于 **{PLUGIN_NAME} 插件** 的代码问题时，使用此技能。常见的查询模式包括：
+
+### 模块相关查询
+- "{PLUGIN_NAME} 有哪些模块？"
+- "列出所有模块"
+- "搜索包含 'XXX' 的模块"
+- "某模块依赖哪些其他模块？"
+
+### 类相关查询
+- "XX 类的继承关系是什么？"
+- "XX 类有哪些方法？"
+- "查找包含 'XXX' 的类"
+- "XX 类在哪个模块？"
+
+### 函数相关查询
+- "XX 函数的定义是什么？"
+- "查找 Blueprint 可调用的函数"
+- "XX 函数的签名是什么？"
+
+## 可用的查询函数
+
+### 模块级查询
+- `query_module_dependencies(module_name)` - 查询模块依赖关系
+- `search_modules(keyword)` - 搜索包含关键字的模块
+- `get_statistics()` - 获取知识库统计信息
+
+### 代码级查询
+- `query_class_info(class_name)` - 查询类的详细信息
+- `query_class_hierarchy(class_name, depth=3)` - 查询类的继承层次
+- `query_module_classes(module_name, class_type=None)` - 查询模块中的所有类
+- `query_function_info(function_name, module_hint=None)` - 查询函数信息
+- `search_classes(keyword, limit=50)` - 搜索包含关键字的类
+
+## 使用建议
+
+1. **优先使用精确查询**：如果知道具体的类名或模块名，直接调用对应的查询函数
+2. **使用搜索功能**：如果只知道关键字，使用 `search_modules` 或 `search_classes`
+3. **结果限制**：大型查询结果会自动截断，如需完整结果请使用更精确的查询条件
+
+## 知识库路径
+
+知识库位于: `{KB_PATH}`
+
+## 示例对话
+
+**用户**: "查找 XX 类的实现"
+**助手**: 查询 XX 类的信息... (调用 `query_class_info("XX")`)
+
+**用户**: "某模块有哪些依赖？"
+**助手**: 查询模块依赖关系... (调用 `query_module_dependencies("ModuleName")`)

@@ -23,15 +23,19 @@ class PipelineCoordinator:
 
     STAGES = ['discover', 'extract', 'analyze', 'build', 'generate']
 
-    def __init__(self, base_path: Path):
+    def __init__(self, base_path: Path, is_plugin: bool = False, plugin_name: str = None):
         """
         初始化协调器
 
         Args:
             base_path: 引擎/插件根目录
+            is_plugin: 是否为插件模式
+            plugin_name: 插件名称（插件模式下使用）
         """
         self.base_path = Path(base_path)
         self.state = PipelineState(base_path)
+        self.is_plugin = is_plugin
+        self.plugin_name = plugin_name
 
         # 初始化各阶段
         self.stages = {
@@ -39,7 +43,7 @@ class PipelineCoordinator:
             'extract': ExtractStage(base_path),
             'analyze': AnalyzeStage(base_path),
             'build': BuildStage(base_path),
-            'generate': GenerateStage(base_path)
+            'generate': GenerateStage(base_path, is_plugin=is_plugin, plugin_name=plugin_name)
         }
 
     def run_all(self, force: bool = False, **kwargs) -> Dict[str, Any]:

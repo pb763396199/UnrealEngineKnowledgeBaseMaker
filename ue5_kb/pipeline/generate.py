@@ -17,6 +17,19 @@ class GenerateStage(PipelineStage):
     从模板生成 Claude Code Skill
     """
 
+    def __init__(self, base_path: Path, is_plugin: bool = False, plugin_name: str = None):
+        """
+        初始化生成阶段
+
+        Args:
+            base_path: 引擎/插件根目录
+            is_plugin: 是否为插件模式
+            plugin_name: 插件名称
+        """
+        super().__init__(base_path)
+        self.is_plugin = is_plugin
+        self.plugin_name = plugin_name
+
     @property
     def stage_name(self) -> str:
         return "generate"
@@ -48,12 +61,17 @@ class GenerateStage(PipelineStage):
         if not skill_name:
             if not engine_version:
                 engine_version = self._detect_engine_version()
-            skill_name = f"ue5kb-{engine_version}"
+            if self.is_plugin and self.plugin_name:
+                # 插件模式: {plugin_name}-kb-{version}
+                skill_name = f"{self.plugin_name}-kb-{engine_version}"
+            else:
+                # 引擎模式: ue5kb-{version}
+                skill_name = f"ue5kb-{engine_version}"
 
         # 确定 Skill 目录
         skill_path = self._get_skill_path(skill_name)
 
-        # 生成 Skill
+        # 生成 Skill（根据模式选择模板）
         self._generate_skill(kb_path, skill_path, engine_version)
 
         # 创建标记文件
@@ -78,7 +96,7 @@ class GenerateStage(PipelineStage):
 
     def _detect_engine_version(self) -> str:
         """检测引擎版本"""
-        # 尝试从 Build.version 读取
+        # 首先尝试引擎模式：从 Build.version 读取
         build_version_file = self.base_path / "Engine" / "Build" / "Build.version"
 
         if build_version_file.exists():
@@ -89,6 +107,24 @@ class GenerateStage(PipelineStage):
                 minor = version_data.get('MinorVersion', 0)
                 patch = version_data.get('PatchVersion', 0)
                 return f"{major}.{minor}.{patch}"
+
+        # 插件模式：尝试从 .uplugin 文件读取引擎版本或插件版本
+        uplugin_files = list(self.base_path.glob("*.uplugin"))
+        if uplugin_files:
+            import json
+            try:
+                with open(uplugin_files[0], 'r', encoding='utf-8') as f:
+                    plugin_data = json.load(f)
+                    # 尝试获取引擎版本
+                    engine_version = plugin_data.get('EngineVersion', '')
+                    if engine_version:
+                        return engine_version
+                    # 否则使用插件版本号
+                    version = plugin_data.get('VersionName', '')
+                    if version:
+                        return version
+            except Exception:
+                pass
 
         # 从目录名推测
         dir_name = self.base_path.name
@@ -124,9 +160,18 @@ class GenerateStage(PipelineStage):
         # 获取模板目录
         template_dir = Path(__file__).parent.parent.parent / "templates"
 
-        # 读取模板
-        skill_md_template = template_dir / "skill.md.template"
-        impl_py_template = template_dir / "impl.py.template"
+        # 根据模式选择模板
+        if self.is_plugin:
+            skill_md_template = template_dir / "skill.plugin.md.template"
+            impl_py_template = template_dir / "impl.plugin.py.template"
+            # 如果插件模板不存在，回退到引擎模板
+            if not skill_md_template.exists():
+                skill_md_template = template_dir / "skill.md.template"
+            if not impl_py_template.exists():
+                impl_py_template = template_dir / "impl.py.template"
+        else:
+            skill_md_template = template_dir / "skill.md.template"
+            impl_py_template = template_dir / "impl.py.template"
 
         if not skill_md_template.exists() or not impl_py_template.exists():
             raise FileNotFoundError("模板文件不存在")
@@ -134,7 +179,8 @@ class GenerateStage(PipelineStage):
         # 替换变量
         variables = {
             'ENGINE_VERSION': engine_version,
-            'KB_PATH': str(kb_path).replace('\\', '\\\\')
+            'KB_PATH': str(kb_path).replace('\\', '\\\\'),
+            'PLUGIN_NAME': self.plugin_name or 'Unknown',
         }
 
         # 生成 skill.md
