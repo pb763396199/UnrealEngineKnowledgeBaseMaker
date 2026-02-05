@@ -11,6 +11,24 @@ description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息�
 
 **重要**: 始终使用下面的 CLI 命令查询知识库，不要直接使用 Glob/Grep 搜索源码。
 
+### 模块相关查询
+- "Core 模块有哪些依赖？"
+- "列出所有模块"
+- "搜索包含 'Network' 的模块"
+- "某模块依赖哪些其他模块？"
+
+### 类相关查询
+- "某个类的继承关系是什么？"
+- "某类有哪些方法？"
+- "查找包含 'Character' 的类"
+- "某类在哪个模块？"
+- "哪些类继承自某个类？"
+
+### 函数相关查询
+- "某个函数的定义是什么？"
+- "某函数在哪些模块中定义？"
+- "查找包含 'Process' 的函数"
+
 ## 如何查询（重要）
 
 **必须使用 CLI 命令查询知识库，不要使用 Glob/Grep 搜索源码。**
@@ -35,6 +53,7 @@ description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息�
 | `query_module_dependencies` | `<module_name>` | 查询模块依赖关系 |
 | `query_module_classes` | `<module_name> [class_type]` | 查询模块中的所有类 |
 | `query_function_info` | `<function_name> [module_hint]` | 查询函数信息 |
+| `search_functions` | `<keyword> [limit=50]` | 搜索包含关键字的函数 |
 | `search_classes` | `<keyword> [limit=50]` | 搜索包含关键字的类 |
 | `search_modules` | `<keyword>` | 搜索包含关键字的模块 |
 | `get_statistics` | - | 获取知识库统计信息 |
@@ -54,6 +73,9 @@ python "{SKILL_PATH}/impl.py" query_module_dependencies Core
 # 搜索类（限制20个结果）
 python "{SKILL_PATH}/impl.py" search_classes "Player" 20
 
+# 搜索函数
+python "{SKILL_PATH}/impl.py" search_functions "Process" 20
+
 # 获取统计信息
 python "{SKILL_PATH}/impl.py" get_statistics
 ```
@@ -62,8 +84,52 @@ python "{SKILL_PATH}/impl.py" get_statistics
 
 1. **始终使用 CLI 查询**：不要直接使用 Glob/Grep 搜索源码，知识库查询更快更准确
 2. **优先使用精确查询**：如果知道具体的类名或模块名，使用 `query_class_info` 或 `query_module_dependencies`
-3. **使用搜索功能**：如果只知道关键字，使用 `search_modules` 或 `search_classes`
+3. **使用搜索功能**：如果只知道关键字，使用 `search_modules`、`search_classes` 或 `search_functions`
 4. **处理错误结果**：如果返回的 JSON 包含 `error` 字段，说明查询失败
+
+---
+
+## 查询失败处理（重要）
+
+当精确查询返回 `{"error": "未找到..."}` 时，**必须**按以下降级策略执行：
+
+### 查询降级流程
+
+1. **精确查询失败** → 使用模糊搜索
+2. **模糊搜索失败** → 明确告知用户"知识库中未找到该信息"
+
+### 具体降级命令
+
+| 精确查询 | 失败后使用 |
+|---------|-----------|
+| `query_class_info` | `search_classes <关键字>` |
+| `query_function_info` | `search_functions <关键字>` |
+| `query_module_dependencies` | `search_modules <关键字>` |
+
+### 示例对话
+
+**错误做法（禁止）**：
+```
+用户: "某个函数怎么用？"
+助手: [query_function_info 返回 error]
+助手: "这个函数是..." ❌ 基于训练数据乱回答
+```
+
+**正确做法**：
+```
+用户: "某个函数怎么用？"
+助手: [query_function_info → error]
+助手: [search_functions <关键字>] → 找到相关函数
+助手: "知识库中未找到该函数，但找到相关函数：..."
+```
+
+### 关键原则
+
+- **严禁在查询失败时基于训练数据回答** - 这会导致过时或错误的信息
+- **必须使用工具搜索** - 模糊搜索找不到时，明确告知用户
+- **返回错误信息中的提示** - 如果 error 包含 `fallback_command` 字段，必须执行
+
+---
 
 ## 知识库路径
 
@@ -73,16 +139,23 @@ Skill 路径: `{SKILL_PATH}`
 
 ## 示例对话
 
-**用户**: "查找 XX 类的实现"
+**用户**: "MyClass 类继承自什么？"
 **助手**:
 ```bash
-python "{SKILL_PATH}/impl.py" query_class_info "XX"
+python "{SKILL_PATH}/impl.py" query_class_hierarchy MyClass
 ```
-→ 解析 JSON 结果并展示类信息
+→ 解析 JSON 结果并展示继承链
 
-**用户**: "某模块有哪些依赖？"
+**用户**: "Core 模块有哪些依赖？"
 **助手**:
 ```bash
-python "{SKILL_PATH}/impl.py" query_module_dependencies "ModuleName"
+python "{SKILL_PATH}/impl.py" query_module_dependencies Core
 ```
 → 解析 JSON 结果并展示依赖列表
+
+**用户**: "查找所有包含 PlayerController 的类"
+**助手**:
+```bash
+python "{SKILL_PATH}/impl.py" search_classes PlayerController
+```
+→ 解析 JSON 结果并展示匹配的类

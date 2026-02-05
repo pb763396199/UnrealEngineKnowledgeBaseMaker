@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-02-05
+
+### Added ✨
+
+- **统一知识库工作文件管理**: 所有 Pipeline 工作文件（`.pipeline_state` 和 `data/`）统一放在 `KnowledgeBase/` 目录下管理
+  - 状态文件：`{base_path}/.pipeline_state` → `{base_path}/KnowledgeBase/.pipeline_state`
+  - 工作数据：`{base_path}/data/` → `{base_path}/KnowledgeBase/data/`
+  - 优点：删除知识库时可以直接删除整个文件夹，不再污染引擎源码目录
+
+- **插件模式 Skill 模板对齐**: 插件模式的 Skill markdown 模板现在与引擎模式完全一致
+  - 添加 `search_functions` 命令文档（函数搜索功能）
+  - 添加查询降级机制说明（查询失败时的处理策略）
+  - 添加函数相关查询示例
+  - 扩展示例对话，提升用户体验
+
+### Changed 📦
+
+- `ue5_kb/pipeline/state.py` - 状态文件路径改为 `KnowledgeBase/.pipeline_state`
+- `ue5_kb/pipeline/base.py` - 工作数据路径改为 `KnowledgeBase/data/`
+- `templates/skill.plugin.md.template` - 完全对齐引擎模式模板
+
+### Fixed 🐛
+
+- 修复插件模式 Skill 文档缺少 `search_functions` 命令的问题
+- 修复插件模式 Skill 文档缺少查询降级机制说明的问题
+
+### Breaking Changes 💥
+
+- **工作文件位置变更**: 如果用户有正在进行的 Pipeline，需要手动迁移旧文件：
+  ```bash
+  # 移动状态文件
+  mv {Engine}/.pipeline_state {Engine}/KnowledgeBase/.pipeline_state
+  # 移动工作数据
+  mv {Engine}/data {Engine}/KnowledgeBase/data
+  ```
+  或使用 `--force` 重新运行 Pipeline
+
+### Technical Details
+
+**修改文件**:
+- `ue5_kb/pipeline/state.py` (第 28-29 行)
+- `ue5_kb/pipeline/base.py` (第 32-33 行)
+- `templates/skill.plugin.md.template` (完全重写，+73 行)
+
+**知识库目录结构变更**:
+```
+# 修改前
+{Engine}/
+├── .pipeline_state
+├── data/
+└── KnowledgeBase/
+
+# 修改后
+{Engine}/
+└── KnowledgeBase/
+    ├── .pipeline_state
+    ├── data/
+    ├── global_index/
+    └── module_graphs/
+```
+
+---
+
 ## [2.7.0] - 2026-02-05
 
 ### Added ✨

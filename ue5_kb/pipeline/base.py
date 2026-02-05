@@ -29,7 +29,8 @@ class PipelineStage(ABC):
             base_path: 引擎/插件根目录
         """
         self.base_path = Path(base_path)
-        self.data_dir = self.base_path / "data"
+        # 将工作数据放在 KnowledgeBase 目录下统一管理
+        self.data_dir = self.base_path / "KnowledgeBase" / "data"
         self.stage_dir = self.data_dir / self.stage_name
 
     @property

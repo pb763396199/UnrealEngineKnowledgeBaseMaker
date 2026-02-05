@@ -25,7 +25,8 @@ class PipelineState:
             base_path: 引擎/插件根目录
         """
         self.base_path = Path(base_path)
-        self.state_file = self.base_path / ".pipeline_state"
+        # 将状态文件放在 KnowledgeBase 目录下统一管理
+        self.state_file = self.base_path / "KnowledgeBase" / ".pipeline_state"
         self.state = self._load_state()
 
     def _load_state(self) -> Dict[str, Any]:

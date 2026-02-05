@@ -62,7 +62,14 @@ ue5kb init --engine-path "D:\UE5.1" --kb-path "J:/MyUE5KB"
 **生成结果**:
 ```
 D:\Unreal Engine\UnrealEngine51_500\
-└── KnowledgeBase\              # 知识库（1757 个模块）
+└── KnowledgeBase\              # 知识库（统一目录）
+    ├── .pipeline_state         # Pipeline 状态文件
+    ├── data/                   # 工作数据目录
+    │   ├── discover/
+    │   ├── extract/
+    │   ├── analyze/
+    │   ├── build/
+    │   └── generate/
     ├── global_index/           # 全局索引
     └── module_graphs/          # 模块图谱
 
@@ -87,9 +94,11 @@ ue5kb init --plugin-path "F:\MyPlugin" --kb-path "J:/PluginKB"
 **生成结果**:
 ```
 F:\MyProject\Plugins\MyPlugin\
-└── KnowledgeBase\              # 插件知识库
-    ├── global_index/
-    └── module_graphs/
+└── KnowledgeBase\              # 插件知识库（统一目录）
+    ├── .pipeline_state         # Pipeline 状态文件
+    ├── data/                   # 工作数据目录
+    ├── global_index/           # 全局索引
+    └── module_graphs/          # 模块图谱
 
 C:\Users\{user}\.claude\skills\
 └── myplugin-kb-1.0\            # 插件专属 Skill
@@ -155,14 +164,23 @@ ue5kb pipeline status --engine-path "D:\UE5"
 ### 知识库结构
 
 ```
-{引擎根目录}/KnowledgeBase/
-├── global_index/          # 全局模块索引
-│   ├── index.db          # SQLite 数据库
-│   └── global_index.pkl  # Pickle 索引
-└── module_graphs/         # 模块知识图谱
+{引擎根目录}/KnowledgeBase/      # 统一输出目录
+├── .pipeline_state             # Pipeline 状态文件
+├── data/                       # 工作数据目录
+│   ├── discover/               # 阶段 1: 发现的模块列表
+│   ├── extract/                # 阶段 2: 模块依赖信息
+│   ├── analyze/                # 阶段 3: 代码分析结果
+│   ├── build/                  # 阶段 4: 构建摘要
+│   └── generate/               # 阶段 5: Skill 生成标记
+├── global_index/               # 全局模块索引
+│   ├── index.db                # SQLite 数据库
+│   ├── class_index.db          # 类快速索引
+│   ├── function_index.db       # 函数快速索引
+│   └── global_index.pkl        # Pickle 索引
+└── module_graphs/              # 模块知识图谱
     ├── Core.pkl
     ├── Engine.pkl
-    └── ... (1,345+ 个引擎模块 + 插件模块)
+    └── ... (1,757+ 个模块)
 ```
 
 ### 模块覆盖范围
@@ -336,6 +354,18 @@ pip install click rich pyyaml networkx
 检查引擎目录下是否存在 `Engine/Build/Build.version` 文件。
 
 ## 更新日志
+
+### v2.8.0 (2026-02-05)
+
+**统一知识库文件管理 + 插件模式 Skill 对齐**
+- **统一工作文件管理**: 所有 Pipeline 工作文件（`.pipeline_state` 和 `data/`）统一放在 `KnowledgeBase/` 目录下
+  - 状态文件：`{base_path}/.pipeline_state` → `{base_path}/KnowledgeBase/.pipeline_state`
+  - 工作数据：`{base_path}/data/` → `{base_path}/KnowledgeBase/data/`
+- **插件模式 Skill 对齐**: 插件模式的 Skill markdown 模板现在与引擎模式完全一致
+  - 添加 `search_functions` 命令文档
+  - 添加查询降级机制说明
+  - 添加函数相关查询示例
+- **更好的文件管理**: 删除知识库时可以直接删除整个 `KnowledgeBase/` 文件夹
 
 ### v2.7.0 (2026-02-05)
 

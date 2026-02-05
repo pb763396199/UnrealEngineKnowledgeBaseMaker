@@ -16,7 +16,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="2.7.0")
+@click.version_option(version="2.8.0")
 def cli():
     """UE5 Knowledge Base Builder - UE5 知识库生成工具
 
