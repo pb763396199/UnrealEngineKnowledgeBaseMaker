@@ -61,7 +61,7 @@ class Config:
         default_config = {
             'project': {
                 'name': 'UE5 Plugin Knowledge Base' if is_plugin else 'UE5 Knowledge Base',
-                'version': '2.0.0',
+                'version': '2.10.0',
             },
             'storage': {
                 'base_path': str(base_path),
@@ -71,8 +71,13 @@ class Config:
                 'logs': 'logs',
                 'checkpoints': 'checkpoints',
             },
+            'parallel': {
+                'enabled': True,
+                'workers': 0,  # 0 = 自动检测
+                'max_workers': 16,  # 最大 worker 数限制
+                'min_workers': 1,   # 最小 worker 数
+            },
             'build': {
-                'parallel_workers': 4,
                 'batch_size': 100,
                 'checkpoint_interval': 10,
                 'resume_from_checkpoint': True,

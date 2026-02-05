@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from .base import PipelineStage
 from ..parsers.cpp_parser import CppParser
 import json
+import os
 
 
 class AnalyzeStage(PipelineStage):
@@ -35,7 +36,7 @@ class AnalyzeStage(PipelineStage):
         分析所有模块的代码结构
 
         Args:
-            parallel: 并行度（暂未实现）
+            parallel: 并行度（0=自动检测，1=串行，>1=并行）
             verbose: 是否显示详细输出
 
         Returns:
@@ -48,6 +49,26 @@ class AnalyzeStage(PipelineStage):
 
         modules = discover_result['modules']
 
+        # 确定并行度
+        if parallel == 0:  # auto
+            parallel = os.cpu_count() or 4
+
+        # 如果并行度 > 1，使用并行模式
+        if parallel > 1:
+            from .analyze_parallel import ParallelAnalyzeStage
+            from rich.console import Console
+
+            console = Console()
+            console.print(f"[cyan]使用并行模式: {parallel} workers[/cyan]")
+
+            parallel_stage = ParallelAnalyzeStage(self.base_path, num_workers=parallel)
+            return parallel_stage.run(modules, force=False, verbose=verbose)
+
+        # 否则使用原有的串行逻辑
+        return self._run_serial(modules, verbose)
+
+    def _run_serial(self, modules: List[Dict], verbose: bool) -> Dict[str, Any]:
+        """串行运行分析（原有逻辑）"""
         print(f"[Analyze] 分析 {len(modules)} 个模块的代码结构...")
         print(f"  (这是最耗时的阶段，请耐心等待)")
 

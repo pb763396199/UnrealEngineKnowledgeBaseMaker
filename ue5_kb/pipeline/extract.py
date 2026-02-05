@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from .base import PipelineStage
 from ..parsers.buildcs_parser import BuildCsParser
+import os
 
 
 class ExtractStage(PipelineStage):
@@ -30,9 +31,12 @@ class ExtractStage(PipelineStage):
         summary_file = self.stage_dir / "summary.json"
         return summary_file.exists()
 
-    def run(self, **kwargs) -> Dict[str, Any]:
+    def run(self, parallel: int = 1, **kwargs) -> Dict[str, Any]:
         """
         提取所有模块的依赖关系
+
+        Args:
+            parallel: 并行度（0=自动检测，1=串行，>1=并行）
 
         Returns:
             包含提取统计的结果
@@ -44,6 +48,26 @@ class ExtractStage(PipelineStage):
 
         modules = discover_result['modules']
 
+        # 确定并行度
+        if parallel == 0:  # auto
+            parallel = os.cpu_count() or 4
+
+        # 如果并行度 > 1，使用并行模式
+        if parallel > 1:
+            from .extract_parallel import ParallelExtractStage
+            from rich.console import Console
+
+            console = Console()
+            console.print(f"[cyan]使用并行模式: {parallel} workers[/cyan]")
+
+            parallel_stage = ParallelExtractStage(self.base_path, num_workers=parallel)
+            return parallel_stage.run(modules)
+
+        # 否则使用原有的串行逻辑
+        return self._run_serial(modules)
+
+    def _run_serial(self, modules: List[Dict]) -> Dict[str, Any]:
+        """串行运行提取（原有逻辑）"""
         print(f"[Extract] 提取 {len(modules)} 个模块的依赖...")
 
         parser = BuildCsParser()

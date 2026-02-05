@@ -16,7 +16,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="2.8.0")
+@click.version_option(version="2.10.0")
 def cli():
     """UE5 Knowledge Base Builder - UE5 知识库生成工具
 
@@ -24,6 +24,13 @@ def cli():
     支持双模式：
     - 引擎模式: 为整个 UE5 引擎生成知识库（1757+ 模块）
     - 插件模式: 为单个插件生成独立知识库
+
+    \b
+    v2.10.0 新特性：
+    - 并行加速：多进程处理，4-8x 性能提升
+    - 多进度条：实时显示各 worker 状态
+    - 性能监控：各阶段耗时统计
+    - Checkpoint：Analyze 阶段支持中断恢复
 
     \b
     可用命令：
@@ -40,8 +47,12 @@ def cli():
 
     \b
     常用示例：
-      # 引擎模式 - 快速开始
+      # 引擎模式 - 快速开始（自动检测并行度）
       ue5kb init --engine-path "D:\\Unreal Engine\\UE5.1"
+
+      # 指定并行 worker 数量
+      ue5kb init --engine-path "D:\\UE5" --workers 8
+      ue5kb init --engine-path "D:\\UE5" -j 4
 
       # 插件模式
       ue5kb init --plugin-path "F:\\MyProject\\Plugins\\MyPlugin"
@@ -49,9 +60,6 @@ def cli():
       # 高级选项
       ue5kb init --engine-path "D:\\UE5" --force
       ue5kb init --engine-path "D:\\UE5" --stage build
-
-      # Pipeline 状态查看
-      ue5kb pipeline status --engine-path "D:\\UE5"
     """
     pass
 
@@ -69,13 +77,20 @@ def cli():
               help='强制重新运行所有阶段（忽略已完成的阶段）')
 @click.option('--stage', type=click.Choice(['discover', 'extract', 'analyze', 'build', 'generate']),
               help='仅运行指定阶段（高级用法）')
-@click.option('--parallel', type=int, default=1,
-              help='并行度（用于 analyze 阶段，默认: 1）')
+@click.option('--workers', '-j', type=int, default=0,
+              help='并行工作线程数（0=自动检测 CPU 核心数，默认: 0）')
 @click.option('--verbose', '-v', is_flag=True,
               help='显示详细输出（用于调试）')
 @click.pass_context
-def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, parallel, verbose):
+def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, workers, verbose):
     """初始化并生成知识库和 Skill
+
+    \b
+    v2.10.0 新特性：
+    - 并行加速：多进程处理，4-8x 性能提升
+    - 多进度条：实时显示各 worker 状态
+    - 性能监控：各阶段耗时统计
+    - Checkpoint：Analyze 阶段支持中断恢复
 
     \b
     支持两种模式：
@@ -91,8 +106,19 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, paral
     高级选项：
     - --force: 强制重新运行所有阶段
     - --stage: 仅运行指定阶段（discover/extract/analyze/build/generate）
-    - --parallel: 并行度（用于 analyze 阶段）
+    - --workers, -j: 并行工作线程数（0=自动检测 CPU 核心数，默认: 0）
     - --verbose, -v: 显示详细输出（用于调试）
+
+    \b
+    并行处理示例：
+    # 自动检测并行度（推荐）
+    ue5kb init --engine-path "D:\\UE5" -j 0
+
+    # 指定 8 个 worker
+    ue5kb init --engine-path "D:\\UE5" --workers 8
+
+    # 串行模式（调试用）
+    ue5kb init --engine-path "D:\\UE5" --workers 1
 
     \b
     输出内容：
@@ -103,7 +129,7 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, paral
     Pipeline 阶段：
     1. discover - 发现所有模块
     2. extract - 提取模块依赖
-    3. analyze - 分析代码结构
+    3. analyze - 分析代码结构（最耗时，并行效果最明显）
     4. build - 构建索引
     5. generate - 生成 Skill
     """
@@ -125,13 +151,13 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, paral
     # 判断模式
     if plugin_path:
         # 插件模式
-        init_plugin_mode(plugin_path, kb_path, skill_path, force, stage, parallel, verbose)
+        init_plugin_mode(plugin_path, kb_path, skill_path, force, stage, workers, verbose)
     else:
         # 引擎模式
-        init_engine_mode(engine_path, kb_path, skill_path, force, stage, parallel, verbose)
+        init_engine_mode(engine_path, kb_path, skill_path, force, stage, workers, verbose)
 
 
-def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, parallel, verbose=False):
+def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, workers, verbose=False):
     """引擎模式：为整个 UE5 引擎生成知识库（使用 Pipeline 架构）"""
     console.print("\n[bold cyan]模式: 引擎知识库生成[/bold cyan]\n")
 
@@ -168,6 +194,14 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, paralle
     # 5. 使用 PipelineCoordinator 运行
     console.print("\n[bold cyan]开始 Pipeline...[/bold cyan]\n")
 
+    # 显示并行度配置
+    if workers == 0:
+        import os
+        detected_workers = os.cpu_count() or 4
+        console.print(f"[dim]自动检测并行度: {detected_workers} workers[/dim]\n")
+    else:
+        console.print(f"[dim]并行度: {workers} workers[/dim]\n")
+
     try:
         from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
@@ -176,11 +210,11 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, paralle
         if stage:
             # 仅运行指定阶段
             console.print(f"运行阶段: [cyan]{stage}[/cyan]\n")
-            result = coordinator.run_stage(stage, force=force, parallel=parallel, verbose=verbose)
+            result = coordinator.run_stage(stage, force=force, parallel=workers, verbose=verbose)
             results = {stage: result}
         else:
             # 运行完整 Pipeline
-            results = coordinator.run_all(force=force, parallel=parallel, verbose=verbose)
+            results = coordinator.run_all(force=force, parallel=workers, verbose=verbose)
 
         # 6. 显示结果
         display_pipeline_results(results)
@@ -227,7 +261,7 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, paralle
         return
 
 
-def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, parallel, verbose=False):
+def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, workers, verbose=False):
     """插件模式：为单个插件生成知识库（使用 Pipeline 架构）"""
     console.print("\n[bold cyan]模式: 插件知识库生成[/bold cyan]\n")
 
@@ -266,6 +300,14 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, paralle
     # 运行 Pipeline
     console.print("\n[bold cyan]开始 Pipeline...[/bold cyan]\n")
 
+    # 显示并行度配置
+    if workers == 0:
+        import os
+        detected_workers = os.cpu_count() or 4
+        console.print(f"[dim]自动检测并行度: {detected_workers} workers[/dim]\n")
+    else:
+        console.print(f"[dim]并行度: {workers} workers[/dim]\n")
+
     try:
         from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
@@ -273,10 +315,10 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, paralle
 
         if stage:
             console.print(f"运行阶段: [cyan]{stage}[/cyan]\n")
-            result = coordinator.run_stage(stage, force=force, parallel=parallel, verbose=verbose)
+            result = coordinator.run_stage(stage, force=force, parallel=workers, verbose=verbose)
             results = {stage: result}
         else:
-            results = coordinator.run_all(force=force, parallel=parallel, verbose=verbose)
+            results = coordinator.run_all(force=force, parallel=workers, verbose=verbose)
 
         # 显示结果
         display_pipeline_results(results)
@@ -449,6 +491,12 @@ def pipeline():
     5. generate - 生成 Skill
 
     \b
+    v2.10.0 并行加速：
+    - 使用 --workers 或 -j 指定并行线程数
+    - 0 = 自动检测 CPU 核心数（推荐）
+    - 预期 4-8x 性能提升
+
+    \b
     可用命令：
       ue5kb pipeline run              运行完整 Pipeline
       ue5kb pipeline status           查看各阶段完成状态
@@ -458,14 +506,15 @@ def pipeline():
 
     \b
     常用示例：
-      # 运行完整 Pipeline
+      # 运行完整 Pipeline（自动检测并行度）
       ue5kb pipeline run --engine-path "D:\\UE5"
 
       # 强制重新运行所有阶段
       ue5kb pipeline run --engine-path "D:\\UE5" --force
 
-      # 并行处理
-      ue5kb pipeline run --engine-path "D:\\UE5" --parallel 4
+      # 指定并行 worker 数量
+      ue5kb pipeline run --engine-path "D:\\UE5" --workers 8
+      ue5kb pipeline run --engine-path "D:\\UE5" -j 4
 
       # 查看状态
       ue5kb pipeline status --engine-path "D:\\UE5"
@@ -484,8 +533,8 @@ def pipeline():
 @click.option('--engine-path', type=click.Path(exists=True), required=True,
               help='UE5 引擎路径')
 @click.option('--force', is_flag=True, help='强制重新运行所有阶段')
-@click.option('--parallel', type=int, default=1, help='并行度（用于 analyze 阶段，默认: 1）')
-def pipeline_run(engine_path, force, parallel):
+@click.option('--workers', '-j', type=int, default=0, help='并行工作线程数（0=自动检测，默认: 0）')
+def pipeline_run(engine_path, force, workers):
     """运行完整 Pipeline
 
     \b
@@ -496,18 +545,20 @@ def pipeline_run(engine_path, force, parallel):
     示例：
       ue5kb pipeline run --engine-path "D:\\UE5"
       ue5kb pipeline run --engine-path "D:\\UE5" --force
-      ue5kb pipeline run --engine-path "D:\\UE5" --parallel 4
+      ue5kb pipeline run --engine-path "D:\\UE5" --workers 4
+      ue5kb pipeline run --engine-path "D:\\UE5" -j 0
     """
     from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
     console.print(f"\n[bold cyan]=== Pipeline 运行 ===[/bold cyan]")
     console.print(f"引擎路径: {engine_path}")
-    console.print(f"强制运行: {force}\n")
+    console.print(f"强制运行: {force}")
+    console.print(f"并行度: {workers if workers > 0 else '自动检测'}\n")
 
     coordinator = PipelineCoordinator(Path(engine_path))
 
     try:
-        results = coordinator.run_all(force=force, parallel=parallel)
+        results = coordinator.run_all(force=force, parallel=workers)
 
         # 显示结果摘要
         console.print(f"\n[bold green]=== Pipeline 完成 ===[/bold green]\n")

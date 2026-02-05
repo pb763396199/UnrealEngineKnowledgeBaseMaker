@@ -6,12 +6,15 @@ Pipeline 协调器
 
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+import os
 from .discover import DiscoverStage
 from .extract import ExtractStage
 from .analyze import AnalyzeStage
 from .build import BuildStage
 from .generate import GenerateStage
 from .state import PipelineState
+from ..utils.stage_timer import StageTimer
+from rich.console import Console
 
 
 class PipelineCoordinator:
@@ -36,6 +39,10 @@ class PipelineCoordinator:
         self.state = PipelineState(base_path)
         self.is_plugin = is_plugin
         self.plugin_name = plugin_name
+        self.console = Console()
+
+        # 初始化阶段计时器
+        self.timer = StageTimer()
 
         # 初始化各阶段
         self.stages = {
@@ -46,29 +53,62 @@ class PipelineCoordinator:
             'generate': GenerateStage(base_path, is_plugin=is_plugin, plugin_name=plugin_name)
         }
 
-    def run_all(self, force: bool = False, **kwargs) -> Dict[str, Any]:
+    def run_all(self, force: bool = False, parallel: int = 0, **kwargs) -> Dict[str, Any]:
         """
         运行完整 Pipeline
 
         Args:
             force: 是否强制重新运行已完成的阶段
+            parallel: 并行度（0=自动检测）
             **kwargs: 传递给各阶段的参数
 
         Returns:
             包含所有阶段结果的字典
         """
+        # 自动检测并行度
+        if parallel == 0:
+            parallel = os.cpu_count() or 4
+
+        # 启动 Pipeline 计时
+        self.timer.start_pipeline()
+
         results = {}
 
         for stage_name in self.STAGES:
             try:
-                result = self.run_stage(stage_name, force=force, **kwargs)
+                # 获取该阶段的总任务数
+                total_items = self._get_stage_total_items(stage_name)
+
+                # 启动阶段计时
+                self.timer.start_stage(stage_name, total_items)
+
+                result = self.run_stage(stage_name, force=force, parallel=parallel, **kwargs)
                 results[stage_name] = result
+
+                # 记录完成数量和错误
+                processed = self._get_processed_count(result)
+                errors = self._get_error_count(result)
+
+                # 结束阶段计时
+                self.timer.end_stage(stage_name, processed, errors)
+
+                # 显示阶段耗时
+                if not result.get('skipped'):
+                    elapsed = self.timer.get_stage_metrics(stage_name).elapsed
+                    self.console.print(f"[cyan]✓ {stage_name} 完成 ({elapsed:.2f}s)[/cyan]")
+
             except Exception as e:
-                print(f"\n[Pipeline] 错误: 阶段 '{stage_name}' 失败")
-                print(f"  {e}")
+                self.console.print(f"\n[red][Pipeline] 错误: 阶段 '{stage_name}' 失败[/red]")
+                self.console.print(f"  {e}")
                 results[stage_name] = {'error': str(e)}
                 # 阶段失败时停止后续阶段
                 break
+
+        # 结束 Pipeline 计时
+        self.timer.end_pipeline()
+
+        # 显示性能摘要
+        self._display_performance_summary()
 
         return results
 
@@ -186,3 +226,33 @@ class PipelineCoordinator:
                 return False
 
         return True
+
+    def _get_stage_total_items(self, stage_name: str) -> int:
+        """获取阶段总任务数"""
+        if stage_name == 'discover':
+            # 预估模块数
+            return 1757
+        elif stage_name in ['extract', 'analyze']:
+            discover_result = self.stages['discover'].load_result('modules.json')
+            if discover_result:
+                return len(discover_result.get('modules', []))
+        elif stage_name == 'build':
+            analyze_result = self.stages['analyze'].load_result('summary.json')
+            if analyze_result:
+                return analyze_result.get('analyzed_count', 0)
+        return 0
+
+    def _get_processed_count(self, result: Dict) -> int:
+        """从结果中提取处理数量"""
+        for key in ['analyzed_count', 'success_count', 'total_count', 'modules_processed', 'module_graphs_created']:
+            if key in result:
+                return result[key]
+        return 0
+
+    def _get_error_count(self, result: Dict) -> int:
+        """从结果中提取错误数量"""
+        return result.get('failed_count', 0)
+
+    def _display_performance_summary(self) -> None:
+        """显示性能摘要"""
+        self.console.print(f"\n{self.timer.format_summary()}")

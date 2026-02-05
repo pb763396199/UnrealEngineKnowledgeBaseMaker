@@ -37,13 +37,36 @@ class BuildStage(PipelineStage):
         global_index_db = kb_path / "global_index" / "index.db"
         return global_index_db.exists()
 
-    def run(self, **kwargs) -> Dict[str, Any]:
+    def run(self, parallel: int = 1, **kwargs) -> Dict[str, Any]:
         """
         构建全局索引和模块图谱
+
+        Args:
+            parallel: 并行度（0=自动检测，1=串行，>1=并行）
 
         Returns:
             构建统计
         """
+        # 确定并行度
+        if parallel == 0:  # auto
+            parallel = os.cpu_count() or 4
+
+        # 如果并行度 > 1，使用并行模式
+        if parallel > 1:
+            from .build_parallel import ParallelBuildStage
+            from rich.console import Console
+
+            console = Console()
+            console.print(f"[cyan]使用并行模式: {parallel} workers[/cyan]")
+
+            parallel_stage = ParallelBuildStage(self.base_path, num_workers=parallel)
+            return parallel_stage.run()
+
+        # 否则使用原有的串行逻辑
+        return self._run_serial()
+
+    def _run_serial(self) -> Dict[str, Any]:
+        """串行运行构建（原有逻辑）"""
         print(f"[Build] 构建知识库索引...")
 
         # 1. 创建配置
