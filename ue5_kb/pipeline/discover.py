@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 import re
 from .base import PipelineStage
+from ..core.manifest import Hasher
 
 
 class DiscoverStage(PipelineStage):
@@ -69,7 +70,7 @@ class DiscoverStage(PipelineStage):
 
     def _discover_modules(self, engine_dir: Path) -> List[Dict[str, str]]:
         """
-        递归查找所有 .Build.cs 文件
+        递归查找所有 .Build.cs 文件（v2.13.0: 添加文件哈希计算）
 
         Args:
             engine_dir: 引擎目录
@@ -86,11 +87,19 @@ class DiscoverStage(PipelineStage):
             # 推断分类
             category = self._infer_category(build_cs)
 
+            # v2.13.0: 计算文件哈希
+            file_stat = build_cs.stat()
+            file_hash = Hasher.compute_sha256(build_cs)
+
             modules.append({
                 'name': module_name,
                 'path': str(build_cs.relative_to(self.base_path)),
                 'category': category,
-                'absolute_path': str(build_cs)
+                'absolute_path': str(build_cs),
+                # v2.13.0: 文件元数据
+                'file_hash': file_hash,
+                'file_size': file_stat.st_size,
+                'file_mtime': file_stat.st_mtime
             })
 
         return sorted(modules, key=lambda m: m['name'])

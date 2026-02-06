@@ -7,6 +7,8 @@ Pipeline 协调器
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import os
+import json
+import re
 from .discover import DiscoverStage
 from .extract import ExtractStage
 from .analyze import AnalyzeStage
@@ -40,6 +42,14 @@ class PipelineCoordinator:
         self.is_plugin = is_plugin
         self.plugin_name = plugin_name
         self.console = Console()
+
+        # v2.13.0: 检测引擎/插件版本
+        self.engine_version = self._detect_version()
+        self.tool_version = self._get_tool_version()
+
+        # v2.13.0: 加载现有 manifest（用于增量更新）
+        from ..core.manifest import KBManifest
+        self.manifest = KBManifest.load(self.base_path / "KnowledgeBase")
 
         # 初始化阶段计时器
         self.timer = StageTimer()
@@ -256,3 +266,75 @@ class PipelineCoordinator:
     def _display_performance_summary(self) -> None:
         """显示性能摘要"""
         self.console.print(f"\n{self.timer.format_summary()}")
+
+    # ========================================================================
+    # v2.13.0: 版本检测方法
+    # ========================================================================
+
+    def _detect_version(self) -> str:
+        """检测引擎或插件版本"""
+        if self.is_plugin:
+            return self._detect_plugin_version()
+        return self._detect_engine_version()
+
+    def _detect_engine_version(self) -> str:
+        """从 Engine/Build/Build.version 读取版本"""
+        build_version = self.base_path / "Engine" / "Build" / "Build.version"
+        if build_version.exists():
+            try:
+                with open(build_version, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    major = data.get('MajorVersion', 5)
+                    minor = data.get('MinorVersion', 0)
+                    patch = data.get('PatchVersion', 0)
+                    return f"{major}.{minor}.{patch}"
+            except Exception:
+                pass
+
+        # 从目录名提取
+        dir_name = self.base_path.name
+        match = re.search(r'(\d+)[._](\d+)(?:[._](\d+))?', dir_name)
+        if match:
+            major = match.group(1)
+            minor = match.group(2)
+            patch = match.group(3) or '0'
+            return f"{major}.{minor}.{patch}"
+
+        return "unknown"
+
+    def _detect_plugin_version(self) -> str:
+        """从 .uplugin 文件读取版本"""
+        uplugin_files = list(self.base_path.glob("*.uplugin"))
+        if uplugin_files:
+            try:
+                with open(uplugin_files[0], 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # 优先使用 VersionName
+                    version = data.get('VersionName', '')
+                    if version:
+                        return version
+                    # 其次使用 Version
+                    version = data.get('Version', '')
+                    if version:
+                        return str(version)
+            except Exception:
+                pass
+
+        # 从目录名推测
+        dir_name = self.base_path.name
+        match = re.search(r'[-_](\d+)[._](\d+)(?:[._](\d+))?', dir_name)
+        if match:
+            major = match.group(1)
+            minor = match.group(2)
+            patch = match.group(3) or '0'
+            return f"{major}.{minor}.{patch}"
+
+        return "1.0"
+
+    def _get_tool_version(self) -> str:
+        """获取工具版本"""
+        try:
+            from importlib.metadata import version
+            return version("ue5-kb")
+        except Exception:
+            return "2.13.0"

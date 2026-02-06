@@ -16,7 +16,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="2.12.0")
+@click.version_option(version="2.13.0")
 def cli():
     """UE5 Knowledge Base Builder - UE5 知识库生成工具
 
@@ -26,18 +26,17 @@ def cli():
     - 插件模式: 为单个插件生成独立知识库
 
     \b
-    v2.12.0 新特性：
-    - CPP 文件索引：函数查询返回实现文件位置（.cpp）
-    - 新增 get_function_implementation 命令：直接获取函数实现代码
-    - 自动检测：在引擎/插件目录直接运行 `ue5kb init`
-    - 并行加速：多进程处理，4-8x 性能提升
-    - 多进度条：实时显示各 worker 状态
-    - 性能监控：各阶段耗时统计
-    - Checkpoint：Analyze 阶段支持中断恢复
+    v2.13.0 新特性：
+    - 知识库版本追踪：存储引擎版本、KB 格式版本、时间戳
+    - 文件级变更检测：SHA256 哈希，自动检测代码变更
+    - 增量更新系统：仅更新修改的模块，大幅减少更新时间
+    - Skill 版本查询：新增 get_kb_info 命令查询知识库版本
+    - 插件模式支持：插件知识库同样支持版本追踪和增量更新
 
     \b
     可用命令：
       ue5kb init            初始化并生成知识库和 Skill
+      ue5kb update          增量更新知识库（检测变更）
       ue5kb status          显示当前状态
 
     \b
@@ -442,6 +441,96 @@ def status():
 
     # TODO: 显示已生成的知识库和 Skill
     console.print("功能开发中...")
+
+
+@cli.command()
+@click.option('--engine-path', type=click.Path(exists=True),
+              help='UE5 引擎路径（未指定时自动检测）')
+@click.option('--plugin-path', type=click.Path(exists=True),
+              help='插件路径（未指定时自动检测）')
+@click.option('--full', is_flag=True,
+              help='强制完全重建（不使用增量更新）')
+@click.option('--check', is_flag=True,
+              help='仅检查更新，不执行')
+def update(engine_path, plugin_path, full, check):
+    """增量更新知识库
+
+    \b
+    检测文件变更并仅更新修改的模块，大幅减少更新时间。
+
+    \b
+    v2.13.0 新特性：
+    - 文件级变更检测：SHA256 哈希追踪每个源文件
+    - 智能差异计算：只处理变更的模块
+    - 支持引擎模式和插件模式
+
+    \b
+    示例：
+      ue5kb update --engine-path "D:\\UE5"
+      ue5kb update --plugin-path "F:\\MyProject\\Plugins\\MyPlugin"
+      ue5kb update --check
+      ue5kb update --full
+    """
+    if full:
+        console.print("[yellow]执行完全重建...[/yellow]")
+        # 调用 init 命令
+        ctx = click.get_current_context()
+        ctx.invoke(init, engine_path=engine_path, plugin_path=plugin_path, force=True)
+        return
+
+    # 检测路径
+    if not engine_path and not plugin_path:
+        from .utils.auto_detect import detect_from_cwd
+        detection = detect_from_cwd()
+        if detection.mode == 'unknown':
+            console.print("[red]无法自动检测引擎路径[/red]")
+            console.print("\n[bold cyan]请手动指定路径:[/bold cyan]")
+            console.print("  引擎模式: ue5kb update --engine-path \"D:\\Unreal Engine\\UE5\"")
+            console.print("  插件模式: ue5kb update --plugin-path \"F:\\MyProject\\Plugins\\MyPlugin\"")
+            return
+        base_path = detection.detected_path
+        is_plugin = detection.mode == 'plugin'
+    else:
+        if engine_path and plugin_path:
+            console.print("[red]错误: --engine-path 和 --plugin-path 不能同时使用[/red]")
+            return
+        base_path = Path(engine_path or plugin_path)
+        is_plugin = plugin_path is not None
+
+    # 运行增量更新
+    from .pipeline.update import UpdateStage
+
+    updater = UpdateStage(base_path)
+
+    console.print(f"\n[bold cyan]增量更新检查[/bold cyan]")
+    console.print(f"目标路径: [yellow]{base_path}[/yellow]\n")
+
+    if check:
+        # 仅检查
+        result = updater.check()
+        if 'error' in result:
+            console.print(f"[red]{result['error']}[/red]")
+            console.print(f"[dim]{result.get('reason', '')}[/dim]")
+        else:
+            console.print("[green]变更检测结果:[/green]")
+            console.print(f"  新增模块: {result['added_count']}")
+            console.print(f"  修改模块: {result['modified_count']}")
+            console.print(f"  删除模块: {result['removed_count']}")
+            console.print(f"  未变更模块: {result['unchanged_count']}")
+    else:
+        # 执行更新
+        result = updater.run()
+        if 'error' in result:
+            console.print(f"[red]{result['error']}[/red]")
+            console.print(f"[dim]{result.get('reason', '')}[/dim]")
+            console.print("\n[yellow]提示: 使用 --full 选项可以完全重建知识库[/yellow]")
+        elif result.get('modules_updated', 0) == 0:
+            console.print("[green]知识库已是最新，无需更新[/green]")
+        else:
+            console.print(f"[green]更新完成！[/green]")
+            console.print(f"  更新模块数: {result['modules_updated']}")
+            if result.get('modules_removed', 0) > 0:
+                console.print(f"  移除模块数: {result['modules_removed']}")
 
 
 def detect_engine_version(engine_path: Path) -> str:

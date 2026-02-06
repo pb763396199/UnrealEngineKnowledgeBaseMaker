@@ -87,6 +87,9 @@ class BuildStage(PipelineStage):
         # 5. 保存统计信息
         stats = global_index.get_statistics()
 
+        # 6. 创建并保存 KB 清单（v2.13.0 新增）
+        self._save_kb_manifest(kb_path, stats)
+
         result = {
             'kb_path': str(kb_path),
             'global_index_created': True,
@@ -535,3 +538,132 @@ class BuildStage(PipelineStage):
             )
 
         return graph
+
+    def _save_kb_manifest(self, kb_path: Path, stats: Dict[str, Any]) -> None:
+        """
+        保存 KB 清单文件（v2.13.0 新增）
+
+        Args:
+            kb_path: 知识库路径
+            stats: 统计信息
+        """
+        from ..core.manifest import KBManifest
+        from datetime import datetime
+        import json
+
+        print(f"  保存 KB 清单...")
+
+        # 检测引擎/插件版本
+        engine_version = self._detect_version()
+        plugin_name = self._get_plugin_name()
+
+        # 获取工具版本
+        from ..core.config import Config
+        config = Config(self.base_path / "KnowledgeBase")
+        tool_version = config.get('project.version', '2.13.0')
+
+        # 确定构建模式
+        build_mode = 'plugin' if plugin_name else 'engine'
+
+        # 获取模块信息（从全局索引）
+        modules_data = {}
+        files_data = {}
+
+        global_index_dir = kb_path / "global_index"
+        if global_index_dir.exists():
+            # 从 JSON 文件加载模块信息
+            json_file = global_index_dir / "global_index.json"
+            if json_file.exists():
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    global_data = json.load(f)
+                    for module_name, module_info in global_data.get('modules', {}).items():
+                        modules_data[module_name] = {
+                            'hash': module_info.get('module_hash', ''),
+                            'indexed_at': module_info.get('indexed_at', datetime.now().isoformat()),
+                            'file_count': module_info.get('file_count', 0)
+                        }
+
+        # 创建 KB 清单
+        now = datetime.now().isoformat()
+        manifest = KBManifest(
+            kb_version=tool_version,
+            engine_version=engine_version,
+            engine_path=str(self.base_path),
+            plugin_name=plugin_name,
+            created_at=now,  # 首次创建，创建时间和更新时间相同
+            last_updated=now,
+            build_mode=build_mode,
+            tool_version=tool_version,
+            files=files_data,
+            modules=modules_data,
+            statistics=stats
+        )
+
+        # 保存清单
+        manifest.save(kb_path)
+
+        # 同时保存到 GlobalIndex 的 metadata 表
+        global_index = GlobalIndex(config)
+        global_index.save_metadata({
+            'kb_version': tool_version,
+            'engine_version': engine_version,
+            'engine_path': str(self.base_path),
+            'plugin_name': plugin_name or '',
+            'created_at': now,
+            'last_updated': now
+        })
+
+        print(f"    KB 版本: {tool_version}")
+        print(f"    引擎/插件版本: {engine_version}")
+
+    def _detect_version(self) -> str:
+        """检测引擎或插件版本"""
+        # 首先尝试从 .uplugin 文件读取（插件模式）
+        uplugin_files = list(self.base_path.glob("*.uplugin"))
+        if uplugin_files:
+            try:
+                with open(uplugin_files[0], 'r', encoding='utf-8') as f:
+                    plugin_data = json.load(f)
+                    version = plugin_data.get('VersionName', '') or str(plugin_data.get('Version', '1.0'))
+                    if version:
+                        return version
+            except Exception:
+                pass
+
+        # 引擎模式：从 Build.version 读取
+        build_version_file = self.base_path / "Engine" / "Build" / "Build.version"
+        if build_version_file.exists():
+            try:
+                with open(build_version_file, 'r', encoding='utf-8') as f:
+                    version_data = json.load(f)
+                    major = version_data.get('MajorVersion', 5)
+                    minor = version_data.get('MinorVersion', 0)
+                    patch = version_data.get('PatchVersion', 0)
+                    return f"{major}.{minor}.{patch}"
+            except Exception:
+                pass
+
+        # 从目录名推测
+        dir_name = self.base_path.name
+        import re
+        match = re.search(r'(\d+)[._](\d+)(?:[._](\d+))?', dir_name)
+        if match:
+            major = match.group(1)
+            minor = match.group(2)
+            patch = match.group(3) or '0'
+            return f"{major}.{minor}.{patch}"
+
+        return "unknown"
+
+    def _get_plugin_name(self) -> str:
+        """获取插件名称（仅插件模式）"""
+        # 检查是否有 .uplugin 文件
+        uplugin_files = list(self.base_path.glob("*.uplugin"))
+        if uplugin_files:
+            try:
+                with open(uplugin_files[0], 'r', encoding='utf-8') as f:
+                    plugin_data = json.load(f)
+                    return plugin_data.get('Name', '')
+            except Exception:
+                pass
+        return None

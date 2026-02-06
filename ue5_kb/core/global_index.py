@@ -278,5 +278,55 @@ class GlobalIndex:
         """检查模块是否在索引中"""
         return module_name in self.index
 
+    def save_metadata(self, metadata: Dict[str, Any]) -> None:
+        """
+        保存知识库元数据到 SQLite metadata 表
+
+        Args:
+            metadata: 元数据字典，包含 kb_version, engine_version 等
+        """
+        import sqlite3
+
+        db_path = os.path.join(self.config.global_index_path, "index.db")
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # Create metadata table if not exists
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+
+        # Insert metadata
+        for key, value in metadata.items():
+            cursor.execute('INSERT OR REPLACE INTO metadata VALUES (?, ?)', (key, str(value)))
+
+        conn.commit()
+        conn.close()
+
+    def load_metadata(self) -> Dict[str, Any]:
+        """
+        从 SQLite metadata 表加载知识库元数据
+
+        Returns:
+            元数据字典
+        """
+        import sqlite3
+
+        db_path = os.path.join(self.config.global_index_path, "index.db")
+        if not os.path.exists(db_path):
+            return {}
+
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT key, value FROM metadata')
+        metadata = dict(cursor.fetchall())
+
+        conn.close()
+        return metadata
+
     def __repr__(self) -> str:
         return f"GlobalIndex(modules={len(self.index)}, version={self.config.get('project.version')})"

@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from .base import PipelineStage
 from ..parsers.buildcs_parser import BuildCsParser
+from ..core.manifest import FileInfo, ModuleManifest, Hasher
+from datetime import datetime
 import os
+import json
 
 
 class ExtractStage(PipelineStage):
@@ -121,7 +124,7 @@ class ExtractStage(PipelineStage):
         module_info: Dict[str, str]
     ) -> None:
         """
-        保存单个模块的依赖信息
+        保存单个模块的依赖信息（v2.13.0: 同时创建模块清单）
 
         Args:
             module_name: 模块名
@@ -141,6 +144,67 @@ class ExtractStage(PipelineStage):
             'dependencies': dependencies
         }
 
-        import json
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(full_data, f, indent=2, ensure_ascii=False)
+
+        # v2.13.0: 创建模块清单
+        self._create_module_manifest(module_name, module_info, module_dir)
+
+    def _create_module_manifest(
+        self,
+        module_name: str,
+        module_info: Dict[str, str],
+        module_dir: Path
+    ) -> None:
+        """
+        创建模块清单文件（v2.13.0 新增）
+
+        Args:
+            module_name: 模块名
+            module_info: 模块信息
+            module_dir: 模块目录
+        """
+        build_cs_path = Path(module_info['absolute_path'])
+        source_dir = build_cs_path.parent
+
+        # 收集所有源文件
+        source_files = []
+        file_info_dict = {}
+
+        for ext in ['*.h', '*.cpp', '*.inl']:
+            for source_file in source_dir.rglob(ext):
+                rel_path = str(source_file.relative_to(self.base_path))
+                stat = source_file.stat()
+                file_hash = Hasher.compute_sha256(source_file)
+
+                file_info_dict[rel_path] = FileInfo(
+                    path=rel_path,
+                    sha256=file_hash,
+                    size=stat.st_size,
+                    mtime=stat.st_mtime
+                )
+                source_files.append(source_file)
+
+        # 计算模块哈希
+        module_hash = Hasher.compute_module_hash(build_cs_path, source_files)
+
+        # 获取工具版本
+        from ..core.config import Config
+        config = Config(self.base_path / "KnowledgeBase")
+        tool_version = config.get('project.version', '2.13.0')
+
+        # 创建模块清单
+        manifest = ModuleManifest(
+            module_name=module_name,
+            build_cs_path=module_info['path'],
+            category=module_info['category'],
+            files=file_info_dict,
+            module_hash=module_hash,
+            indexed_at=datetime.now().isoformat(),
+            parser_version=tool_version
+        )
+
+        # 保存模块清单
+        manifest_file = module_dir / "module_manifest.json"
+        with open(manifest_file, 'w', encoding='utf-8') as f:
+            json.dump(manifest.to_dict(), f, indent=2, ensure_ascii=False)

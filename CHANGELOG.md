@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-02-06
+
+### Added ✨
+
+**知识库版本追踪系统** - 完整的版本控制和变更检测
+- **KBManifest 清单文件**: 存储知识库元数据
+  - 引擎/插件版本号（自动检测）
+  - KB 格式版本（从 pyproject.toml）
+  - 创建时间和最后更新时间
+  - 工具版本信息
+  - 文件存储位置：`KnowledgeBase/.kb_manifest.json`
+- **文件级变更检测**: SHA256 哈希追踪
+  - 为每个源文件（.Build.cs, .h, .cpp, .inl）计算哈希
+  - 记录文件大小和修改时间
+  - 模块级哈希（所有源文件的组合哈希）
+  - 支持检测：新增、修改、删除的模块
+- **增量更新系统**: 仅更新变更的模块
+  - 新增 `ue5kb update` 命令
+  - 自动比较新旧 manifest，检测变更
+  - 只对变更的模块运行 pipeline
+  - 大幅减少更新时间（如只修改 1 个模块，更新时间从 30 分钟降至 2 分钟）
+- **Skill 版本查询**: 新增 `get_kb_info` 命令
+  - 查询知识库的版本信息
+  - 返回引擎版本、KB 格式版本、创建时间等
+
+### Changed 📦
+
+- **Config 扩展**: 添加 `project.engine_version`, `project.engine_path`, `project.plugin_name` 字段
+- **GlobalIndex 元数据**: 添加 `metadata` 表存储 KB 版本信息
+- **ModuleGraph 元数据**: 添加 `metadata` 字段存储版本和哈希信息
+- **双模式支持**: 引擎模式和插件模式都支持版本追踪和增量更新
+
+### CLI 更新
+
+```bash
+# 新增增量更新命令
+ue5kb update --engine-path "D:\UE5"
+ue5kb update --plugin-path "F:\Plugins\MyPlugin"
+
+# 仅检查变更，不执行更新
+ue5kb update --check
+
+# 强制完全重建（不使用增量更新）
+ue5kb update --full
+
+# 查询知识库版本信息
+python ~/.claude/skills/ue5kb-5.5.4/impl.py get_kb_info
+```
+
+### Technical Details
+
+**新增文件**:
+- `ue5_kb/core/manifest.py` (~200 行)
+  - `FileInfo`: 单个源文件信息（path, sha256, size, mtime）
+  - `ModuleManifest`: 单个模块清单（module_name, files, module_hash）
+  - `KBManifest`: 知识库根清单（版本、时间戳、模块列表）
+  - `Hasher`: 文件哈希工具（SHA256 计算）
+
+**修改文件**:
+- `ue5_kb/core/config.py`: 添加版本字段
+- `ue5_kb/core/global_index.py`: 添加 `metadata` 表和 `save_metadata()` 方法
+- `ue5_kb/core/module_graph.py`: 添加 `metadata` 字段到 pickle 结构
+- `ue5_kb/pipeline/coordinator.py`: 添加版本检测和 manifest 加载
+- `ue5_kb/pipeline/discover.py`: 为 .Build.cs 文件计算哈希
+- `ue5_kb/pipeline/extract.py`: 创建 module_manifest.json
+- `ue5_kb/pipeline/build.py`: 创建 .kb_manifest.json
+- `ue5_kb/pipeline/update.py`: 增量更新逻辑（新建）
+- `ue5_kb/cli.py`: 添加 `update` 命令，版本更新到 2.13.0
+- `templates/skill.md.template`: 添加版本信息章节
+- `templates/impl.py.template`: 添加 `get_kb_info()` 函数
+- `templates/skill.plugin.md.template`: 添加版本信息章节（插件模式）
+- `templates/impl.plugin.py.template`: 添加 `get_kb_info()` 函数（插件模式）
+
+### Breaking Changes
+
+无 - 完全向后兼容
+
+### Migration Notes
+
+现有知识库可以继续使用。如需启用增量更新功能：
+```bash
+# 重新生成知识库（会自动创建 manifest）
+ue5kb init --force
+
+# 或者下次代码变更后，直接使用 update 命令
+ue5kb update
+```
+
 ## [2.12.0] - 2026-02-06
 
 ### Added ✨

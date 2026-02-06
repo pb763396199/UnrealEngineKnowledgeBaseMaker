@@ -61,7 +61,10 @@ class Config:
         default_config = {
             'project': {
                 'name': 'UE5 Plugin Knowledge Base' if is_plugin else 'UE5 Knowledge Base',
-                'version': '2.10.0',
+                'version': '2.13.0',
+                'engine_version': '',  # Will be filled by CLI
+                'engine_path': '',  # Will be filled by CLI
+                'plugin_name': None,  # For plugin mode
             },
             'storage': {
                 'base_path': str(base_path),

@@ -194,12 +194,45 @@ class GenerateStage(PipelineStage):
         if not skill_md_template.exists() or not impl_py_template.exists():
             raise FileNotFoundError("模板文件不存在")
 
+        # 从 manifest 加载版本信息
+        from ..core.manifest import KBManifest
+        from datetime import datetime
+
+        manifest = KBManifest.load(kb_path)
+
+        # 获取版本信息
+        if manifest:
+            kb_version = manifest.kb_version
+            created_at = manifest.created_at
+            last_updated = manifest.last_updated
+        else:
+            # 降级：使用默认值
+            kb_version = "2.13.0"
+            now = datetime.now().isoformat()
+            created_at = now
+            last_updated = now
+
+        # 获取工具版本（从 importlib.metadata，避免 Config 权限问题）
+        try:
+            from importlib.metadata import version
+            tool_version = version("ue5-kb")
+        except Exception:
+            tool_version = "2.13.0"
+
+        # 插件版本（仅插件模式）
+        plugin_version = self._detect_plugin_version() if self.is_plugin else None
+
         # 替换变量
         variables = {
             'ENGINE_VERSION': engine_version,
+            'KB_VERSION': kb_version,
+            'TOOL_VERSION': tool_version,
+            'CREATED_AT': created_at,
+            'LAST_UPDATED': last_updated,
             'KB_PATH': str(kb_path).replace('\\', '\\\\'),
             'SKILL_PATH': str(skill_path),
             'PLUGIN_NAME': self.plugin_name or 'Unknown',
+            'PLUGIN_VERSION': plugin_version or '1.0',
         }
 
         # 生成 skill.md

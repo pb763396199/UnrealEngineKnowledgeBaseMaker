@@ -14,6 +14,14 @@ from typing import Dict, List, Any, Optional
 # 知识库路径 (绝对路径)
 KB_PATH = Path(r"{KB_PATH}")
 
+# KB 版本信息（插件模式）
+KB_PLUGIN_NAME = "{PLUGIN_NAME}"
+KB_PLUGIN_VERSION = "{PLUGIN_VERSION}"
+KB_FORMAT_VERSION = "{KB_VERSION}"
+KB_TOOL_VERSION = "{TOOL_VERSION}"
+KB_CREATED_AT = "{CREATED_AT}"
+KB_LAST_UPDATED = "{LAST_UPDATED}"
+
 # 全局缓存
 _global_index_cache = None
 _module_graphs_cache = {{}}
@@ -169,6 +177,19 @@ def get_statistics() -> Dict[str, Any]:
     return {{
         "total_modules": len(all_modules),
         "categories": categories
+    }}
+
+
+def get_kb_info() -> Dict[str, Any]:
+    """获取知识库版本信息"""
+    return {{
+        "plugin_name": KB_PLUGIN_NAME,
+        "plugin_version": KB_PLUGIN_VERSION,
+        "kb_format_version": KB_FORMAT_VERSION,
+        "tool_version": KB_TOOL_VERSION,
+        "created_at": KB_CREATED_AT,
+        "last_updated": KB_LAST_UPDATED,
+        "kb_path": str(KB_PATH)
     }}
 
 
@@ -543,6 +564,7 @@ if __name__ == "__main__":
         print("  search_classes <keyword> [limit]           - 搜索类", file=sys.stderr)
         print("  search_modules <keyword>                   - 搜索模块", file=sys.stderr)
         print("  get_statistics                             - 获取统计信息", file=sys.stderr)
+        print("  get_kb_info                                - 获取知识库版本信息", file=sys.stderr)
         print("", file=sys.stderr)
         print("Examples:", file=sys.stderr)
         print('  python impl.py query_class_info AActor', file=sys.stderr)
@@ -628,6 +650,10 @@ if __name__ == "__main__":
 
         elif command == "get_statistics":
             result = get_statistics()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "get_kb_info":
+            result = get_kb_info()
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         else:

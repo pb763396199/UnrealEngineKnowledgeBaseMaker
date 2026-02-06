@@ -199,3 +199,21 @@ python "{SKILL_PATH}/impl.py" query_function_info "BeginPlay"
 - `line`: 声明行号
 - `impl_file`: 实现文件路径（.cpp）
 - `impl_line`: 实现行号
+
+---
+
+## 知识库版本信息
+
+此技能生成的知识库信息：
+- **引擎版本**: {ENGINE_VERSION}
+- **KB 格式版本**: {KB_VERSION}
+- **工具版本**: {TOOL_VERSION}
+- **创建时间**: {CREATED_AT}
+- **最后更新**: {LAST_UPDATED}
+
+如需检查知识库是否为最新版本，比较引擎版本即可。
+
+查询知识库版本信息：
+```bash
+python "{SKILL_PATH}/impl.py" get_kb_info
+```
