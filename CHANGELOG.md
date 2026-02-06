@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-02-06
+
+### Added ✨
+
+**CPP 文件索引功能 - 快速定位函数实现**
+- **函数实现位置追踪**: 知识库现在包含函数的 CPP 实现文件路径和行号
+  - `query_function_info` 返回 `impl_file` 和 `impl_line` 字段
+  - `search_functions` 返回 `impl_file` 字段
+- **新增 `get_function_implementation` 命令**: 直接获取函数的完整实现代码
+  - 自动定位 CPP 文件位置
+  - 返回声明位置和实现位置
+  - 支持读取完整的 CPP 文件内容
+- **基于 #include 的反向映射**: 使用智能解析策略
+  - 解析所有 CPP 文件的 `#include` 语句
+  - 建立头文件到 CPP 文件的映射关系
+  - 支持同名文件优先策略
+  - 精确定位函数定义行号
+
+### Changed 📦
+
+- **FunctionInfo 数据结构扩展**: 添加 `impl_file_path`, `impl_line_number`, `impl_candidates` 字段
+- **FunctionIndex 数据库扩展**: 添加 `impl_file_path` 和 `impl_line_number` 列
+- **数据库自动迁移**: 现有数据库自动添加新字段，无需手动重建
+- **插件模板同步**: 插件模板现在包含所有新功能
+
+### Fixed 🐛
+
+- 修复插件模式使用旧模板的问题
+- 修复旧数据库版本兼容性问题（自动添加缺失字段）
+
+### CLI 更新
+
+```bash
+# 更新现有 Skill（强制重新生成）
+ue5kb init --engine-path "D:\UE5" --stage generate --force
+ue5kb init --plugin-path "F:\Plugins\MyPlugin" --stage generate --force
+```
+
+### Technical Details
+
+**新增文件**:
+- `ue5_kb/builders/header_cpp_mapper.py` (~170 行)
+  - `HeaderToCppMapper`: 头文件到 CPP 文件映射器
+  - 基于多策略的路径解析（相对路径、Public/Private 目录、文件名索引）
+
+**修改文件**:
+- `ue5_kb/parsers/cpp_parser.py`: FunctionInfo 添加实现位置字段
+- `ue5_kb/core/function_index.py`: 数据库结构扩展和自动迁移
+- `ue5_kb/builders/module_graph_builder.py`: 集成 HeaderToCppMapper
+- `templates/impl.py.template`: 添加 `get_function_implementation` 函数
+- `templates/impl.plugin.py.template`: 同步主模板功能
+- `templates/skill.md.template`: 添加新功能文档
+- `templates/skill.plugin.md.template`: 同步主模板功能
+- `ue5_kb/cli.py`: 版本更新到 2.12.0，帮助文档更新
+
+### Breaking Changes
+
+无 - 完全向后兼容
+
+### Migration Notes
+
+现有知识库可以继续使用，新功能自动启用。如需更新现有 Skill：
+```bash
+# 强制重新生成（获取新功能）
+ue5kb init --stage generate --force
+```
+
 ## [2.11.0] - 2026-02-06
 
 ### Added ✨

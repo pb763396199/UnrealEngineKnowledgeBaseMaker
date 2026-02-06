@@ -5,6 +5,7 @@ UE5 知识库系统 - 模块图谱构建器
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -14,6 +15,7 @@ import traceback
 from ..core.config import Config
 from ..core.module_graph import ModuleGraph
 from ..parsers.cpp_parser import CppParser
+from .header_cpp_mapper import HeaderToCppMapper
 
 
 class ModuleGraphBuilder:
@@ -62,6 +64,15 @@ class ModuleGraphBuilder:
         except Exception as e:
             print(f"  警告: 无法初始化函数索引: {e}")
 
+        # 新增：构建头文件到 cpp 文件的映射
+        mapper = None
+        try:
+            mapper = HeaderToCppMapper(module_path)
+            header_to_cpps = mapper.build_mapping()
+        except Exception as e:
+            print(f"  警告: 构建头文件映射失败: {e}")
+            header_to_cpps = {}
+
         # 收集所有函数信息（用于批量插入）
         all_functions = []
 
@@ -72,9 +83,14 @@ class ModuleGraphBuilder:
             dirs[:] = [d for d in dirs if d not in ['Intermediate', 'Saved', 'Binaries', 'Private']]
 
             for file in files:
-                if file.endswith(('.h', '.cpp')):
+                if file.endswith('.h'):
                     file_path = os.path.join(root, file)
-                    func_infos = self._parse_source_file(graph, file_path, module_path)
+                    # 获取包含此头文件的 cpp 文件列表
+                    related_cpps = header_to_cpps.get(file_path, [])
+                    func_infos = self._parse_source_file(
+                        graph, file_path, module_path,
+                        related_cpps=related_cpps
+                    )
                     if func_infos and func_index:
                         all_functions.extend(func_infos)
                     file_count += 1
@@ -127,7 +143,10 @@ class ModuleGraphBuilder:
 
         return graphs
 
-    def _parse_source_file(self, graph: ModuleGraph, file_path: str, module_path: str) -> List[Dict[str, Any]]:
+    def _parse_source_file(
+        self, graph: ModuleGraph, file_path: str, module_path: str,
+        related_cpps: List[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         解析源文件并添加到图谱
 
@@ -135,11 +154,13 @@ class ModuleGraphBuilder:
             graph: 模块图谱
             file_path: 源文件路径
             module_path: 模块路径
+            related_cpps: 包含此头文件的所有 cpp 文件列表
 
         Returns:
             提取的函数信息列表（用于函数索引）
         """
         func_infos_for_index = []
+        related_cpps = related_cpps or []
 
         try:
             # 解析文件
@@ -188,6 +209,37 @@ class ModuleGraphBuilder:
 
             # 添加函数节点并收集索引信息
             for func_key, func_info in functions.items():
+                # 设置文件路径
+                func_info.file_path = file_path
+
+                # 如果有相关的 cpp 文件，尝试找到函数定义
+                if related_cpps:
+                    # 优先策略：查找同名 cpp 文件
+                    basename = os.path.splitext(os.path.basename(file_path))[0]
+                    same_name_cpp = None
+                    for cpp in related_cpps:
+                        if os.path.splitext(os.path.basename(cpp))[0] == basename:
+                            same_name_cpp = cpp
+                            break
+
+                    # 设置实现文件
+                    if same_name_cpp:
+                        func_info.impl_file_path = same_name_cpp
+                    else:
+                        func_info.impl_file_path = related_cpps[0]
+
+                    func_info.impl_candidates = related_cpps
+
+                    # 尝试在 cpp 文件中精确定位函数定义行号
+                    if func_info.impl_file_path:
+                        line_num = self._find_function_definition(
+                            func_info.impl_file_path,
+                            func_info.name,
+                            func_info.class_name
+                        )
+                        if line_num > 0:
+                            func_info.impl_line_number = line_num
+
                 # 跳过类方法（已在类中处理）
                 if func_info.class_name:
                     continue
@@ -204,7 +256,9 @@ class ModuleGraphBuilder:
                     is_ufunction=func_info.is_ufunction,
                     is_blueprint_callable=func_info.is_blueprint_callable,
                     file_path=func_info.file_path,
-                    line_number=func_info.line_number
+                    line_number=func_info.line_number,
+                    impl_file=func_info.impl_file_path,
+                    impl_line=func_info.impl_line_number
                 )
                 graph.add_edge(file_id, func_id, ModuleGraph.REL_TYPE_CONTAINS)
 
@@ -219,6 +273,8 @@ class ModuleGraphBuilder:
                     'signature': signature,
                     'file_path': func_info.file_path,
                     'line_number': func_info.line_number,
+                    'impl_file_path': func_info.impl_file_path,
+                    'impl_line_number': func_info.impl_line_number,
                     'is_virtual': func_info.is_virtual,
                     'is_const': func_info.is_const,
                     'is_static': func_info.is_static,
@@ -231,6 +287,44 @@ class ModuleGraphBuilder:
             print(f"  警告: 解析文件 {file_path} 时出错: {e}")
 
         return func_infos_for_index
+
+    def _find_function_definition(self, cpp_path: str, func_name: str, class_name: str = None) -> int:
+        """
+        在 cpp 文件中查找函数定义的行号
+
+        Args:
+            cpp_path: CPP 文件路径
+            func_name: 函数名称
+            class_name: 类名称（可选）
+
+        Returns:
+            函数定义的行号，如果找不到则返回 0
+        """
+        try:
+            with open(cpp_path, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+
+            # 构建函数定义模式
+            if class_name:
+                # 类成员函数: ReturnType ClassName::FunctionName(...)
+                patterns = [
+                    rf'\b\w+\s+{class_name}::\s*{func_name}\s*\(',
+                    rf'\bvoid\s+{class_name}::\s*{func_name}\s*\(',
+                ]
+            else:
+                # 普通函数: ReturnType FunctionName(...)
+                patterns = [
+                    rf'\b\w+\s+{func_name}\s*\(',
+                    rf'\bvoid\s+{func_name}\s*\(',
+                ]
+
+            for i, line in enumerate(lines, 1):
+                for pattern in patterns:
+                    if re.search(pattern, line):
+                        return i
+        except Exception:
+            pass
+        return 0
 
 
 def main():

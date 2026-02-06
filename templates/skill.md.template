@@ -54,7 +54,8 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | `query_class_hierarchy` | `<class_name> [depth=3]` | 查询类的继承层次 |
 | `query_module_dependencies` | `<module_name>` | 查询模块依赖关系 |
 | `query_module_classes` | `<module_name> [class_type]` | 查询模块中的所有类 |
-| `query_function_info` | `<function_name> [module_hint]` | 查询函数信息 |
+| `query_function_info` | `<function_name> [module_hint]` | 查询函数信息（包含声明和实现位置） |
+| `get_function_implementation` | `<function_name> [class_name] [module_hint]` | 获取函数的完整实现代码 |
 | `search_functions` | `<keyword> [limit=50]` | 搜索包含关键字的函数 |
 | `search_classes` | `<keyword> [limit=50]` | 搜索包含关键字的类 |
 | `search_modules` | `<keyword>` | 搜索包含关键字的模块 |
@@ -158,3 +159,43 @@ python "{SKILL_PATH}/impl.py" query_module_dependencies Core
 python "{SKILL_PATH}/impl.py" search_classes PlayerController
 ```
 → 解析 JSON 结果并展示匹配的类
+
+---
+
+## CPP 文件索引功能
+
+此知识库支持 CPP 文件索引，可以获取函数的实现位置。
+
+### 获取函数实现
+
+使用 `get_function_implementation` 命令直接获取函数的 C++ 实现代码：
+
+```bash
+# 基本用法
+python "{SKILL_PATH}/impl.py" get_function_implementation "Tick"
+
+# 指定类名（处理同名函数）
+python "{SKILL_PATH}/impl.py" get_function_implementation "Tick" "AActor"
+
+# 指定模块提示（加速查询）
+python "{SKILL_PATH}/impl.py" get_function_implementation "Tick" "AActor" "Engine"
+```
+
+返回结果包含：
+- `declaration_file`: 声明位置（.h 头文件）
+- `implementation_file`: 实现位置（.cpp 文件）
+- `file_content`: 完整的 cpp 文件内容（用于理解函数实现）
+
+### 查询函数信息
+
+`query_function_info` 现在返回函数的实现位置：
+
+```bash
+python "{SKILL_PATH}/impl.py" query_function_info "BeginPlay"
+```
+
+返回结果包含：
+- `file`: 声明文件路径（.h）
+- `line`: 声明行号
+- `impl_file`: 实现文件路径（.cpp）
+- `impl_line`: 实现行号

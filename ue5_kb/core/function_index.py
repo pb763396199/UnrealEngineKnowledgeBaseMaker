@@ -48,8 +48,10 @@ class FunctionIndex:
                 return_type TEXT,
                 parameters TEXT,                -- JSON 序列化
                 signature TEXT,                 -- 完整签名（便于显示）
-                file_path TEXT,
-                line_number INTEGER,
+                file_path TEXT,                 -- 声明位置（头文件）
+                line_number INTEGER,            -- 声明行号
+                impl_file_path TEXT,            -- 实现位置（cpp文件）
+                impl_line_number INTEGER,       -- 实现行号
                 is_virtual BOOLEAN DEFAULT 0,
                 is_const BOOLEAN DEFAULT 0,
                 is_static BOOLEAN DEFAULT 0,
@@ -59,6 +61,24 @@ class FunctionIndex:
                 UNIQUE(name, module, class_name, file_path, line_number)
             )
         """)
+
+        # 数据库迁移：为旧版本添加新字段
+        try:
+            # 检查表结构
+            cursor.execute("PRAGMA table_info(function_index)")
+            columns = {row[1] for row in cursor.fetchall()}
+
+            # 添加新字段（如果不存在）
+            if 'impl_file_path' not in columns:
+                cursor.execute("ALTER TABLE function_index ADD COLUMN impl_file_path TEXT")
+                print("  [迁移] 添加 impl_file_path 字段")
+
+            if 'impl_line_number' not in columns:
+                cursor.execute("ALTER TABLE function_index ADD COLUMN impl_line_number INTEGER DEFAULT 0")
+                print("  [迁移] 添加 impl_line_number 字段")
+
+        except Exception as e:
+            print(f"  警告: 数据库迁移失败: {e}")
 
         # 创建索引以优化查询
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_func_name ON function_index(name)")
@@ -84,10 +104,10 @@ class FunctionIndex:
         cursor.execute("""
             INSERT OR REPLACE INTO function_index (
                 name, module, class_name, return_type, parameters, signature,
-                file_path, line_number,
+                file_path, line_number, impl_file_path, impl_line_number,
                 is_virtual, is_const, is_static, is_override,
                 is_blueprint_callable, ufunction_specifiers
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             func_info['name'],
             func_info['module'],
@@ -97,6 +117,8 @@ class FunctionIndex:
             func_info.get('signature', ''),
             func_info.get('file_path', ''),
             func_info.get('line_number', 0),
+            func_info.get('impl_file_path', ''),
+            func_info.get('impl_line_number', 0),
             func_info.get('is_virtual', False),
             func_info.get('is_const', False),
             func_info.get('is_static', False),
@@ -128,6 +150,8 @@ class FunctionIndex:
                 func_info.get('signature', ''),
                 func_info.get('file_path', ''),
                 func_info.get('line_number', 0),
+                func_info.get('impl_file_path', ''),
+                func_info.get('impl_line_number', 0),
                 func_info.get('is_virtual', False),
                 func_info.get('is_const', False),
                 func_info.get('is_static', False),
@@ -139,10 +163,10 @@ class FunctionIndex:
         cursor.executemany("""
             INSERT OR REPLACE INTO function_index (
                 name, module, class_name, return_type, parameters, signature,
-                file_path, line_number,
+                file_path, line_number, impl_file_path, impl_line_number,
                 is_virtual, is_const, is_static, is_override,
                 is_blueprint_callable, ufunction_specifiers
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, data)
 
         self.conn.commit()
@@ -246,6 +270,8 @@ class FunctionIndex:
             'signature': row['signature'],
             'file_path': row['file_path'],
             'line_number': row['line_number'],
+            'impl_file_path': row['impl_file_path'],
+            'impl_line_number': row['impl_line_number'],
             'is_virtual': bool(row['is_virtual']),
             'is_const': bool(row['is_const']),
             'is_static': bool(row['is_static']),

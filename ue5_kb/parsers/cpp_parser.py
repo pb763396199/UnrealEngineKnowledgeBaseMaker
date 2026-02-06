@@ -99,8 +99,11 @@ class FunctionInfo:
     is_blueprint_callable: bool = False
     ufunction_specifiers: Dict[str, Any] = field(default_factory=dict)
     class_name: Optional[str] = None
-    file_path: str = ""
-    line_number: int = 0
+    file_path: str = ""                # 声明位置（头文件）
+    line_number: int = 0               # 声明行号
+    impl_file_path: str = ""           # 实现位置（cpp文件）
+    impl_line_number: int = 0          # 实现行号
+    impl_candidates: List[str] = field(default_factory=list)  # 可能的实现文件列表
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -117,7 +120,10 @@ class FunctionInfo:
             'ufunction_specifiers': self.ufunction_specifiers,
             'class_name': self.class_name,
             'file_path': self.file_path,
-            'line_number': self.line_number
+            'line_number': self.line_number,
+            'impl_file_path': self.impl_file_path,
+            'impl_line_number': self.impl_line_number,
+            'impl_candidates': self.impl_candidates
         }
 
 

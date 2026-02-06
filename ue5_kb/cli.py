@@ -16,7 +16,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="2.11.0")
+@click.version_option(version="2.12.0")
 def cli():
     """UE5 Knowledge Base Builder - UE5 知识库生成工具
 
@@ -26,7 +26,9 @@ def cli():
     - 插件模式: 为单个插件生成独立知识库
 
     \b
-    v2.11.0 新特性：
+    v2.12.0 新特性：
+    - CPP 文件索引：函数查询返回实现文件位置（.cpp）
+    - 新增 get_function_implementation 命令：直接获取函数实现代码
     - 自动检测：在引擎/插件目录直接运行 `ue5kb init`
     - 并行加速：多进程处理，4-8x 性能提升
     - 多进度条：实时显示各 worker 状态
@@ -86,7 +88,9 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, worke
     """初始化并生成知识库和 Skill
 
     \b
-    v2.11.0 新特性：
+    v2.12.0 新特性：
+    - CPP 文件索引：知识库现在包含函数的实现文件位置（.cpp）
+    - Skill 新增 get_function_implementation 命令，可直接获取函数实现代码
     - 自动检测：在引擎/插件目录直接运行 `ue5kb init`，无需指定路径
     - 并行加速：多进程处理，4-8x 性能提升
     - 多进度条：实时显示各 worker 状态

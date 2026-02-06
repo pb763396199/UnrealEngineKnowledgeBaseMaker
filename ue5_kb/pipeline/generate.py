@@ -59,20 +59,24 @@ class GenerateStage(PipelineStage):
 
         # 确定 Skill 名称
         if not skill_name:
-            if not engine_version:
-                engine_version = self._detect_engine_version()
             if self.is_plugin and self.plugin_name:
-                # 插件模式: {plugin_name}-kb-{version}
-                skill_name = f"{self.plugin_name}-kb-{engine_version}"
+                # 插件模式: {plugin_name}-kb (不包含版本)
+                skill_name = f"{self.plugin_name}-kb"
             else:
                 # 引擎模式: ue5kb-{version}
+                if not engine_version:
+                    engine_version = self._detect_engine_version()
                 skill_name = f"ue5kb-{engine_version}"
 
         # 确定 Skill 目录
         skill_path = self._get_skill_path(skill_name)
 
         # 生成 Skill（根据模式选择模板）
-        self._generate_skill(kb_path, skill_path, engine_version)
+        # 插件模式使用插件版本，引擎模式使用引擎版本
+        version = self._detect_plugin_version() if self.is_plugin else engine_version
+        if not version:
+            version = "1.0"
+        self._generate_skill(kb_path, skill_path, version)
 
         # 创建标记文件
         self.stage_dir.mkdir(parents=True, exist_ok=True)
@@ -108,24 +112,6 @@ class GenerateStage(PipelineStage):
                 patch = version_data.get('PatchVersion', 0)
                 return f"{major}.{minor}.{patch}"
 
-        # 插件模式：尝试从 .uplugin 文件读取引擎版本或插件版本
-        uplugin_files = list(self.base_path.glob("*.uplugin"))
-        if uplugin_files:
-            import json
-            try:
-                with open(uplugin_files[0], 'r', encoding='utf-8') as f:
-                    plugin_data = json.load(f)
-                    # 尝试获取引擎版本
-                    engine_version = plugin_data.get('EngineVersion', '')
-                    if engine_version:
-                        return engine_version
-                    # 否则使用插件版本号
-                    version = plugin_data.get('VersionName', '')
-                    if version:
-                        return version
-            except Exception:
-                pass
-
         # 从目录名推测
         dir_name = self.base_path.name
         import re
@@ -137,6 +123,38 @@ class GenerateStage(PipelineStage):
             return f"{major}.{minor}.{patch}"
 
         return "5.0.0"
+
+    def _detect_plugin_version(self) -> str:
+        """检测插件版本（仅插件模式使用）"""
+        # 从 .uplugin 文件读取插件版本
+        uplugin_files = list(self.base_path.glob("*.uplugin"))
+        if uplugin_files:
+            import json
+            try:
+                with open(uplugin_files[0], 'r', encoding='utf-8') as f:
+                    plugin_data = json.load(f)
+                    # 优先使用 VersionName
+                    version = plugin_data.get('VersionName', '')
+                    if version:
+                        return version
+                    # 其次使用 Version
+                    version = plugin_data.get('Version', '')
+                    if version:
+                        return str(version)
+            except Exception:
+                pass
+
+        # 从目录名推测
+        dir_name = self.base_path.name
+        import re
+        match = re.search(r'[-_](\d+)[._](\d+)(?:[._](\d+))?', dir_name)
+        if match:
+            major = match.group(1)
+            minor = match.group(2)
+            patch = match.group(3) or '0'
+            return f"{major}.{minor}.{patch}"
+
+        return "1.0"
 
     def _get_skill_path(self, skill_name: str) -> Path:
         """获取 Skill 路径"""

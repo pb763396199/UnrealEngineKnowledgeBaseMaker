@@ -18,6 +18,7 @@
 - ⚙️ **灵活配置** - 命令行引导式配置，无需环境变量
 - 🚀 **高性能** - SQLite 存储，36x 性能提升
 - 🎯 **自动检测** - 自动检测引擎/插件版本
+- 📍 **CPP 索引** - 函数实现位置追踪（v2.12.0 新增）
 
 ### 快速索引系统（v2.7.0 新增）⚡
 
@@ -25,6 +26,32 @@
 - **FunctionIndex 增强** - 函数模糊搜索，查询时间从 ~8s 降至 <10ms（**800x 提升**）
 - **查询降级机制** - 精确查询失败时自动提示模糊搜索，**防止 LLM 幻觉**
 - **fallback_command** - 错误返回包含降级命令，LLM 自动执行下一步操作
+
+### CPP 文件索引（v2.12.0 新增）📍
+
+- **函数实现位置追踪** - 知识库包含函数的 CPP 实现文件路径和行号
+  - `query_function_info` 返回 `impl_file` 和 `impl_line` 字段
+  - `search_functions` 返回 `impl_file` 字段
+- **新增 `get_function_implementation` 命令** - 直接获取函数的完整实现代码
+  - 基于 #include 的智能反向映射
+  - 自动定位函数定义行号
+  - 返回声明位置和实现位置
+  - 支持读取完整的 CPP 文件内容
+- **智能路径解析** - 支持多种目录结构
+  - 同名文件优先策略
+  - Public/Private 目录分离
+  - 跨目录 include 解析
+
+**使用示例**：
+```python
+# 查询函数信息（包含实现位置）
+query_function_info("BeginPlay")
+# 返回: { file: "...Actor.h", line: 123, impl_file: "...Actor.cpp", impl_line: 256 }
+
+# 获取函数实现代码
+get_function_implementation("BeginPlay", class_name="AActor")
+# 返回: { declaration_file, implementation_file, file_content }
+```
 
 ### 模块图谱增强（v2.6.0 新增）⭐
 
@@ -448,6 +475,14 @@ pip install click rich pyyaml networkx
 检查引擎目录下是否存在 `Engine/Build/Build.version` 文件。
 
 ## 更新日志
+
+### v2.12.0 (2026-02-06)
+
+**CPP 文件索引功能 - 快速定位函数实现**
+- 函数实现位置追踪（`impl_file_path` 和 `impl_line_number`）
+- 新增 `get_function_implementation` 命令
+- 基于 #include 的智能反向映射
+- 数据库自动迁移，向后兼容
 
 ### v2.11.0 (2026-02-06)
 

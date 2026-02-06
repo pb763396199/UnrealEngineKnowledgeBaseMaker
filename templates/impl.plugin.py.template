@@ -306,6 +306,8 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
                     "is_blueprint_callable": node_data.get('is_blueprint_callable', False),
                     "file": node_data.get('file', ''),
                     "line": node_data.get('line', 0),
+                    "impl_file": node_data.get('impl_file', ''),
+                    "impl_line": node_data.get('impl_line', 0),
                     "class": node_data.get('class_name', '')
                 }})
 
@@ -408,6 +410,7 @@ def search_functions(keyword: str, limit: int = 50) -> Dict[str, Any]:
                         "module": module_name,
                         "return_type": node_data.get('return_type', ''),
                         "file": node_data.get('file', ''),
+                        "impl_file": node_data.get('impl_file', ''),
                         "class": node_data.get('class_name', '')
                     }})
 
@@ -432,16 +435,90 @@ def _find_module_for_class(class_name: str) -> Optional[str]:
     """查找类所在的模块"""
     all_modules = _get_global_modules()
 
-    # 获取所有模块名称
-    module_names = list(all_modules.keys())
+    # 优先级列表
+    priority_modules = ['Core', 'CoreUObject', 'Engine', 'Renderer', 'RHI']
 
-    # 搜索所有模块
-    for module_name in module_names:
+    # 1. 先搜索优先级模块
+    for module_name in priority_modules:
+        graph = _load_module_graph(module_name)
+        if graph and f"class_{{class_name}}" in graph.nodes:
+            return module_name
+
+    # 2. 搜索所有 Runtime 模块
+    for module_name, info in all_modules.items():
+        if info.get('category') == 'Runtime':
+            if module_name in priority_modules:
+                continue
+            graph = _load_module_graph(module_name)
+            if graph and f"class_{{class_name}}" in graph.nodes:
+                return module_name
+
+    # 3. 搜索所有模块（限制前200个）
+    for module_name in list(all_modules.keys())[:200]:
+        if module_name in priority_modules:
+            continue
         graph = _load_module_graph(module_name)
         if graph and f"class_{{class_name}}" in graph.nodes:
             return module_name
 
     return None
+
+
+def get_function_implementation(function_name: str, class_name: str = None, module_hint: str = None) -> Dict[str, Any]:
+    """
+    获取函数的实现代码
+
+    首先查询函数索引找到实现文件位置，然后读取 cpp 文件内容返回。
+    这是解决 LLM 需要查看函数实现的核心功能。
+
+    Args:
+        function_name: 函数名称
+        class_name: 类名称（可选，用于处理同名函数）
+        module_hint: 模块提示（可选，用于加速查询）
+
+    Returns:
+        包含函数实现信息的字典
+    """
+    func_idx = _get_function_index()
+    if not func_idx:
+        return {"error": "Function index not available"}
+
+    # 查询函数信息
+    results = func_idx.query_by_name(function_name, module_hint)
+    if class_name:
+        results = [r for r in results if r.get('class_name') == class_name]
+
+    if not results:
+        return {"error": f"Function {function_name} not found"}
+
+    # 获取第一个匹配结果的实现文件
+    func_info = results[0]
+    impl_file = func_info.get('impl_file_path')
+    impl_line = func_info.get('impl_line_number', 0)
+
+    if not impl_file or not os.path.exists(impl_file):
+        return {
+            "error": f"Implementation file not found for {function_name}",
+            "declaration_location": f"{func_info.get('file_path')}:{func_info.get('line_number')}"
+        }
+
+    # 读取实现文件内容
+    try:
+        with open(impl_file, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+
+        return {
+            "function": function_name,
+            "class": func_info.get('class_name'),
+            "module": func_info.get('module'),
+            "declaration_file": func_info.get('file_path'),
+            "declaration_line": func_info.get('line_number'),
+            "implementation_file": impl_file,
+            "implementation_line": impl_line,
+            "file_content": content if len(content) < 10000 else content[:10000] + "... (truncated)"
+        }
+    except Exception as e:
+        return {"error": f"Failed to read implementation file: {e}"}
 
 
 # ============================================================================
@@ -461,6 +538,7 @@ if __name__ == "__main__":
         print("  query_module_dependencies <module_name>    - 查询模块依赖", file=sys.stderr)
         print("  query_module_classes <module_name> [type]  - 查询模块中的类", file=sys.stderr)
         print("  query_function_info <function_name> [hint] - 查询函数信息", file=sys.stderr)
+        print("  get_function_implementation <function_name> [class_name] [hint] - 获取函数实现", file=sys.stderr)
         print("  search_functions <keyword> [limit]         - 搜索函数", file=sys.stderr)
         print("  search_classes <keyword> [limit]           - 搜索类", file=sys.stderr)
         print("  search_modules <keyword>                   - 搜索模块", file=sys.stderr)
@@ -514,6 +592,15 @@ if __name__ == "__main__":
                 _print_usage()
             module_hint = sys.argv[3] if len(sys.argv) > 3 else None
             result = query_function_info(sys.argv[2], module_hint)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "get_function_implementation":
+            if len(sys.argv) < 3:
+                print("Error: Missing function_name argument", file=sys.stderr)
+                _print_usage()
+            class_name = sys.argv[3] if len(sys.argv) > 3 else None
+            module_hint = sys.argv[4] if len(sys.argv) > 4 else None
+            result = get_function_implementation(sys.argv[2], class_name, module_hint)
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         elif command == "search_functions":
