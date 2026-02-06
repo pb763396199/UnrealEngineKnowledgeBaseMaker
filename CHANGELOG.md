@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-02-06
+
+### Added ✨
+
+**自动检测功能 - 开箱即用体验**
+- **当前目录自动检测**: 直接在引擎/插件目录运行 `ue5kb init`，无需指定路径
+  - 检测 `.uplugin` 文件 → 自动识别插件模式
+  - 检测 `Engine/Build/Build.version` → 自动识别引擎模式
+  - 支持从引擎子目录向上查找引擎根目录（最多 5 层）
+- **友好错误提示**: 自动检测失败时显示清晰的使用说明和示例
+- **检测结果展示**: 显示检测模式、路径、原因和置信度
+- **完全向后兼容**: `--engine-path` 和 `--plugin-path` 参数继续工作
+
+### Changed 📦
+
+- CLI 选项说明更新：添加"未指定时自动检测"说明
+- CLI 帮助文档更新：推荐使用自动检测方式
+- 主命令文档字符串更新为 v2.11.0
+
+### CLI 更新
+
+```bash
+# 自动检测（推荐）
+cd "D:\Unreal Engine\UE5.1" && ue5kb init
+
+# 显式指定路径（仍然支持）
+ue5kb init --engine-path "D:\UE5"
+ue5kb init --plugin-path "F:\Plugins\MyPlugin"
+```
+
+### Technical Details
+
+**新增文件**:
+- `ue5_kb/utils/auto_detect.py` (~110 行)
+  - `detect_from_cwd()`: 自动检测函数
+  - `DetectionInfo`: 检测结果数据类
+  - `_read_engine_version()`: 引擎版本读取辅助函数
+
+**修改文件**:
+- `ue5_kb/cli.py` (+45 行)
+  - 更新选项说明（第68-71行）
+  - 替换无参数处理逻辑（第142-175行）
+  - 更新主命令文档字符串（第20-64行）
+- `ue5_kb/utils/__init__.py` (+5 行)
+  - 添加 `detect_from_cwd`, `DetectionInfo`, `DetectionResult` 导出
+
+**检测算法**:
+```
+1. 检查当前目录的 *.uplugin 文件
+   → Found: Return plugin mode (high confidence)
+
+2. 检查当前目录的 Engine/Build/Build.version
+   → Found: Return engine mode (high confidence)
+
+3. 检查父目录（最多 5 层）的 Engine/Build/Build.version
+   → Found: Return engine_subdir mode (medium confidence)
+
+4. Nothing found
+   → Return unknown mode (low confidence)
+```
+
+---
+
 ## [2.10.0] - 2026-02-05
 
 ### Added ✨

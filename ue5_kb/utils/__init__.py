@@ -7,10 +7,14 @@ UE5 Knowledge Base Maker - Utils 模块
 from .progress_tracker import ProgressTracker
 from .stage_timer import StageTimer, StageMetrics
 from .checkpoint_manager import CheckpointManager
+from .auto_detect import detect_from_cwd, DetectionInfo, DetectionResult
 
 __all__ = [
     'ProgressTracker',
     'StageTimer',
     'StageMetrics',
     'CheckpointManager',
+    'detect_from_cwd',
+    'DetectionInfo',
+    'DetectionResult',
 ]

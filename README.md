@@ -44,6 +44,33 @@ pip install -e .
 
 ## 使用方法
 
+### 自动检测（推荐）⭐
+
+直接在引擎或插件目录运行，工具自动识别模式：
+
+```bash
+# 引擎模式 - 直接在引擎目录运行
+cd "D:\Unreal Engine\UnrealEngine51_500"
+ue5kb init
+
+# 插件模式 - 直接在插件目录运行
+cd "F:\MyProject\Plugins\MyPlugin"
+ue5kb init
+
+# 引擎子目录也能自动检测
+cd "D:\Unreal Engine\UnrealEngine51_500\Engine\Source"
+ue5kb init
+```
+
+**检测结果示例**：
+```
+自动检测结果:
+  检测模式: 引擎模式
+  检测路径: D:\Unreal Engine\UnrealEngine51_500
+  检测原因: 在当前目录找到 Engine/Build/Build.version
+  引擎版本: 5.1.500
+```
+
 ### 模式 1: 引擎模式（扫描整个引擎）
 
 为整个 UE5 引擎生成知识库，包含所有引擎模块、插件和平台模块。
@@ -421,6 +448,17 @@ pip install click rich pyyaml networkx
 检查引擎目录下是否存在 `Engine/Build/Build.version` 文件。
 
 ## 更新日志
+
+### v2.11.0 (2026-02-06)
+
+**自动检测功能 - 开箱即用体验**
+- **当前目录自动检测**: 直接在引擎/插件目录运行 `ue5kb init`，无需指定路径
+  - 检测 `.uplugin` 文件 → 自动识别插件模式
+  - 检测 `Engine/Build/Build.version` → 自动识别引擎模式
+  - 支持从引擎子目录向上查找引擎根目录（最多 5 层）
+- **友好错误提示**: 自动检测失败时显示清晰的使用说明
+- **检测结果展示**: 显示检测模式、路径、原因和版本信息
+- **完全向后兼容**: `--engine-path` 和 `--plugin-path` 参数继续工作
 
 ### v2.10.0 (2026-02-05)
 

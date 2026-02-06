@@ -16,7 +16,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="2.10.0")
+@click.version_option(version="2.11.0")
 def cli():
     """UE5 Knowledge Base Builder - UE5 知识库生成工具
 
@@ -26,7 +26,8 @@ def cli():
     - 插件模式: 为单个插件生成独立知识库
 
     \b
-    v2.10.0 新特性：
+    v2.11.0 新特性：
+    - 自动检测：在引擎/插件目录直接运行 `ue5kb init`
     - 并行加速：多进程处理，4-8x 性能提升
     - 多进度条：实时显示各 worker 状态
     - 性能监控：各阶段耗时统计
@@ -47,28 +48,27 @@ def cli():
 
     \b
     常用示例：
-      # 引擎模式 - 快速开始（自动检测并行度）
-      ue5kb init --engine-path "D:\\Unreal Engine\\UE5.1"
+      # 自动检测（推荐）
+      cd "D:\\Unreal Engine\\UE5.1" && ue5kb init
 
-      # 指定并行 worker 数量
+      # 引擎模式
       ue5kb init --engine-path "D:\\UE5" --workers 8
-      ue5kb init --engine-path "D:\\UE5" -j 4
 
       # 插件模式
       ue5kb init --plugin-path "F:\\MyProject\\Plugins\\MyPlugin"
 
       # 高级选项
-      ue5kb init --engine-path "D:\\UE5" --force
-      ue5kb init --engine-path "D:\\UE5" --stage build
+      ue5kb init --force
+      ue5kb init --stage build
     """
     pass
 
 
 @cli.command()
 @click.option('--engine-path', type=click.Path(exists=True),
-              help='UE5 引擎路径（与 --plugin-path 二选一）')
+              help='UE5 引擎路径（与 --plugin-path 二选一，未指定时自动检测）')
 @click.option('--plugin-path', type=click.Path(exists=True),
-              help='插件路径（与 --engine-path 二选一）')
+              help='插件路径（与 --engine-path 二选一，未指定时自动检测）')
 @click.option('--kb-path', type=click.Path(),
               help='知识库保存路径 (默认: 引擎/插件根目录/KnowledgeBase)')
 @click.option('--skill-path', type=click.Path(),
@@ -86,19 +86,24 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, worke
     """初始化并生成知识库和 Skill
 
     \b
-    v2.10.0 新特性：
+    v2.11.0 新特性：
+    - 自动检测：在引擎/插件目录直接运行 `ue5kb init`，无需指定路径
     - 并行加速：多进程处理，4-8x 性能提升
     - 多进度条：实时显示各 worker 状态
     - 性能监控：各阶段耗时统计
     - Checkpoint：Analyze 阶段支持中断恢复
 
     \b
-    支持两种模式：
-    1. 引擎模式（--engine-path）
+    使用方式：
+    1. 自动检测（推荐）
+       直接在引擎或插件目录运行，自动识别模式
+       示例: cd "D:\\Unreal Engine\\UE5.1" && ue5kb init
+
+    2. 引擎模式（--engine-path）
        为整个 UE5 引擎生成知识库（1757+ 模块）
        示例: ue5kb init --engine-path "D:\\Unreal Engine\\UE5.1"
 
-    2. 插件模式（--plugin-path）
+    3. 插件模式（--plugin-path）
        为单个插件生成独立知识库
        示例: ue5kb init --plugin-path "F:\\MyProject\\Plugins\\MyPlugin"
 
@@ -110,15 +115,15 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, worke
     - --verbose, -v: 显示详细输出（用于调试）
 
     \b
-    并行处理示例：
-    # 自动检测并行度（推荐）
-    ue5kb init --engine-path "D:\\UE5" -j 0
+    使用示例：
+    # 自动检测（推荐）
+    cd "D:\\UE5" && ue5kb init
+
+    # 自动检测并行度
+    ue5kb init -j 0
 
     # 指定 8 个 worker
     ue5kb init --engine-path "D:\\UE5" --workers 8
-
-    # 串行模式（调试用）
-    ue5kb init --engine-path "D:\\UE5" --workers 1
 
     \b
     输出内容：
@@ -140,13 +145,45 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, worke
         return
 
     if not engine_path and not plugin_path:
-        # 默认使用引擎模式
+        # 自动检测模式
+        from ue5_kb.utils.auto_detect import detect_from_cwd
+
+        detection = detect_from_cwd()
+
+        if detection.mode == 'unknown':
+            # 检测失败，显示友好提示
+            console.print("\n[red]X 自动检测失败[/red]\n")
+            console.print("无法自动检测 UE5 引擎或插件路径。")
+            console.print("\n[bold cyan]请手动指定路径:[/bold cyan]")
+            console.print("  引擎模式: ue5kb init --engine-path \"D:\\Unreal Engine\\UE5.1\"")
+            console.print("  插件模式: ue5kb init --plugin-path \"F:\\MyProject\\Plugins\\MyPlugin\"")
+            console.print()
+            return
+
+        # 显示检测结果
         console.print("\n[bold cyan]UE5 Knowledge Base Builder[/bold cyan]")
         console.print("为任何版本的 UE5 引擎生成知识库和 Claude Skill\n")
-        engine_path = Prompt.ask(
-            "UE5 引擎路径",
-            default=r"D:\Unreal Engine\UnrealEngine51_500"
-        )
+        console.print("[bold]自动检测结果:[/bold]\n")
+
+        mode_display = {
+            'plugin': '插件模式',
+            'engine': '引擎模式',
+            'engine_subdir': '引擎模式（从子目录检测）'
+        }
+
+        console.print(f"  检测模式: [cyan]{mode_display.get(detection.mode, detection.mode)}[/cyan]")
+        console.print(f"  检测路径: [yellow]{detection.detected_path}[/yellow]")
+        console.print(f"  检测原因: {detection.reason}")
+        if detection.suggested_name:
+            label = "插件名称" if detection.mode == 'plugin' else "引擎版本"
+            console.print(f"  {label}: [cyan]{detection.suggested_name}[/cyan]")
+        console.print()
+
+        # 设置路径
+        if detection.mode == 'plugin':
+            plugin_path = str(detection.detected_path)
+        else:
+            engine_path = str(detection.detected_path)
 
     # 判断模式
     if plugin_path:
