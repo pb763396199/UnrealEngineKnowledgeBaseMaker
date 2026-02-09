@@ -411,15 +411,25 @@ class ParallelBuildStage:
                     raise
 
             # 添加到索引
+            # BuildCsParser 返回 'public'/'private'/'dynamic'
+            # 兼容旧格式 'PublicDependencyModuleNames' 等
+            public_deps = (dependencies.get('public', [])
+                           or dependencies.get('PublicDependencyModuleNames', []))
+            private_deps = (dependencies.get('private', [])
+                            or dependencies.get('PrivateDependencyModuleNames', []))
+            dynamic_deps = (dependencies.get('dynamic', [])
+                            or dependencies.get('DynamicallyLoadedModuleNames', []))
+
             global_index.add_module(
                 module_name,
                 {
                     'name': module_name,
                     'path': module['path'],
                     'category': module['category'],
-                    'dependencies': dependencies.get('PublicDependencyModuleNames', []),
-                    'public_dependencies': dependencies.get('PublicDependencyModuleNames', []),
-                    'private_dependencies': dependencies.get('PrivateDependencyModuleNames', [])
+                    'dependencies': public_deps,
+                    'public_dependencies': public_deps,
+                    'private_dependencies': private_deps,
+                    'dynamic_dependencies': dynamic_deps,
                 }
             )
 

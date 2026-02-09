@@ -207,7 +207,7 @@ class GenerateStage(PipelineStage):
             last_updated = manifest.last_updated
         else:
             # 降级：使用默认值
-            kb_version = "2.13.0"
+            kb_version = "2.14.0"
             now = datetime.now().isoformat()
             created_at = now
             last_updated = now
@@ -217,7 +217,7 @@ class GenerateStage(PipelineStage):
             from importlib.metadata import version
             tool_version = version("ue5-kb")
         except Exception:
-            tool_version = "2.13.0"
+            tool_version = "2.14.0"
 
         # 插件版本（仅插件模式）
         plugin_version = self._detect_plugin_version() if self.is_plugin else None

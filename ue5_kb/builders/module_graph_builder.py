@@ -80,13 +80,13 @@ class ModuleGraphBuilder:
         file_count = 0
         for root, dirs, files in os.walk(module_path):
             # 跳过特定目录
-            dirs[:] = [d for d in dirs if d not in ['Intermediate', 'Saved', 'Binaries', 'Private']]
+            dirs[:] = [d for d in dirs if d not in ['Intermediate', 'Saved', 'Binaries']]
 
             for file in files:
-                if file.endswith('.h'):
+                if file.endswith(('.h', '.cpp')):
                     file_path = os.path.join(root, file)
                     # 获取包含此头文件的 cpp 文件列表
-                    related_cpps = header_to_cpps.get(file_path, [])
+                    related_cpps = header_to_cpps.get(file_path, []) if file.endswith('.h') else []
                     func_infos = self._parse_source_file(
                         graph, file_path, module_path,
                         related_cpps=related_cpps
@@ -164,7 +164,7 @@ class ModuleGraphBuilder:
 
         try:
             # 解析文件
-            classes, functions = self.parser.parse_file(file_path)
+            classes, functions, enums = self.parser.parse_file(file_path)
 
             # 添加文件节点
             rel_path = os.path.relpath(file_path, module_path)
@@ -176,7 +176,7 @@ class ModuleGraphBuilder:
             for class_name, class_info in classes.items():
                 class_id = f"class_{class_name}"
 
-                # 添加类节点
+                # 添加类节点（v2.14.0: 含 doc_comment, specifiers, parent_classes）
                 graph.add_node(
                     class_id,
                     ModuleGraph.NODE_TYPE_CLASS,
@@ -184,8 +184,13 @@ class ModuleGraphBuilder:
                     is_uclass=class_info.is_uclass,
                     is_struct=class_info.is_struct,
                     is_interface=class_info.is_interface,
+                    parent_classes=class_info.parent_classes,
                     file_path=class_info.file_path,
-                    line_number=class_info.line_number
+                    line_number=class_info.line_number,
+                    doc_comment=getattr(class_info, 'doc_comment', ''),
+                    specifiers=getattr(class_info, 'specifiers', {}),
+                    file=class_info.file_path,
+                    line=class_info.line_number
                 )
 
                 # 文件包含类
@@ -283,10 +288,65 @@ class ModuleGraphBuilder:
                     'ufunction_specifiers': func_info.ufunction_specifiers
                 })
 
+            # v2.14.0: 添加枚举节点
+            for enum_name, enum_info in enums.items():
+                enum_id = f"enum_{enum_name}"
+                graph.add_node(
+                    enum_id,
+                    ModuleGraph.NODE_TYPE_ENUM,
+                    name=enum_name,
+                    values=enum_info.values,
+                    is_uenum=enum_info.is_uenum,
+                    file_path=enum_info.file_path,
+                    line_number=enum_info.line_number,
+                    doc_comment=getattr(enum_info, 'doc_comment', ''),
+                    specifiers=getattr(enum_info, 'specifiers', {}),
+                    file=enum_info.file_path,
+                    line=enum_info.line_number
+                )
+                graph.add_edge(file_id, enum_id, ModuleGraph.REL_TYPE_CONTAINS)
+
+            # v2.14.0: 添加委托节点
+            for del_name, del_info in self.parser.delegates.items():
+                del_id = f"delegate_{del_name}"
+                graph.add_node(
+                    del_id,
+                    ModuleGraph.NODE_TYPE_MACRO,
+                    name=del_name,
+                    delegate_type=del_info.type,
+                    params=del_info.params,
+                    file_path=del_info.file_path,
+                    line_number=del_info.line_number,
+                    doc_comment=getattr(del_info, 'doc_comment', ''),
+                    file=del_info.file_path,
+                    line=del_info.line_number
+                )
+                graph.add_edge(file_id, del_id, ModuleGraph.REL_TYPE_CONTAINS)
+
+            # v2.14.0: 解析 #include 关系
+            self._parse_includes(file_path, file_id, graph)
+
         except Exception as e:
             print(f"  警告: 解析文件 {file_path} 时出错: {e}")
 
         return func_infos_for_index
+
+    def _parse_includes(self, file_path: str, file_id: str, graph: ModuleGraph) -> None:
+        """解析 #include 关系并添加到图谱 (v2.14.0 新增)"""
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    match = re.match(r'#include\s+[<"]([^>"]+)[>"]', line)
+                    if match:
+                        include_path = match.group(1)
+                        safe_include = include_path.replace('/', '_').replace('\\', '_')
+                        include_id = f"include_{safe_include}"
+                        if include_id not in graph.graph:
+                            graph.add_node(include_id, ModuleGraph.NODE_TYPE_FILE, name=include_path)
+                        graph.add_edge(file_id, include_id, ModuleGraph.REL_TYPE_INCLUDES)
+        except Exception:
+            pass
 
     def _find_function_definition(self, cpp_path: str, func_name: str, class_name: str = None) -> int:
         """

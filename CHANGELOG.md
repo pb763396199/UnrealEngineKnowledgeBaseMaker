@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-02-09
+
+### Added ✨
+
+**全面知识库增强 - 大幅提升 LLM 对 UE5 源码的理解能力**
+
+- **Doxygen 注释提取**: 自动提取 `/** ... */` 和 `///` 文档注释，关联到类和函数
+  - 新增 `_extract_doxygen_map()` 方法，在预处理前提取注释
+  - 新增 `ClassInfo.doc_comment` 和 `FunctionInfo.doc_comment` 字段
+- **UENUM 枚举解析**: 完整支持 UE5 枚举类型
+  - 新增 `EnumInfo` 数据类（name, values, is_uenum, specifiers, doc_comment）
+  - 支持 `UENUM()`, `enum class`, 普通 `enum` 三种格式
+  - 枚举值提取（含 UMETA 宏过滤）
+  - 新增 `EnumIndex` SQLite 索引（`ue5_kb/core/enum_index.py`）
+- **UCLASS/UPROPERTY/USTRUCT 说明符提取**: 解析宏内参数
+  - UCLASS: Blueprintable, Abstract, MinimalAPI, BlueprintType 等
+  - UPROPERTY: EditAnywhere, BlueprintReadWrite, Replicated, Category 等
+  - 新增 `ClassInfo.specifiers` 和 `PropertyInfo.specifiers` 字段
+- **Delegate 宏解析**: 解析 UE5 委托系统
+  - 新增 `DelegateInfo` 数据类（name, type, params）
+  - 支持 DECLARE_DELEGATE, DECLARE_MULTICAST_DELEGATE, DECLARE_DYNAMIC_MULTICAST_DELEGATE 等
+  - 支持跨行宏声明
+- **typedef/using 类型别名解析**: 
+  - 新增 `TypeAliasInfo` 数据类
+  - 支持 `typedef Type Name;` 和 `using Name = Type;`
+- **纯虚函数保留**: 不再跳过 `= 0` 的方法声明
+  - 新增 `FunctionInfo.is_pure_virtual` 字段
+- **Private 目录扫描**: 不再排除 Private 目录，覆盖 UE5 标准 Public/Private 布局
+- **.h + .cpp 同时扫描**: module_graph_builder 从仅扫描头文件扩展到同时扫描源文件
+- **#include 依赖图**: 解析头文件包含关系，添加 INCLUDES 边到模块图谱
+- **枚举和委托节点**: 模块图谱新增 Enum 和 Delegate (Macro) 类型节点
+- **新增 Skill 查询命令**:
+  - `query_subclasses <parent_class>` — 查询继承自指定类的所有子类（反向继承）
+  - `query_module_dependents <module_name>` — 查询依赖指定模块的所有模块（反向依赖）
+  - `query_enum_info <enum_name>` — 查询枚举信息（含枚举值列表）
+  - `search_enums <keyword>` — 搜索枚举
+  - `query_examples <target_name>` — 查询代码使用示例
+
+### Changed 📦
+
+- **CppParser 返回值变更**: `parse_content()` / `parse_file()` 从 2-tuple 改为 3-tuple `(classes, functions, enums)`
+- **搜索限制移除**: `query_function_info` 不再限制搜索前 50 个模块，`_find_module_for_class` 不再限制搜索前 200 个模块，均改用 SQLite 索引查询
+- **函数实现返回优化**: `get_function_implementation` 只返回函数体+上下文（花括号匹配），而非整个 cpp 文件
+- **模板参数逗号分割**: `_split_params()` 正确处理 `TMap<K,V>` 等模板类型中的逗号
+- **版本号**: 升级到 2.14.0
+
+### Fixed 🐛
+
+- **多行注释处理**: 修复 `_preprocess_content_lines()` 无法正确处理跨行 `/* ... */` 注释的 Bug，改用状态机模式
+- **依赖数据为空**: 修复 `build.py` 和 `build_parallel.py` 中 `dependencies.get('PublicDependencyModuleNames')` 与 `BuildCsParser` 返回的 `'public'` key 不匹配的严重 Bug，导致所有模块的 dependencies、public_dependencies、private_dependencies 全部为空
+- **并行 Analyze 缺少枚举**: 修复 `analyze_parallel.py` 未调用 `extract_enums()` 的问题
+
+### Technical Details
+
+**新增文件**:
+- `ue5_kb/core/enum_index.py` (~160 行) — 枚举 SQLite 快速索引
+- `tests/test_cpp_parser_v2.py` (~320 行) — 29 个测试用例
+
+**新增数据类** (在 `cpp_parser.py` 中):
+- `EnumInfo`: 枚举信息（name, values, is_uenum, namespace, specifiers, doc_comment）
+- `DelegateInfo`: 委托信息（name, type, params, doc_comment）
+- `TypeAliasInfo`: 类型别名信息（name, underlying_type）
+
+**修改文件**:
+- `ue5_kb/parsers/cpp_parser.py` — 完全重写，新增 8 个解析方法
+- `ue5_kb/builders/module_graph_builder.py` — 移除 Private 排除、扫描 .cpp、添加枚举/委托节点、#include 解析
+- `ue5_kb/pipeline/analyze.py` — 支持枚举统计
+- `ue5_kb/pipeline/analyze_parallel.py` — 添加枚举提取
+- `ue5_kb/pipeline/build.py` — 修复依赖 key 不匹配
+- `ue5_kb/pipeline/build_parallel.py` — 修复依赖 key 不匹配
+- `ue5_kb/pipeline/generate.py` — 版本号
+- `ue5_kb/pipeline/coordinator.py` — 版本号
+- `ue5_kb/cli.py` — 版本号、新特性说明
+- `templates/impl.py.template` — 6 个新命令、移除搜索限制、函数体优化、枚举索引缓存
+- `templates/skill.md.template` — 新命令文档
+
+**集成测试结果** (UE5.5 Engine 模块 200 个头文件):
+- 1,267 classes, 3,855 functions, 104 enums, 92 delegates, 50 type aliases, 1,436 doc comments
+
+### Breaking Changes 💥
+
+- `CppParser.parse_content()` / `parse_file()` 返回值从 `(classes, functions)` 变为 `(classes, functions, enums)` — 调用方需要适配 3-tuple 解构
+- 旧 pickle 文件需要重新生成（`ue5kb init --force`）
+
+### Migration Notes
+
+```bash
+# 重新生成知识库以获取所有新功能
+ue5kb init --force
+
+# 或仅重新分析和构建（保留 discover/extract 缓存）
+ue5kb init --stage analyze --force
+ue5kb init --stage build --force
+ue5kb init --stage generate --force
+```
+
 ## [2.13.0] - 2026-02-06
 
 ### Added ✨

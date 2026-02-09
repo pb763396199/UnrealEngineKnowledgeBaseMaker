@@ -77,7 +77,8 @@ class AnalyzeStage(PipelineStage):
         failed_modules = []
         total_classes = 0
         total_functions = 0
-        all_failed_files = []  # 收集所有失败文件
+        total_enums = 0
+        all_failed_files = []
 
         for i, module in enumerate(modules):
             # 每个模块都显示进度（改进用户体验）
@@ -104,6 +105,7 @@ class AnalyzeStage(PipelineStage):
                 success_count += 1
                 total_classes += len(code_graph.get('classes', []))
                 total_functions += len(code_graph.get('functions', []))
+                total_enums += len(code_graph.get('enums', []))
 
                 # 收集失败文件
                 if code_graph.get('failed_files'):
@@ -122,6 +124,7 @@ class AnalyzeStage(PipelineStage):
             'failed_count': len(failed_modules),
             'total_classes': total_classes,
             'total_functions': total_functions,
+            'total_enums': total_enums,
             'failed_modules': failed_modules[:10],  # 只保存前10个失败的模块
             'failed_files_sample': all_failed_files[:20]  # 保存前20个失败文件
         }
@@ -133,6 +136,7 @@ class AnalyzeStage(PipelineStage):
         print(f"  成功: {success_count}/{len(modules)}")
         print(f"  类: {total_classes}")
         print(f"  函数: {total_functions}")
+        print(f"  枚举: {total_enums}")
 
         # 输出失败的模块列表
         if failed_modules:
@@ -181,32 +185,31 @@ class AnalyzeStage(PipelineStage):
         """
         classes = []
         functions = []
+        enums = []
         failed_files = []
 
         for file_idx, source_file in enumerate(source_files):
-            # 文件级进度（仅当文件数量较多时）
             if len(source_files) > 10 and (file_idx + 1) % 10 == 0:
                 print(f"    文件进度: {file_idx + 1}/{len(source_files)}")
 
-            # verbose 模式显示每个文件
             if verbose:
                 print(f"      解析: {source_file.name}")
 
             try:
-                # 解析文件
                 with open(source_file, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
 
-                # 提取类
                 file_classes = parser.extract_classes(content, str(source_file))
                 classes.extend(file_classes)
 
-                # 提取函数
                 file_functions = parser.extract_functions(content, str(source_file))
                 functions.extend(file_functions)
 
+                # v2.14.0: 提取枚举
+                file_enums = parser.extract_enums(content, str(source_file))
+                enums.extend(file_enums)
+
             except Exception as e:
-                # 记录文件解析失败（不再静默忽略）
                 print(f"    [警告] 文件解析失败: {source_file.name}")
                 print(f"      错误: {e}")
                 failed_files.append({
@@ -220,7 +223,8 @@ class AnalyzeStage(PipelineStage):
             'source_file_count': len(source_files),
             'classes': classes,
             'functions': functions,
-            'failed_files': failed_files[:10]  # 只保存前10个失败文件
+            'enums': enums,
+            'failed_files': failed_files[:10]
         }
 
     def _save_code_graph(self, module_name: str, code_graph: Dict[str, Any]) -> None:

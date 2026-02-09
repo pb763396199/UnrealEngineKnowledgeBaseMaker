@@ -13,7 +13,7 @@
 
 - 🔧 **通用工具** - 支持任何 UE5 引擎版本（5.0, 5.1, 5.2, 5.3, 5.4+）
 - 📊 **知识库生成** - 自动扫描源码，构建模块索引和代码图谱
-- 🔌 **完整覆盖** - 扫描 Engine/Source、Engine/Plugins、Engine/Platforms
+- 🔌 **完整覆盖** - 扫描 Engine/Source、Engine/Plugins、Engine/Platforms（含 Private 目录）
 - 🤖 **Skill 生成** - 自动生成 Claude Code Skill（模块级+代码级查询）
 - ⚙️ **灵活配置** - 命令行引导式配置，无需环境变量
 - 🚀 **高性能** - SQLite 存储，36x 性能提升
@@ -21,6 +21,41 @@
 - 📍 **CPP 索引** - 函数实现位置追踪（v2.12.0 新增）
 - 🔄 **增量更新** - 文件级变更检测，仅更新修改模块（v2.13.0 新增）⚡
 - 📋 **版本追踪** - 知识库版本信息存储和查询（v2.13.0 新增）
+- 📝 **Doxygen 注释** - 自动提取文档注释并关联到类/函数（v2.14.0 新增）
+- 🔢 **枚举解析** - UENUM / enum class 完整解析（v2.14.0 新增）
+- 📎 **委托解析** - DECLARE_DELEGATE_* 宏解析（v2.14.0 新增）
+- 🏷️ **说明符提取** - UCLASS/UPROPERTY 说明符解析（v2.14.0 新增）
+
+### C++ 深度解析（v2.14.0 新增）🧠
+
+- **Doxygen 注释提取** - 自动提取 `/** ... */` 和 `///` 文档注释，关联到类和函数
+- **UENUM 枚举解析** - 支持 `UENUM()`, `enum class`, 普通 `enum`，含枚举值提取
+- **说明符提取** - UCLASS (Blueprintable, Abstract), UPROPERTY (EditAnywhere, BlueprintReadWrite, Replicated)
+- **Delegate 宏解析** - 支持 DECLARE_DELEGATE, DECLARE_MULTICAST_DELEGATE, DECLARE_DYNAMIC_MULTICAST_DELEGATE 等
+- **typedef/using 别名** - 解析类型别名如 `using FActorPtr = TSharedPtr<AActor>`
+- **纯虚函数保留** - 不再跳过 `= 0` 方法，标记 `is_pure_virtual`
+- **Private 目录扫描** - 不再排除 Private 目录，覆盖 UE5 标准 Public/Private 布局
+- **#include 依赖图** - 记录头文件包含关系
+- **新增查询命令**:
+  - `query_subclasses` — 反向继承查询（哪些类继承自 AActor？）
+  - `query_module_dependents` — 反向依赖查询（哪些模块依赖 Core？）
+  - `query_enum_info` / `search_enums` — 枚举查询
+  - `query_examples` — 代码使用示例查询
+
+**使用示例**:
+```bash
+# 查询枚举
+python impl.py query_enum_info EMovementMode
+# 返回: { name, values: ["Walking", "Falling", "Swimming", ...], is_uenum: true }
+
+# 查询子类
+python impl.py query_subclasses AActor
+# 返回: { parent_class: "AActor", subclasses: [{name: "APawn", ...}, ...] }
+
+# 查询反向依赖
+python impl.py query_module_dependents Core
+# 返回: { module: "Core", dependents: [{name: "CoreUObject"}, {name: "Engine"}, ...] }
+```
 
 ### 快速索引系统（v2.7.0 新增）⚡
 
@@ -337,6 +372,7 @@ ue5kb pipeline status --engine-path "D:\UE5"
 │   ├── index.db                # SQLite 数据库
 │   ├── class_index.db          # 类快速索引
 │   ├── function_index.db       # 函数快速索引
+│   ├── enum_index.db           # 枚举快速索引 (v2.14.0)
 │   └── global_index.pkl        # Pickle 索引
 └── module_graphs/              # 模块知识图谱
     ├── Core.pkl
@@ -515,6 +551,22 @@ pip install click rich pyyaml networkx
 检查引擎目录下是否存在 `Engine/Build/Build.version` 文件。
 
 ## 更新日志
+
+### v2.14.0 (2026-02-09)
+
+**全面知识库增强 - 大幅提升 LLM 对 UE5 源码的理解能力**
+- Doxygen 注释提取（`/** ... */` 和 `///`）
+- UENUM 枚举解析（含枚举值、说明符）+ EnumIndex 快速索引
+- UCLASS/UPROPERTY/USTRUCT 说明符提取（Blueprintable, EditAnywhere 等）
+- Delegate 宏解析（DECLARE_DELEGATE_*, DECLARE_DYNAMIC_MULTICAST_DELEGATE_* 等）
+- typedef/using 类型别名解析
+- 纯虚函数保留（`is_pure_virtual` 字段）
+- Private 目录不再排除，.h + .cpp 同时扫描
+- #include 依赖图构建
+- 搜索限制移除（函数查询不再限制 50 模块，类查询不再限制 200 模块）
+- 5 个新增 Skill 查询命令（query_subclasses, query_module_dependents, query_enum_info, search_enums, query_examples）
+- 修复依赖数据为空的严重 Bug（BuildCsParser key 不匹配）
+- 修复多行注释跨行处理 Bug
 
 ### v2.12.0 (2026-02-06)
 

@@ -50,6 +50,7 @@ def _analyze_module_worker(args: Tuple) -> Dict[str, Any]:
         parser = CppParser()
         classes = []
         functions = []
+        enums = []
         failed_files = []
 
         for file_idx, source_file in enumerate(source_files):
@@ -66,6 +67,10 @@ def _analyze_module_worker(args: Tuple) -> Dict[str, Any]:
                     content, str(source_file)
                 )
                 functions.extend(file_functions)
+
+                # v2.14.0: 提取枚举
+                file_enums = parser.extract_enums(content, str(source_file))
+                enums.extend(file_enums)
 
             except Exception as e:
                 failed_files.append(
@@ -85,7 +90,8 @@ def _analyze_module_worker(args: Tuple) -> Dict[str, Any]:
             "source_file_count": len(source_files),
             "classes": classes,
             "functions": functions,
-            "failed_files": failed_files[:10],  # 只保存前10个失败文件
+            "enums": enums,
+            "failed_files": failed_files[:10],
         }
 
         output_file = module_output_dir / "code_graph.json"

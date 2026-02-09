@@ -27,6 +27,7 @@ _module_graphs_cache = {{}}
 _db_connection = None
 _class_index_cache = None
 _function_index_cache = None
+_enum_index_cache = None
 
 
 # ============================================================================
@@ -113,6 +114,20 @@ def _get_function_index():
         if db_path.exists():
             _function_index_cache = FunctionIndex(str(db_path))
     return _function_index_cache
+
+
+def _get_enum_index():
+    """获取枚举索引 (v2.14.0 新增)"""
+    global _enum_index_cache
+    if _enum_index_cache is None:
+        try:
+            from ue5_kb.core.enum_index import EnumIndex
+            db_path = KB_PATH / "global_index" / "enum_index.db"
+            if db_path.exists():
+                _enum_index_cache = EnumIndex(str(db_path))
+        except Exception:
+            pass
+    return _enum_index_cache
 
 
 # ============================================================================
@@ -295,17 +310,41 @@ def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, 
 
 
 def query_function_info(function_name: str, module_hint: str = None) -> Dict[str, Any]:
-    """查询函数信息"""
-    results = []
+    """查询函数信息（v2.14.0: 使用 SQLite 索引，无模块数量限制）"""
+    # v2.14.0: 优先使用函数索引（覆盖全部模块）
+    func_idx = _get_function_index()
+    if func_idx:
+        raw = func_idx.query_by_name(function_name, module_hint)
+        if raw:
+            results = []
+            for r in raw:
+                results.append({{
+                    "function": function_name,
+                    "module": r.get('module', ''),
+                    "return_type": r.get('return_type', ''),
+                    "parameters": r.get('parameters', []),
+                    "is_ufunction": bool(r.get('is_ufunction', False)),
+                    "is_blueprint_callable": bool(r.get('is_blueprint_callable', False)),
+                    "file": r.get('file_path', ''),
+                    "line": r.get('line_number', 0),
+                    "impl_file": r.get('impl_file_path', ''),
+                    "impl_line": r.get('impl_line_number', 0),
+                    "class": r.get('class_name', '')
+                }})
+            return {{
+                "function_name": function_name,
+                "found_count": len(results),
+                "results": results[:20]
+            }}
 
-    # 确定要搜索的模块
+    # 回退：遍历模块图谱（无数量限制）
+    results = []
     if module_hint:
         modules = [module_hint]
     else:
         all_modules = _get_global_modules()
-        modules = list(all_modules.keys())[:50]
+        modules = list(all_modules.keys())
 
-    # 搜索函数
     for mod in modules:
         graph = _load_module_graph(mod)
         if not graph:
@@ -451,36 +490,98 @@ def search_functions(keyword: str, limit: int = 50) -> Dict[str, Any]:
 # ============================================================================
 
 def _find_module_for_class(class_name: str) -> Optional[str]:
-    """查找类所在的模块"""
+    """查找类所在的模块（v2.14.0: 使用 ClassIndex，无模块数量限制）"""
+    # v2.14.0: 优先使用类索引（覆盖全部模块）
+    class_idx = _get_class_index()
+    if class_idx:
+        results = class_idx.query_by_name(class_name)
+        if results:
+            return results[0].get('module')
+
+    # 回退：遍历模块图谱（无数量限制）
     all_modules = _get_global_modules()
-
-    # 优先级列表
-    priority_modules = ['Core', 'CoreUObject', 'Engine', 'Renderer', 'RHI']
-
-    # 1. 先搜索优先级模块
-    for module_name in priority_modules:
-        graph = _load_module_graph(module_name)
-        if graph and f"class_{{class_name}}" in graph.nodes:
-            return module_name
-
-    # 2. 搜索所有 Runtime 模块
-    for module_name, info in all_modules.items():
-        if info.get('category') == 'Runtime':
-            if module_name in priority_modules:
-                continue
-            graph = _load_module_graph(module_name)
-            if graph and f"class_{{class_name}}" in graph.nodes:
-                return module_name
-
-    # 3. 搜索所有模块（限制前200个）
-    for module_name in list(all_modules.keys())[:200]:
-        if module_name in priority_modules:
-            continue
+    for module_name in all_modules.keys():
         graph = _load_module_graph(module_name)
         if graph and f"class_{{class_name}}" in graph.nodes:
             return module_name
 
     return None
+
+
+# ============================================================================
+# v2.14.0 新增查询功能
+# ============================================================================
+
+def query_subclasses(parent_class: str, limit: int = 100) -> Dict[str, Any]:
+    """查询继承自指定类的所有子类（v2.14.0 新增）"""
+    class_idx = _get_class_index()
+    if class_idx:
+        results = class_idx.query_by_parent(parent_class, limit)
+        return {{
+            "parent_class": parent_class,
+            "found_count": len(results),
+            "subclasses": results
+        }}
+    return {{"error": "Class index not available"}}
+
+
+def query_module_dependents(module_name: str) -> Dict[str, Any]:
+    """查询依赖指定模块的所有模块（反向依赖，v2.14.0 新增）"""
+    all_modules = _get_global_modules()
+    if module_name not in all_modules:
+        return {{
+            "error": f"未找到模块: {{module_name}}",
+            "fallback_command": f"search_modules {{module_name}}"
+        }}
+    dependents = []
+    for name, info in all_modules.items():
+        all_deps = (info.get('dependencies', [])
+                    + info.get('public_dependencies', [])
+                    + info.get('private_dependencies', []))
+        if module_name in all_deps:
+            dependents.append({{"name": name, "category": info.get('category', '')}})
+    return {{
+        "module": module_name,
+        "dependent_count": len(dependents),
+        "dependents": dependents[:200]
+    }}
+
+
+def query_enum_info(enum_name: str, module_hint: str = None) -> Dict[str, Any]:
+    """查询枚举信息（v2.14.0 新增）"""
+    enum_idx = _get_enum_index()
+    if enum_idx:
+        results = enum_idx.query_by_name(enum_name, module_hint)
+        if results:
+            return {{"enum_name": enum_name, "found_count": len(results), "results": results[:20]}}
+    return {{
+        "error": f"未找到枚举: {{enum_name}}",
+        "fallback_command": f"search_enums {{enum_name}}"
+    }}
+
+
+def search_enums(keyword: str, limit: int = 50) -> Dict[str, Any]:
+    """搜索枚举（v2.14.0 新增）"""
+    enum_idx = _get_enum_index()
+    if enum_idx:
+        results = enum_idx.search_by_keyword(keyword, limit)
+        return {{"keyword": keyword, "found_count": len(results), "results": results}}
+    return {{"error": "Enum index not available"}}
+
+
+def query_examples(target_name: str, limit: int = 5) -> Dict[str, Any]:
+    """查询代码使用示例（v2.14.0 新增）"""
+    try:
+        from ue5_kb.analyzers.example_extractor import ExampleExtractor
+        db_path = KB_PATH / "global_index" / "code_examples.db"
+        if not db_path.exists():
+            return {{"error": "Code examples database not available"}}
+        extractor = ExampleExtractor(str(db_path))
+        results = extractor.query_examples(target_name, limit=limit)
+        extractor.close()
+        return {{"target": target_name, "found_count": len(results), "examples": results}}
+    except Exception as e:
+        return {{"error": f"Failed to query examples: {{e}}"}}
 
 
 def get_function_implementation(function_name: str, class_name: str = None, module_hint: str = None) -> Dict[str, Any]:
@@ -521,10 +622,25 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
             "declaration_location": f"{func_info.get('file_path')}:{func_info.get('line_number')}"
         }
 
-    # 读取实现文件内容
+    # v2.14.0: 只返回函数体+上下文，而非整个文件
     try:
         with open(impl_file, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
+            all_lines = f.readlines()
+
+        if impl_line > 0 and impl_line <= len(all_lines):
+            start = max(0, impl_line - 6)
+            end = min(len(all_lines), impl_line + 100)
+            # 找函数体结束（匹配花括号）
+            brace_count = 0
+            for li in range(impl_line - 1, min(len(all_lines), impl_line + 500)):
+                brace_count += all_lines[li].count('{') - all_lines[li].count('}')
+                if brace_count <= 0 and li > impl_line:
+                    end = li + 2
+                    break
+            snippet = ''.join(all_lines[start:end])
+        else:
+            content = ''.join(all_lines)
+            snippet = content if len(content) < 10000 else content[:10000] + "... (truncated)"
 
         return {
             "function": function_name,
@@ -534,7 +650,7 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
             "declaration_line": func_info.get('line_number'),
             "implementation_file": impl_file,
             "implementation_line": impl_line,
-            "file_content": content if len(content) < 10000 else content[:10000] + "... (truncated)"
+            "file_content": snippet
         }
     except Exception as e:
         return {"error": f"Failed to read implementation file: {e}"}
@@ -561,6 +677,11 @@ if __name__ == "__main__":
         print("  search_functions <keyword> [limit]         - 搜索函数", file=sys.stderr)
         print("  search_classes <keyword> [limit]           - 搜索类", file=sys.stderr)
         print("  search_modules <keyword>                   - 搜索模块", file=sys.stderr)
+        print("  query_subclasses <parent_class> [limit]    - 查询子类（反向继承）", file=sys.stderr)
+        print("  query_module_dependents <module_name>      - 查询反向依赖", file=sys.stderr)
+        print("  query_enum_info <enum_name> [module_hint]  - 查询枚举信息", file=sys.stderr)
+        print("  search_enums <keyword> [limit]             - 搜索枚举", file=sys.stderr)
+        print("  query_examples <target_name> [limit]       - 查询代码示例", file=sys.stderr)
         print("  get_statistics                             - 获取统计信息", file=sys.stderr)
         print("  get_kb_info                                - 获取知识库版本信息", file=sys.stderr)
         print("", file=sys.stderr)
@@ -652,6 +773,45 @@ if __name__ == "__main__":
 
         elif command == "get_kb_info":
             result = get_kb_info()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_subclasses":
+            if len(sys.argv) < 3:
+                print("Error: Missing parent_class argument", file=sys.stderr)
+                _print_usage()
+            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 100
+            result = query_subclasses(sys.argv[2], limit)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_module_dependents":
+            if len(sys.argv) < 3:
+                print("Error: Missing module_name argument", file=sys.stderr)
+                _print_usage()
+            result = query_module_dependents(sys.argv[2])
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_enum_info":
+            if len(sys.argv) < 3:
+                print("Error: Missing enum_name argument", file=sys.stderr)
+                _print_usage()
+            module_hint = sys.argv[3] if len(sys.argv) > 3 else None
+            result = query_enum_info(sys.argv[2], module_hint)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "search_enums":
+            if len(sys.argv) < 3:
+                print("Error: Missing keyword argument", file=sys.stderr)
+                _print_usage()
+            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 50
+            result = search_enums(sys.argv[2], limit)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_examples":
+            if len(sys.argv) < 3:
+                print("Error: Missing target_name argument", file=sys.stderr)
+                _print_usage()
+            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 5
+            result = query_examples(sys.argv[2], limit)
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         else:

@@ -159,15 +159,25 @@ class BuildStage(PipelineStage):
                     dependencies = dep_data.get('dependencies', {})
 
             # 添加到索引
+            # BuildCsParser 返回 'public'/'private'/'dynamic'/'weak'/'circular'
+            # 兼容旧格式 'PublicDependencyModuleNames' 等
+            public_deps = (dependencies.get('public', [])
+                           or dependencies.get('PublicDependencyModuleNames', []))
+            private_deps = (dependencies.get('private', [])
+                            or dependencies.get('PrivateDependencyModuleNames', []))
+            dynamic_deps = (dependencies.get('dynamic', [])
+                            or dependencies.get('DynamicallyLoadedModuleNames', []))
+
             global_index.add_module(
                 module_name,
                 {
                     'name': module_name,
                     'path': module['path'],
                     'category': module['category'],
-                    'dependencies': dependencies.get('PublicDependencyModuleNames', []),
-                    'public_dependencies': dependencies.get('PublicDependencyModuleNames', []),
-                    'private_dependencies': dependencies.get('PrivateDependencyModuleNames', [])
+                    'dependencies': public_deps,
+                    'public_dependencies': public_deps,
+                    'private_dependencies': private_deps,
+                    'dynamic_dependencies': dynamic_deps,
                 }
             )
 
@@ -560,7 +570,7 @@ class BuildStage(PipelineStage):
         # 获取工具版本
         from ..core.config import Config
         config = Config(self.base_path / "KnowledgeBase")
-        tool_version = config.get('project.version', '2.13.0')
+        tool_version = config.get('project.version', '2.14.0')
 
         # 确定构建模式
         build_mode = 'plugin' if plugin_name else 'engine'

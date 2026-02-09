@@ -16,7 +16,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="2.13.0")
+@click.version_option(version="2.14.0")
 def cli():
     """UE5 Knowledge Base Builder - UE5 知识库生成工具
 
@@ -26,12 +26,22 @@ def cli():
     - 插件模式: 为单个插件生成独立知识库
 
     \b
-    v2.13.0 新特性：
-    - 知识库版本追踪：存储引擎版本、KB 格式版本、时间戳
-    - 文件级变更检测：SHA256 哈希，自动检测代码变更
-    - 增量更新系统：仅更新修改的模块，大幅减少更新时间
-    - Skill 版本查询：新增 get_kb_info 命令查询知识库版本
-    - 插件模式支持：插件知识库同样支持版本追踪和增量更新
+    v2.14.0 新特性：
+    - Doxygen 注释提取：自动关联 /** */ 和 /// 文档到类和函数
+    - UENUM 枚举解析：支持 enum class 和 UENUM 宏，含枚举值提取
+    - 说明符提取：UCLASS/UPROPERTY/USTRUCT 的 Blueprintable、EditAnywhere 等
+    - Delegate 宏解析：DECLARE_DELEGATE_*、DECLARE_DYNAMIC_MULTICAST_DELEGATE_* 等
+    - typedef/using 类型别名解析
+    - 纯虚函数保留：不再跳过 = 0 的方法声明
+    - Private 目录扫描：不再排除 Private 目录，覆盖完整源码
+    - .h + .cpp 同时扫描：从仅头文件扩展到源文件
+    - #include 依赖图：记录头文件包含关系
+    - 搜索无限制：函数和类查询不再限制模块数量
+    - 新增查询命令：query_subclasses、query_module_dependents、
+      query_enum_info、search_enums、query_examples
+    - 多行注释修复：正确处理跨行 /* */ 注释
+    - 模板参数逗号分割：TMap<K,V> 等模板类型不再被错误拆分
+    - 函数实现优化：只返回函数体+上下文，而非整个 cpp 文件
 
     \b
     可用命令：
@@ -459,7 +469,7 @@ def update(engine_path, plugin_path, full, check):
     检测文件变更并仅更新修改的模块，大幅减少更新时间。
 
     \b
-    v2.13.0 新特性：
+    v2.14.0: 增量更新同样受益于新增的枚举/委托/别名解析。
     - 文件级变更检测：SHA256 哈希追踪每个源文件
     - 智能差异计算：只处理变更的模块
     - 支持引擎模式和插件模式

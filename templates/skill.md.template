@@ -59,6 +59,11 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | `search_functions` | `<keyword> [limit=50]` | 搜索包含关键字的函数 |
 | `search_classes` | `<keyword> [limit=50]` | 搜索包含关键字的类 |
 | `search_modules` | `<keyword>` | 搜索包含关键字的模块 |
+| `query_subclasses` | `<parent_class> [limit=100]` | 查询继承自指定类的所有子类 |
+| `query_module_dependents` | `<module_name>` | 查询依赖指定模块的所有模块（反向依赖） |
+| `query_enum_info` | `<enum_name> [module_hint]` | 查询枚举信息（含枚举值） |
+| `search_enums` | `<keyword> [limit=50]` | 搜索枚举 |
+| `query_examples` | `<target_name> [limit=5]` | 查询代码使用示例 |
 | `get_statistics` | - | 获取知识库统计信息 |
 
 ### 查询示例

@@ -337,4 +337,4 @@ class PipelineCoordinator:
             from importlib.metadata import version
             return version("ue5-kb")
         except Exception:
-            return "2.13.0"
+            return "2.14.0"
