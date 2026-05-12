@@ -8,11 +8,30 @@ import os
 import pickle
 import sqlite3
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-# 知识库路径 (绝对路径)
-KB_PATH = Path(r"{KB_PATH}")
+from ue5_kb.branch_manager import BranchManager, safe_pickle_load
+from ue5_kb.vcs import VCSAdapter
+
+# Skill 目录（impl.py 所在目录）
+SKILL_DIR = Path(__file__).parent
+
+# 知识库路径 — 优先从多分支注册表解析，回退到硬编码路径
+_DEFAULT_KB_PATH = Path(r"{KB_PATH}")
+_branch_mgr = BranchManager(SKILL_DIR)
+
+
+def _resolve_kb_path(variant: str = None) -> Path:
+    """解析活跃 KB 路径，失败时回退到默认路径"""
+    try:
+        return _branch_mgr.resolve_kb_path(variant)
+    except Exception:
+        return _DEFAULT_KB_PATH
+
+
+KB_PATH = _resolve_kb_path()
 
 # KB 版本信息（插件模式）
 KB_PLUGIN_NAME = "{PLUGIN_NAME}"
@@ -35,13 +54,14 @@ _function_index_cache = None
 # ============================================================================
 
 def _get_db_connection() -> sqlite3.Connection:
-    """获取 SQLite 数据库连接"""
+    """获取 SQLite 数据库连接（P1-4: WAL 模式）"""
     global _db_connection
     if _db_connection is None:
         db_path = KB_PATH / "global_index" / "index.db"
         if not db_path.exists():
             raise FileNotFoundError(f"数据库不存在: {{db_path}}")
         _db_connection = sqlite3.connect(str(db_path))
+        _db_connection.execute("PRAGMA journal_mode=WAL")
     return _db_connection
 
 
@@ -56,7 +76,7 @@ def _load_module_graph(module_name: str) -> Optional[Any]:
 
     try:
         with open(graph_file, 'rb') as f:
-            data = pickle.load(f)
+            data = safe_pickle_load(f)  # P0-1: 安全 unpickle
             graph = data.get('graph')
             _module_graphs_cache[module_name] = graph
             return graph
@@ -566,10 +586,23 @@ if __name__ == "__main__":
         print("  get_statistics                             - 获取统计信息", file=sys.stderr)
         print("  get_kb_info                                - 获取知识库版本信息", file=sys.stderr)
         print("", file=sys.stderr)
+        print("Branch Management:", file=sys.stderr)
+        print("  init [--kb_store <path>]                   - 初始化多分支注册表", file=sys.stderr)
+        print("  register <branch> <source> [--kb <path>]   - 注册分支并导入 KB", file=sys.stderr)
+        print("  update <branch> <source> [--force]         - 构建/更新分支 KB", file=sys.stderr)
+        print("  status                                     - 查看所有分支状态", file=sys.stderr)
+        print("  set_active <branch>                        - 切换活跃分支", file=sys.stderr)
+        print("  check_freshness <source>                   - 检查 KB 新鲜度", file=sys.stderr)
+        print("  remove <branch> [--delete-data]            - 移除分支", file=sys.stderr)
+        print("  gc [--dry-run]                             - 垃圾回收", file=sys.stderr)
+        print("", file=sys.stderr)
         print("Examples:", file=sys.stderr)
         print('  python impl.py query_class_info AActor', file=sys.stderr)
         print('  python impl.py query_class_hierarchy AActor 5', file=sys.stderr)
         print('  python impl.py search_classes "Player" 20', file=sys.stderr)
+        print('  python impl.py init', file=sys.stderr)
+        print('  python impl.py register DEV /path/to/source', file=sys.stderr)
+        print('  python impl.py set_active DEV', file=sys.stderr)
         sys.exit(1)
 
     if len(sys.argv) < 2:
@@ -654,6 +687,79 @@ if __name__ == "__main__":
 
         elif command == "get_kb_info":
             result = get_kb_info()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        # ================================================================
+        # 多分支管理命令
+        # ================================================================
+        elif command == "init":
+            kb_store = None
+            if "--kb_store" in sys.argv:
+                idx = sys.argv.index("--kb_store")
+                kb_store = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+            result = _branch_mgr.init_registry(kb_store)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "register":
+            if len(sys.argv) < 4:
+                print("Error: register <branch> <source> [--kb <path>]", file=sys.stderr)
+                _print_usage()
+            branch_name = sys.argv[2]
+            source = sys.argv[3]
+            kb_path = None
+            if "--kb" in sys.argv:
+                idx = sys.argv.index("--kb")
+                kb_path = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+            desc = ""
+            if "--desc" in sys.argv:
+                idx = sys.argv.index("--desc")
+                desc = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
+            result = _branch_mgr.register(branch_name, source, kb_path, desc)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "update":
+            if len(sys.argv) < 4:
+                print("Error: update <branch> <source> [--force]", file=sys.stderr)
+                _print_usage()
+            branch_name = sys.argv[2]
+            source = sys.argv[3]
+            force = "--force" in sys.argv
+            desc = ""
+            if "--desc" in sys.argv:
+                idx = sys.argv.index("--desc")
+                desc = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
+            result = _branch_mgr.update(branch_name, source, force, desc)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "status":
+            result = _branch_mgr.status()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "set_active":
+            if len(sys.argv) < 3:
+                print("Error: set_active <branch>", file=sys.stderr)
+                _print_usage()
+            result = _branch_mgr.set_active(sys.argv[2])
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "check_freshness":
+            if len(sys.argv) < 3:
+                print("Error: check_freshness <source>", file=sys.stderr)
+                _print_usage()
+            result = _branch_mgr.check_freshness(sys.argv[2])
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "remove":
+            if len(sys.argv) < 3:
+                print("Error: remove <branch> [--delete-data]", file=sys.stderr)
+                _print_usage()
+            delete_data = "--delete-data" in sys.argv
+            result = _branch_mgr.remove(sys.argv[2], delete_data)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "gc":
+            dry_run = "--dry-run" in sys.argv
+            result = _branch_mgr.gc(dry_run)
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         else:
