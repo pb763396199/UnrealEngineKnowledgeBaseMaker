@@ -27,7 +27,12 @@ def _resolve_kb_path(variant: str = None) -> Path:
     """解析活跃 KB 路径，失败时回退到默认路径"""
     try:
         return _branch_mgr.resolve_kb_path(variant)
-    except Exception:
+    except FileNotFoundError:
+        # Registry 未初始化，正常回退
+        return _DEFAULT_KB_PATH
+    except Exception as e:
+        import sys
+        print(f"[KB] WARNING: resolve_kb_path failed ({type(e).__name__}: {e}), falling back to default", file=sys.stderr)
         return _DEFAULT_KB_PATH
 
 

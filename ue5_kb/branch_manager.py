@@ -12,12 +12,14 @@
 - P1-4: SQLite WAL 模式
 """
 
+import hashlib
 import io
 import os
 import pickle
 import shutil
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,13 +30,26 @@ from .vcs import VCSAdapter
 # P0-1: 安全 pickle 加载
 # ---------------------------------------------------------------------------
 
-_PICKLE_ALLOWLIST = {
+# 白名单：仅允许 networkx 序列化所需的安全类型
+_PICKLE_MODULE_ALLOWLIST = {
     "networkx.classes.digraph",
     "networkx.classes.graph",
     "networkx.classes.reportviews",
     "networkx.classes.coreviews",
-    "builtins",
     "collections",
+}
+
+# builtins 仅允许数据容器类型，禁止 eval/exec/getattr/__import__ 等
+_PICKLE_BUILTINS_ALLOW = {
+    "set", "frozenset", "list", "dict", "tuple", "bytes", "bytearray",
+    "True", "False", "None", "int", "float", "complex", "str", "slice",
+    "range", "type",
+}
+
+_PICKLE_BUILTINS_DENY = {
+    "eval", "exec", "getattr", "setattr", "delattr", "__import__",
+    "compile", "execfile", "open", "input", "breakpoint",
+    "globals", "locals", "vars",
 }
 
 
@@ -43,8 +58,23 @@ class SafeUnpickler(pickle.Unpickler):
 
     def find_class(self, module: str, name: str) -> Any:
         top = module.split(".")[0]
-        if module in _PICKLE_ALLOWLIST or top in ("builtins", "collections", "networkx"):
+
+        # builtins: 显式枚举安全类型
+        if module == "builtins":
+            if name in _PICKLE_BUILTINS_DENY:
+                raise pickle.UnpicklingError(
+                    f"Blocked dangerous builtin: builtins.{name}"
+                )
+            if name in _PICKLE_BUILTINS_ALLOW:
+                return super().find_class(module, name)
+            raise pickle.UnpicklingError(
+                f"Blocked unknown builtin: builtins.{name}"
+            )
+
+        # networkx + collections: 允许整个包
+        if module in _PICKLE_MODULE_ALLOWLIST or top in ("collections", "networkx"):
             return super().find_class(module, name)
+
         raise pickle.UnpicklingError(
             f"Blocked: {module}.{name} (not in allowlist)"
         )
@@ -64,6 +94,18 @@ def safe_pickle_load_path(path: Path) -> Any:
 # ---------------------------------------------------------------------------
 # P1-1: Hardlink 去重复制
 # ---------------------------------------------------------------------------
+
+def _file_md5(path: Path) -> str:
+    """计算文件 MD5（1MB 分块读取）"""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1048576)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def _hardlink_copy(src: Path, dst: Path) -> None:
     """复制目录，优先使用硬链接节省空间"""
@@ -108,6 +150,9 @@ def _hardlink_copy_dedup(src: Path, dst: Path, baseline: Optional[Path] = None) 
                         same = True
                         if src_stat.st_size <= 1048576:
                             same = item.read_bytes() == baseline_file.read_bytes()
+                        else:
+                            # >1MB: 用 MD5 比较内容
+                            same = _file_md5(item) == _file_md5(baseline_file)
                         if same:
                             os.link(str(baseline_file), str(target))
                             continue
@@ -175,9 +220,10 @@ def _import_kb_to_store(
 # ---------------------------------------------------------------------------
 
 def _db_connect(path: Path) -> sqlite3.Connection:
-    """创建 SQLite 连接并启用 WAL 模式（P1-4）"""
+    """创建 SQLite 连接并启用 WAL 模式（P1-4）+ busy_timeout"""
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -262,6 +308,10 @@ class BranchManager:
         vcs = VCSAdapter.detect(source)
         commit_id = vcs.get_head_id()
         vcs_type = vcs.get_type()
+
+        # 非 git 仓库 commit_id="unknown" 会导致 PK 碰撞，附加时间戳
+        if commit_id == "unknown":
+            commit_id = f"unknown_{int(time.time())}"
 
         if not self.registry_db.exists():
             self._init_registry()
@@ -349,6 +399,10 @@ class BranchManager:
         commit_id = vcs.get_head_id()
         vcs_type = vcs.get_type()
         is_dirty = vcs.is_dirty()
+
+        # 非 git 仓库 commit_id="unknown" 会导致 PK 碰撞，附加时间戳
+        if commit_id == "unknown":
+            commit_id = f"unknown_{int(time.time())}"
 
         if not self.registry_db.exists():
             self._init_registry()
@@ -667,6 +721,9 @@ class BranchManager:
             if not store_path.exists():
                 return {"status": "ok", "message": "variants 目录不存在", "cleaned": 0}
 
+            # BEGIN IMMEDIATE 防止 register/update 并发修改
+            conn.execute("BEGIN IMMEDIATE")
+
             registered = {
                 r[0] for r in conn.execute("SELECT kb_dir FROM versions").fetchall()
             }
@@ -677,7 +734,18 @@ class BranchManager:
             for item in store_path.iterdir():
                 if not item.is_dir():
                     continue
+                # 清理超过 1 小时的残留临时目录
                 if item.name.startswith("_building_") or item.name.startswith("_old_"):
+                    try:
+                        age = time.time() - item.stat().st_mtime
+                        if age > 3600:
+                            size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                            orphans.append({"dir": item.name, "size_mb": round(size / 1048576, 1), "stale": True})
+                            if not dry_run:
+                                shutil.rmtree(str(item))
+                            total_freed += size
+                    except OSError:
+                        pass
                     continue
                 if item.name not in registered:
                     size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
@@ -710,6 +778,8 @@ class BranchManager:
                     conn.execute("DELETE FROM versions WHERE commit_id = ?", (vid,))
 
             if not dry_run and cleaned_versions:
+                conn.commit()
+            elif not dry_run:
                 conn.commit()
 
             return {
