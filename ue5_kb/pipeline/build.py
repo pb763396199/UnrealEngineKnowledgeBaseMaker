@@ -361,6 +361,8 @@ class BuildStage(PipelineStage):
                                 'signature': node_data.get('signature', ''),
                                 'file_path': node_data.get('file', ''),
                                 'line_number': node_data.get('line', 0),
+                                'impl_file_path': node_data.get('impl_file_path', ''),
+                                'impl_line_number': node_data.get('impl_line_number', 0),
                                 'is_virtual': node_data.get('is_virtual', False),
                                 'is_const': node_data.get('is_const', False),
                                 'is_static': node_data.get('is_static', False),
@@ -583,8 +585,10 @@ class BuildStage(PipelineStage):
                 params_str = ', '.join([f"{p.get('type', 'unknown')} {p.get('name', 'param')}" for p in params])
                 signature = f"{return_type} {func_name}({params_str})"
 
+            class_part = func.get('class_name', '') or ''
+            func_node_key = f"function__{class_part}__{func_name}__{file_path}__L{line_num}"
             graph.add_node(
-                f"function_{func_name}",
+                func_node_key,
                 type='function',
                 name=func_name,
                 file=file_path,
@@ -593,6 +597,8 @@ class BuildStage(PipelineStage):
                 return_type=func.get('return_type', ''),
                 parameters=func.get('parameters', []),
                 class_name=func.get('class_name', ''),
+                impl_file_path=func.get('impl_file_path', ''),
+                impl_line_number=func.get('impl_line_number', 0),
                 is_ufunction=func.get('is_ufunction', False),
                 is_blueprint_callable=func.get('is_blueprint_callable', False)
             )

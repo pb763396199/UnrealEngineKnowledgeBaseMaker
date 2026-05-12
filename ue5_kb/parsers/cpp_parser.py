@@ -540,7 +540,45 @@ class CppParser:
             method = self._try_parse_method(line, class_name)
             if method and class_name in self.classes:
                 self.classes[class_name].methods.append(method)
+                # 同时注册为带 class_name 的 FunctionInfo
+                method_info = self._try_parse_method_info(line, class_name, file_path, i + 1, doxygen_map)
+                if method_info:
+                    self.functions[f"{method_info.name}_{i + 1}"] = method_info
         return len(lines) - 1
+
+    def _try_parse_method_info(
+        self, line: str, class_name: str, file_path: str,
+        line_num: int, doxygen_map: Optional[Dict[int, str]] = None
+    ) -> Optional['FunctionInfo']:
+        """从类体内的方法声明行创建 FunctionInfo（含 class_name）"""
+        if ';' not in line:
+            return None
+        m = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_<>*&:\s]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*'
+            r'\(([^)]*)\)\s*(?:const)?\s*(?:override|final)?\s*(?:=\s*0\s*)?;', line
+        )
+        if not m:
+            return None
+        rt, mn, params = m.group(1).strip(), m.group(2), m.group(3)
+        if mn in ['if', 'for', 'while', 'switch', 'return', 'class', 'struct', 'enum']:
+            return None
+        if '= delete' in line:
+            return None
+        is_virt = 'virtual' in rt
+        is_stat = 'static' in rt
+        is_const = ' const' in line
+        is_over = 'override' in line
+        is_pv = '= 0' in line
+        rt_clean = re.sub(r'\b(virtual|static|inline|explicit|friend)\b', '', rt).strip()
+        doc = (doxygen_map or {}).get(line_num, '')
+        return FunctionInfo(
+            name=mn, return_type=rt_clean,
+            parameters=self._parse_parameters(params),
+            is_static=is_stat, is_virtual=is_virt, is_const=is_const,
+            is_override=is_over, is_pure_virtual=is_pv,
+            class_name=class_name, file_path=file_path,
+            line_number=line_num, doc_comment=doc
+        )
 
     def _try_parse_property(self, line: str, has_uprop: bool, spec_str: str = '') -> Optional[PropertyInfo]:
         line = self.UPROPERTY_PATTERN.sub('', line).strip()
@@ -761,12 +799,57 @@ class CppParser:
                          or uf_specs.get('BlueprintNativeEvent', False))
                 doc = doxygen_map.get(i, '')
 
+                # 保留 class body 解析阶段设置的 class_name
+                existing = self.functions.get(f"{fn}_{i}")
+                preserved_class_name = existing.class_name if existing else None
                 self.functions[f"{fn}_{i}"] = FunctionInfo(
                     name=fn, return_type=rt_clean, parameters=self._parse_parameters(params),
                     is_ufunction=bool(uf_specs), is_static=is_stat, is_virtual=is_virt,
                     is_const=is_const, is_override=is_over, is_pure_virtual=is_pv,
                     is_blueprint_callable=is_bp, ufunction_specifiers=uf_specs.copy() if uf_specs else {},
+                    class_name=preserved_class_name,
                     file_path=file_path, line_number=i, doc_comment=doc
+                )
+                uf_specs = {}
+                continue
+
+            # Class::Func 实现模式（.cpp 文件）
+            impl_m = re.search(
+                r'([A-Za-z_][A-Za-z0-9_]*)\s*::\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)',
+                wl.strip()
+            )
+            if impl_m and impl_m.group(1)[0].isupper():
+                cn = impl_m.group(1)
+                fn_impl = impl_m.group(2)
+                params_impl = impl_m.group(3)
+                rt_impl = wl.strip()[:impl_m.start()].strip()
+                if fn_impl in ['if', 'for', 'while', 'switch', 'return', 'class', 'struct', 'enum']:
+                    uf_specs = {}
+                    continue
+                if '= delete' in ls:
+                    uf_specs = {}
+                    continue
+                is_virt_impl = 'virtual' in rt_impl
+                is_stat_impl = 'static' in rt_impl
+                is_const_impl = ' const' in co_part
+                is_over_impl = ' override' in co_part
+                rt_impl_clean = re.sub(r'\b(virtual|static|inline|explicit|friend)\b', '', rt_impl).strip()
+                is_bp_impl = (
+                    uf_specs.get('BlueprintCallable', False) or uf_specs.get('BlueprintPure', False)
+                    or uf_specs.get('BlueprintImplementableEvent', False)
+                    or uf_specs.get('BlueprintNativeEvent', False)
+                )
+                doc_impl = doxygen_map.get(i, '')
+                self.functions[f"{fn_impl}_{i}_impl"] = FunctionInfo(
+                    name=fn_impl, return_type=rt_impl_clean,
+                    parameters=self._parse_parameters(params_impl),
+                    is_ufunction=bool(uf_specs), is_static=is_stat_impl, is_virtual=is_virt_impl,
+                    is_const=is_const_impl, is_override=is_over_impl, is_pure_virtual=is_pv,
+                    is_blueprint_callable=is_bp_impl,
+                    ufunction_specifiers=uf_specs.copy() if uf_specs else {},
+                    class_name=cn, file_path=file_path, line_number=i,
+                    impl_file_path=file_path, impl_line_number=i,
+                    doc_comment=doc_impl
                 )
                 uf_specs = {}
 

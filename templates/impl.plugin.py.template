@@ -352,8 +352,8 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
                     "is_blueprint_callable": node_data.get('is_blueprint_callable', False),
                     "file": node_data.get('file', ''),
                     "line": node_data.get('line', 0),
-                    "impl_file": node_data.get('impl_file', ''),
-                    "impl_line": node_data.get('impl_line', 0),
+                    "impl_file": node_data.get('impl_file_path', '') or node_data.get('impl_file', ''),
+                    "impl_line": node_data.get('impl_line_number', 0) or node_data.get('impl_line', 0),
                     "class": node_data.get('class_name', '')
                 }})
 
@@ -456,7 +456,7 @@ def search_functions(keyword: str, limit: int = 50) -> Dict[str, Any]:
                         "module": module_name,
                         "return_type": node_data.get('return_type', ''),
                         "file": node_data.get('file', ''),
-                        "impl_file": node_data.get('impl_file', ''),
+                        "impl_file": node_data.get('impl_file_path', '') or node_data.get('impl_file', ''),
                         "class": node_data.get('class_name', '')
                     }})
 

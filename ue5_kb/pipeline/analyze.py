@@ -295,6 +295,27 @@ class AnalyzeStage(PipelineStage):
             functions.extend(cached.get('functions', []))
             enums.extend(cached.get('enums', []))
 
+        # 将 .cpp 实现关联到同模块的 .h 声明 (class_name, name)
+        impl_lookup = {}
+        for func in functions:
+            cn = func.get('class_name') or ''
+            fn_name = func.get('name') or ''
+            fp = func.get('file_path', '')
+            if cn and fn_name and fp.lower().endswith('.cpp') and func.get('impl_file_path'):
+                impl_lookup[(cn, fn_name)] = {
+                    'impl_file_path': func['impl_file_path'],
+                    'impl_line_number': func.get('impl_line_number', 0)
+                }
+        for func in functions:
+            cn = func.get('class_name') or ''
+            fn_name = func.get('name') or ''
+            fp = func.get('file_path', '')
+            if cn and fn_name and fp.lower().endswith('.h') and not func.get('impl_file_path'):
+                impl = impl_lookup.get((cn, fn_name))
+                if impl:
+                    func['impl_file_path'] = impl['impl_file_path']
+                    func['impl_line_number'] = impl['impl_line_number']
+
         return {
             'module': module_name,
             'source_file_count': len(source_files),
