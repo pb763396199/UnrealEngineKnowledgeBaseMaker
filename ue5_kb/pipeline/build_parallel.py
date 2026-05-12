@@ -310,6 +310,8 @@ class ParallelBuildStage:
                 is_uclass=cls.get("is_uclass", False),
                 is_struct=cls.get("is_struct", False),
                 is_interface=cls.get("is_interface", False),
+                is_blueprintable=cls.get("is_blueprintable", False),
+                specifiers=cls.get("specifiers", {}),
             )
 
             for parent in parent_classes:
@@ -350,6 +352,11 @@ class ParallelBuildStage:
                 impl_line_number=func.get("impl_line_number", 0),
                 is_ufunction=func.get("is_ufunction", False),
                 is_blueprint_callable=func.get("is_blueprint_callable", False),
+                is_virtual=func.get("is_virtual", False),
+                is_const=func.get("is_const", False),
+                is_static=func.get("is_static", False),
+                is_override=func.get("is_override", False),
+                ufunction_specifiers=func.get("ufunction_specifiers", {}),
             )
 
         return graph

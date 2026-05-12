@@ -40,6 +40,7 @@ class ClassInfo:
     is_uclass: bool = False
     is_struct: bool = False
     is_interface: bool = False
+    is_blueprintable: bool = False
     parent_class: Optional[str] = None
     parent_classes: List[str] = field(default_factory=list)
     interfaces: List[str] = field(default_factory=list)
@@ -54,7 +55,8 @@ class ClassInfo:
     def to_dict(self) -> Dict[str, Any]:
         result = {
             'name': self.name, 'is_uclass': self.is_uclass, 'is_struct': self.is_struct,
-            'is_interface': self.is_interface, 'parent_class': self.parent_class,
+            'is_interface': self.is_interface, 'is_blueprintable': self.is_blueprintable,
+            'parent_class': self.parent_class,
             'parent_classes': self.parent_classes, 'interfaces': self.interfaces,
             'methods': self.methods, 'properties': [p.to_dict() for p in self.properties],
             'file_path': self.file_path, 'line_number': self.line_number, 'namespace': self.namespace
@@ -427,6 +429,11 @@ class CppParser:
     def _parse_classes_and_structs(self, lines: List[str], file_path: str, doxygen_map: Dict[int, str] = None) -> None:
         doxygen_map = doxygen_map or {}
         namespace_stack: List[str] = []
+        # pending macro: UCLASS/USTRUCT/UINTERFACE 通常在 class 声明上一行
+        pending_is_uclass: bool = False
+        pending_is_ustruct: bool = False
+        pending_is_uiface: bool = False
+        pending_spec_str: str = ''
         i = 0
         while i < len(lines):
             line = lines[i].strip()
@@ -449,7 +456,25 @@ class CppParser:
             spec_str = spec_str.group(1) if spec_str else ''
 
             class_m = re.search(r'\b(class|struct)\s+((?:[A-Z_]+_API\s+)?[A-Z][A-Za-z0-9_]*)(?:\s*:\s*(.*))?', line)
+
+            # UCLASS/USTRUCT/UINTERFACE 在本行但无 class 声明 → 存入 pending，下一行 class 声明时合并
+            if (is_uclass or is_ustruct or is_uiface) and not class_m:
+                pending_is_uclass = is_uclass
+                pending_is_ustruct = is_ustruct
+                pending_is_uiface = is_uiface
+                pending_spec_str = spec_str
+                i += 1
+                continue
+
             if class_m:
+                # 合并 pending 宏标记与当前行信息
+                eff_is_uclass = is_uclass or pending_is_uclass
+                eff_is_ustruct = is_ustruct or pending_is_ustruct
+                eff_is_uiface = is_uiface or pending_is_uiface
+                eff_spec_str = spec_str or pending_spec_str
+                pending_is_uclass = pending_is_ustruct = pending_is_uiface = False
+                pending_spec_str = ''
+
                 decl_type = class_m.group(1)
                 full_name = class_m.group(2).strip()
                 inherit = class_m.group(3).strip() if class_m.group(3) else ""
@@ -473,22 +498,25 @@ class CppParser:
                     parent_class = parent_classes[0]
 
                 is_struct_f = decl_type == 'struct'
-                is_uclass_f = is_ustruct if is_struct_f else is_uclass
-                parsed_spec = self._parse_uclass_specifiers(spec_str)
+                is_uclass_f = eff_is_ustruct if is_struct_f else eff_is_uclass
+                parsed_spec = self._parse_uclass_specifiers(eff_spec_str)
+                is_blueprintable_f = bool(parsed_spec.get('Blueprintable') or parsed_spec.get('BlueprintType'))
                 doc = doxygen_map.get(i + 1, '') or doxygen_map.get(i, '') or doxygen_map.get(i - 1, '')
 
                 if class_name not in self.classes:
                     self.classes[class_name] = ClassInfo(
                         name=class_name, parent_class=parent_class, parent_classes=parent_classes,
                         interfaces=interfaces, is_uclass=is_uclass_f, is_struct=is_struct_f,
-                        is_interface=is_uiface, namespace=current_ns, file_path=file_path,
+                        is_interface=eff_is_uiface, is_blueprintable=is_blueprintable_f,
+                        namespace=current_ns, file_path=file_path,
                         line_number=i + 1, doc_comment=doc, specifiers=parsed_spec
                     )
                 else:
                     info = self.classes[class_name]
                     if is_uclass_f: info.is_uclass = True
                     if is_struct_f: info.is_struct = True
-                    if is_uiface: info.is_interface = True
+                    if eff_is_uiface: info.is_interface = True
+                    if is_blueprintable_f: info.is_blueprintable = True
                     if parent_class and not info.parent_class: info.parent_class = parent_class
                     if parent_classes and not info.parent_classes: info.parent_classes = parent_classes
                     if interfaces and not info.interfaces: info.interfaces = interfaces
@@ -497,6 +525,10 @@ class CppParser:
                     if parsed_spec and not info.specifiers: info.specifiers = parsed_spec
 
                 self._parse_class_body(lines, i + 1, class_name, file_path, doxygen_map)
+            elif line:
+                # 非空、非宏、非类声明行 → 清除过期 pending
+                pending_is_uclass = pending_is_ustruct = pending_is_uiface = False
+                pending_spec_str = ''
             i += 1
 
     def _parse_class_body(self, lines: List[str], start_line: int, class_name: str,

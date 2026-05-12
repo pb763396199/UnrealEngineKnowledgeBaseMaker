@@ -254,7 +254,9 @@ def query_class_info(class_name: str) -> Dict[str, Any]:
         "parent_classes": node_data.get('parent_classes', []),
         "is_uclass": node_data.get('is_uclass', False),
         "is_struct": node_data.get('is_struct', False),
-        "is_interface": node_data.get('is_interface', False)
+        "is_interface": node_data.get('is_interface', False),
+        "is_blueprintable": node_data.get('is_blueprintable', False),
+        "specifiers": node_data.get('specifiers', {{}})
     }}
 
 
@@ -350,6 +352,7 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
                     "parameters": node_data.get('parameters', []),
                     "is_ufunction": node_data.get('is_ufunction', False),
                     "is_blueprint_callable": node_data.get('is_blueprint_callable', False),
+                    "ufunction_specifiers": node_data.get('ufunction_specifiers', {{}}),
                     "file": node_data.get('file', ''),
                     "line": node_data.get('line', 0),
                     "impl_file": node_data.get('impl_file_path', '') or node_data.get('impl_file', ''),
@@ -455,6 +458,7 @@ def search_functions(keyword: str, limit: int = 50) -> Dict[str, Any]:
                         "function": function_name,
                         "module": module_name,
                         "return_type": node_data.get('return_type', ''),
+                        "ufunction_specifiers": node_data.get('ufunction_specifiers', {{}}),
                         "file": node_data.get('file', ''),
                         "impl_file": node_data.get('impl_file_path', '') or node_data.get('impl_file', ''),
                         "class": node_data.get('class_name', '')
