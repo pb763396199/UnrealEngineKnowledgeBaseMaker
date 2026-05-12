@@ -214,6 +214,14 @@ class ParallelBuildStage:
         console.print(f"[cyan]构建快速索引...[/cyan]")
         self._build_fast_indices(config)
 
+        # 5. 构建符号引用索引（call graph）
+        console.print(f"[cyan]构建符号引用索引...[/cyan]")
+        try:
+            from ..core.symbol_reference_index import build_from_config as _build_sym_ref
+            _build_sym_ref(config)
+        except Exception as e:
+            console.print(f"[yellow]  警告: 符号引用索引构建失败: {e}[/yellow]")
+
         result = {
             "kb_path": str(self.kb_path),
             "module_graphs_created": built_count,

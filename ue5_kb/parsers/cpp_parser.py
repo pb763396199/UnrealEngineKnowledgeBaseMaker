@@ -850,7 +850,11 @@ class CppParser:
                 r'([A-Za-z_][A-Za-z0-9_]*)\s*::\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)',
                 wl.strip()
             )
-            if impl_m and impl_m.group(1)[0].isupper():
+            if (
+                impl_m
+                and impl_m.group(1)[0].isupper()
+                and self._looks_like_function_definition(lines, i)
+            ):
                 cn = impl_m.group(1)
                 fn_impl = impl_m.group(2)
                 params_impl = impl_m.group(3)
@@ -884,6 +888,20 @@ class CppParser:
                     doc_comment=doc_impl
                 )
                 uf_specs = {}
+
+    def _looks_like_function_definition(self, lines: List[str], line_number: int) -> bool:
+        """Return True when a candidate signature reaches a body before a semicolon."""
+        start = max(0, line_number - 1)
+        for line in lines[start:min(start + 8, len(lines))]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            for char in stripped:
+                if char == '{':
+                    return True
+                if char == ';':
+                    return False
+        return False
 
     def _parse_parameters(self, params_str: str) -> List[ParameterInfo]:
         if not params_str or params_str.strip() == 'void':

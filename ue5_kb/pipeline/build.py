@@ -84,10 +84,17 @@ class BuildStage(PipelineStage):
         # 4. 构建快速索引
         self._build_fast_indices(config)
 
-        # 5. 保存统计信息
+        # 5. 构建符号引用索引（call graph）
+        try:
+            from ..core.symbol_reference_index import build_from_config as _build_sym_ref
+            _build_sym_ref(config)
+        except Exception as e:
+            print(f"  [警告] 符号引用索引构建失败: {e}")
+
+        # 6. 保存统计信息
         stats = global_index.get_statistics()
 
-        # 6. 创建并保存 KB 清单（v2.13.0 新增）
+        # 7. 创建并保存 KB 清单（v2.13.0 新增）
         self._save_kb_manifest(kb_path, stats)
 
         result = {

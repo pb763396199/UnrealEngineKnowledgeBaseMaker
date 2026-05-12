@@ -52,6 +52,7 @@ _module_graphs_cache = {{}}
 _db_connection = None
 _class_index_cache = None
 _function_index_cache = None
+_symbol_reference_index_cache = None
 
 
 # ============================================================================
@@ -139,6 +140,17 @@ def _get_function_index():
         if db_path.exists():
             _function_index_cache = FunctionIndex(str(db_path))
     return _function_index_cache
+
+
+def _get_symbol_reference_index():
+    """获取符号引用索引（call graph）"""
+    global _symbol_reference_index_cache
+    if _symbol_reference_index_cache is None:
+        from ue5_kb.core.symbol_reference_index import SymbolReferenceIndex
+        db_path = KB_PATH / "global_index" / "symbol_reference_index.db"
+        if db_path.exists():
+            _symbol_reference_index_cache = SymbolReferenceIndex(str(db_path))
+    return _symbol_reference_index_cache
 
 
 # ============================================================================
@@ -570,6 +582,45 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
     except Exception as e:
         return {"error": f"Failed to read implementation file: {e}"}
 
+def query_callees(function_name: str, class_name: str = None, limit: int = 50) -> Dict[str, Any]:
+    """查询某函数调用的所有目标（callees）"""
+    sri = _get_symbol_reference_index()
+    if not sri:
+        return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
+    rows = sri.query_callees(function_name, class_name, limit)
+    return {{
+        "function_name": function_name,
+        "class_name": class_name,
+        "found_count": len(rows),
+        "results": rows,
+    }}
+
+
+def query_callers(function_name: str, class_name: str = None, limit: int = 50) -> Dict[str, Any]:
+    """查询调用某函数的所有 callers"""
+    sri = _get_symbol_reference_index()
+    if not sri:
+        return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
+    rows = sri.query_callers(function_name, class_name, limit)
+    return {{
+        "function_name": function_name,
+        "class_name": class_name,
+        "found_count": len(rows),
+        "results": rows,
+    }}
+
+
+def query_symbol_references(symbol_name: str, limit: int = 50) -> Dict[str, Any]:
+    """查询所有引用某 symbol 的记录（call 或 type_reference）"""
+    sri = _get_symbol_reference_index()
+    if not sri:
+        return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
+    rows = sri.query_symbol_references(symbol_name, limit)
+    return {{
+        "symbol_name": symbol_name,
+        "found_count": len(rows),
+        "results": rows,
+    }}
 
 # ============================================================================
 # 命令行接口 (CLI)
@@ -594,6 +645,9 @@ if __name__ == "__main__":
         print("  search_modules <keyword>                   - 搜索模块", file=sys.stderr)
         print("  get_statistics                             - 获取统计信息", file=sys.stderr)
         print("  get_kb_info                                - 获取知识库版本信息", file=sys.stderr)
+        print("  query_callees <function_name> [class_name] [limit]   - 查询函数调用的 callees", file=sys.stderr)
+        print("  query_callers <function_name> [class_name] [limit]   - 查询调用该函数的 callers", file=sys.stderr)
+        print("  query_symbol_references <symbol_name> [limit]        - 查询符号的所有引用", file=sys.stderr)
         print("", file=sys.stderr)
         print("Branch Management:", file=sys.stderr)
         print("  init [--kb_store <path>]                   - 初始化多分支注册表", file=sys.stderr)
@@ -696,6 +750,32 @@ if __name__ == "__main__":
 
         elif command == "get_kb_info":
             result = get_kb_info()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_callees":
+            if len(sys.argv) < 3:
+                print("Error: Missing function_name argument", file=sys.stderr)
+                _print_usage()
+            class_name = sys.argv[3] if len(sys.argv) > 3 else None
+            limit = int(sys.argv[4]) if len(sys.argv) > 4 else 50
+            result = query_callees(sys.argv[2], class_name, limit)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_callers":
+            if len(sys.argv) < 3:
+                print("Error: Missing function_name argument", file=sys.stderr)
+                _print_usage()
+            class_name = sys.argv[3] if len(sys.argv) > 3 else None
+            limit = int(sys.argv[4]) if len(sys.argv) > 4 else 50
+            result = query_callers(sys.argv[2], class_name, limit)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "query_symbol_references":
+            if len(sys.argv) < 3:
+                print("Error: Missing symbol_name argument", file=sys.stderr)
+                _print_usage()
+            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 50
+            result = query_symbol_references(sys.argv[2], limit)
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         # ================================================================
