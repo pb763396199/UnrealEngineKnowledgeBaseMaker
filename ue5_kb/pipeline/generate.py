@@ -259,3 +259,25 @@ class GenerateStage(PipelineStage):
             f.write(impl_py_content)
 
         print(f"  生成 skill.md 和 impl.py")
+
+        # 初始化多分支注册表并注册默认分支
+        self._init_branch_registry(skill_path, kb_path)
+
+    def _init_branch_registry(self, skill_path: Path, kb_path: Path) -> None:
+        """初始化多分支注册表并注册初始 KB"""
+        try:
+            from ..branch_manager import BranchManager
+            mgr = BranchManager(skill_path)
+            mgr.init_registry()
+
+            # 注册默认分支 — 使用源码目录做 VCS 检测
+            source_path = str(self.base_path)
+            mgr.register(
+                branch="default",
+                source=source_path,
+                kb_path=str(kb_path),
+                description="Auto-registered during skill generation",
+            )
+            print(f"  初始化多分支注册表，注册 default 分支")
+        except Exception as e:
+            print(f"  警告: 注册表初始化失败 ({e})，多分支功能将使用回退路径")
