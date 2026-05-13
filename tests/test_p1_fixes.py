@@ -574,3 +574,234 @@ class TestBuildStageLoadGraphFileSafePickle:
         assert len(call_record) == 1, \
             "safe_pickle_load 应被调用一次"
 
+
+# ---------------------------------------------------------------------------
+# P2 回归测试 d: analyze cache 文件名使用 POSIX 平铺格式
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeCacheWindowsPath:
+    """
+    验证 analyze 阶段的增量缓存在 Windows 路径下不产生嵌套目录：
+    - manifest 的 rel_path key 是 POSIX 格式（无反斜杠）
+    - 写入的 cache 文件名是 POSIX 格式 replace('/', '_')（平铺，不含反斜杠）
+    """
+
+    def test_cache_filename_uses_posix_flat_name(self, tmp_path):
+        """cache 文件名应使用 POSIX 平铺格式，不包含反斜杠导致的子目录"""
+        from ue5_kb.pipeline.analyze import AnalyzeStage
+        from ue5_kb.core.manifest import ModuleManifest, FileInfo, Hasher
+
+        base_path = tmp_path / "engine"
+        module_dir = base_path / "Source" / "Runtime" / "CacheMod"
+        module_dir.mkdir(parents=True)
+        src_file = module_dir / "Cached.h"
+        src_file.write_text("class ACached {};", encoding="utf-8")
+
+        stage = AnalyzeStage(base_path)
+
+        # 构造 manifest：key 用 POSIX 路径，hash 与实际文件一致（触发缓存命中）
+        posix_rel = src_file.relative_to(base_path).as_posix()
+        real_hash = Hasher.compute_sha256(src_file)
+
+        manifest = ModuleManifest(
+            module_name="CacheMod",
+            build_cs_path="Source/Runtime/CacheMod/CacheMod.Build.cs",
+            category="Runtime",
+        )
+        manifest.files[posix_rel] = FileInfo(path=posix_rel, sha256=real_hash, size=0, mtime=0.0)
+
+        # 预写一份有效 cache 文件（平铺名）
+        module_cache_dir = stage.stage_dir / "CacheMod"
+        module_cache_dir.mkdir(parents=True, exist_ok=True)
+        flat_name = posix_rel.replace('/', '_')
+        cache_file = module_cache_dir / f"cache_{flat_name}.json"
+        cache_file.write_text(
+            json.dumps({"classes": [{"name": "ACached"}], "functions": [], "enums": []}),
+            encoding="utf-8",
+        )
+
+        # 写入 manifest
+        manifest_file = stage.stage_dir / "CacheMod" / "module_manifest.json"
+        manifest_file.write_text(
+            json.dumps(manifest.to_dict()), encoding="utf-8"
+        )
+
+        class DummyParser:
+            def extract_classes(self, content, fp): return []
+            def extract_functions(self, content, fp): return []
+            def extract_enums(self, content, fp): return []
+
+        result = stage._analyze_module(
+            module_name="CacheMod",
+            source_files=[src_file],
+            parser=DummyParser(),
+            verbose=False,
+            use_incremental=True,
+        )
+
+        # 命中缓存：解析文件数为 0，跳过数为 1
+        assert result["skipped_file_count"] == 1, \
+            "hash 未变更时应命中缓存，skipped=1"
+        assert result["parsed_file_count"] == 0, \
+            "hash 未变更时应跳过解析，parsed=0"
+        # 缓存文件路径：平铺名，不应产生额外子目录
+        assert "\\" not in flat_name, f"平铺文件名不应含反斜杠: {flat_name!r}"
+        assert cache_file.exists(), f"预写 cache 文件应存在: {cache_file}"
+
+    def test_manifest_key_has_no_backslash(self, tmp_path):
+        """manifest 中的 rel_path key 在 POSIX 化后不含反斜杠"""
+        from ue5_kb.core.manifest import Hasher
+
+        base_path = tmp_path / "engine"
+        src_file = base_path / "Source" / "Runtime" / "Mod" / "Foo.h"
+        src_file.parent.mkdir(parents=True)
+        src_file.write_text("class AFoo{};")
+
+        posix_rel = src_file.relative_to(base_path).as_posix()
+        assert "\\" not in posix_rel, \
+            f"POSIX rel_path 不应含反斜杠: {posix_rel!r}"
+        assert "/" in posix_rel, \
+            f"POSIX rel_path 应含正斜杠: {posix_rel!r}"
+        flat = posix_rel.replace('/', '_')
+        assert "\\" not in flat, \
+            f"平铺 cache 名不应含反斜杠: {flat!r}"
+
+
+# ---------------------------------------------------------------------------
+# P2 回归测试 e: LayeredQueryInterface source_root 参数
+# ---------------------------------------------------------------------------
+
+class TestLayeredQuerySourceRoot:
+    """
+    验证 LayeredQueryInterface(kb_path, source_root=...) 能从外置源码目录读取源码，
+    且不传 source_root 时不从 variants.parent 误读源码。
+    """
+
+    def _make_class_index_db(self, db_path: Path, class_name: str, file_path: str) -> None:
+        """创建最小 class_index.db，写入一条类记录"""
+        from ue5_kb.core.class_index import ClassIndex
+        idx = ClassIndex(str(db_path))
+        idx.add_class({
+            "name": class_name,
+            "module": "TestMod",
+            "file_path": file_path,
+            "line_number": 1,
+        })
+        idx.close()
+
+    def test_with_source_root_reads_source(self, tmp_path):
+        """提供 source_root 时，_load_source_code 应从 source_root 下正确定位文件"""
+        from ue5_kb.query.layered_query import LayeredQueryInterface
+
+        # kb_path 放在 variants/hash 子目录（模拟外置 skill）
+        kb_path = tmp_path / "skill" / "variants" / "abc1234" / "KnowledgeBase"
+        global_index_dir = kb_path / "global_index"
+        global_index_dir.mkdir(parents=True)
+
+        # source_root 是独立的插件目录
+        source_root = tmp_path / "plugin_src"
+        source_root.mkdir()
+        src_file = source_root / "Source" / "Foo.h"
+        src_file.parent.mkdir(parents=True)
+        src_file.write_text("class AFoo {};", encoding="utf-8")
+
+        # DB 中存储 POSIX 相对路径
+        db_path = global_index_dir / "class_index.db"
+        self._make_class_index_db(db_path, "AFoo", "Source/Foo.h")
+
+        lqi = LayeredQueryInterface(str(kb_path), source_root=source_root)
+        source = lqi._load_source_code("AFoo")
+
+        assert "AFoo" in source, \
+            f"应读取到源码内容，实际: {source!r}"
+        assert "// 源文件不存在" not in source, \
+            f"source_root 正确时不应返回文件不存在: {source!r}"
+
+    def test_without_source_root_does_not_find_source(self, tmp_path):
+        """不提供 source_root 时，相对路径从 kb_path.parent 解析，应找不到独立插件的源文件"""
+        from ue5_kb.query.layered_query import LayeredQueryInterface
+
+        kb_path = tmp_path / "skill" / "variants" / "abc1234" / "KnowledgeBase"
+        global_index_dir = kb_path / "global_index"
+        global_index_dir.mkdir(parents=True)
+
+        # 源文件放在与 kb_path 不相关的独立目录
+        source_root = tmp_path / "unrelated_plugin"
+        source_root.mkdir()
+        (source_root / "Source").mkdir()
+        (source_root / "Source" / "Bar.h").write_text("class ABar {};")
+
+        db_path = global_index_dir / "class_index.db"
+        self._make_class_index_db(db_path, "ABar", "Source/Bar.h")
+
+        lqi = LayeredQueryInterface(str(kb_path))  # 不传 source_root
+        source = lqi._load_source_code("ABar")
+
+        # kb_path.parent / "Source/Bar.h" 不存在（源文件在独立目录），应返回不存在提示
+        assert "ABar" not in source, \
+            f"不传 source_root 时不应读到独立插件的源码，实际: {source!r}"
+
+    def test_source_root_handles_windows_backslash_in_db(self, tmp_path):
+        """DB 中存储 Windows 反斜杠路径时，source_root 解析应仍能找到文件"""
+        from ue5_kb.query.layered_query import LayeredQueryInterface
+
+        kb_path = tmp_path / "kb"
+        (kb_path / "global_index").mkdir(parents=True)
+        source_root = tmp_path / "plugin"
+        source_root.mkdir()
+        (source_root / "Source").mkdir()
+        (source_root / "Source" / "Baz.h").write_text("class ABaz {};")
+
+        db_path = kb_path / "global_index" / "class_index.db"
+        # 模拟 DB 里存了 Windows 反斜杠路径
+        self._make_class_index_db(db_path, "ABaz", "Source\\Baz.h")
+
+        lqi = LayeredQueryInterface(str(kb_path), source_root=source_root)
+        source = lqi._load_source_code("ABaz")
+
+        assert "ABaz" in source, \
+            f"DB 中反斜杠路径应被规范化后正确找到源文件，实际: {source!r}"
+
+
+# ---------------------------------------------------------------------------
+# P2 回归测试 f: engine impl.py.template 文本验证
+# ---------------------------------------------------------------------------
+
+class TestEngineImplTemplate:
+    """验证 templates/impl.py.template 对齐 plugin 模板，使用 BranchManager"""
+
+    def _read_template(self) -> str:
+        from pathlib import Path
+        tpl = Path(__file__).parent.parent / "templates" / "impl.py.template"
+        return tpl.read_text(encoding="utf-8")
+
+    def test_contains_branch_manager_import(self):
+        """模板应包含 BranchManager 导入"""
+        content = self._read_template()
+        assert "BranchManager" in content, \
+            "impl.py.template 应导入 BranchManager"
+
+    def test_contains_resolve_kb_path_with_variant(self):
+        """模板 _resolve_kb_path 应接受 variant 参数并委托 BranchManager"""
+        content = self._read_template()
+        assert "resolve_kb_path(variant" in content, \
+            "impl.py.template _resolve_kb_path 应委托 branch_mgr.resolve_kb_path(variant)"
+
+    def test_no_inline_sql_commit_id(self):
+        """模板不应包含手写 SELECT commit_id FROM branches 等内联 SQL"""
+        content = self._read_template()
+        assert "SELECT commit_id FROM branches" not in content, \
+            "impl.py.template 不应有 'SELECT commit_id FROM branches' 内联 SQL（应委托 BranchManager）"
+
+    def test_no_duplicate_safe_unpickler(self):
+        """模板不应定义重复的 SafeUnpickler 类（应从 branch_manager 导入）"""
+        content = self._read_template()
+        assert "class SafeUnpickler" not in content, \
+            "impl.py.template 不应定义 SafeUnpickler（应从 ue5_kb.branch_manager 导入 safe_pickle_load）"
+
+    def test_fallback_kb_path_present(self):
+        """模板应保留 _FALLBACK_KB_PATH 向后兼容"""
+        content = self._read_template()
+        assert "_FALLBACK_KB_PATH" in content, \
+            "impl.py.template 应保留 _FALLBACK_KB_PATH 回退路径"
+

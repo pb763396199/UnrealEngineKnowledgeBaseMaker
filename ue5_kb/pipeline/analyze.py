@@ -222,7 +222,7 @@ class AnalyzeStage(PipelineStage):
         if module_manifest:
             # 检查哪些文件需要重新解析
             for source_file in source_files:
-                rel_path = str(source_file.relative_to(self.base_path))
+                rel_path = source_file.relative_to(self.base_path).as_posix()
                 if rel_path in module_manifest.files:
                     old_hash = module_manifest.files[rel_path].sha256
                     new_hash = Hasher.compute_sha256(source_file)
@@ -277,7 +277,7 @@ class AnalyzeStage(PipelineStage):
                 enums.extend(file_enums)
 
                 # 缓存解析结果
-                cache_file = self.stage_dir / module_name / f"cache_{str(source_file.relative_to(self.base_path)).replace('/', '_')}.json"
+                cache_file = self.stage_dir / module_name / f"cache_{rel_path_posix.replace('/', '_')}.json"
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(cache_file, 'w', encoding='utf-8') as f:
                     json.dump({

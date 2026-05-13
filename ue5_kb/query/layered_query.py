@@ -29,14 +29,16 @@ class LayeredQueryInterface:
         'source': 5000       # 源码层：最多5000 tokens
     }
 
-    def __init__(self, kb_path: str):
+    def __init__(self, kb_path: str, source_root=None):
         """
         初始化分层查询接口
 
         Args:
             kb_path: 知识库路径
+            source_root: 源码根目录（可选）；提供后 _load_source_code 优先从此目录解析相对路径
         """
         self.kb_path = Path(kb_path)
+        self.source_root = Path(source_root) if source_root else None
         self.result_cache = {}  # ref_id -> 完整结果的缓存
 
     def query_class(self, class_name: str, detail_level: str = 'summary') -> Dict[str, Any]:
@@ -362,9 +364,15 @@ class LayeredQueryInterface:
             # 文件路径可能是相对路径，需要结合引擎路径
             full_path = Path(file_path)
             if not full_path.is_absolute():
-                # 尝试从 kb_path 的父目录解析
-                engine_path = self.kb_path.parent
-                full_path = engine_path / file_path
+                if self.source_root is not None:
+                    # 规范化相对路径（兼容 DB 里的 POSIX 路径和潜在 Windows 反斜杠）
+                    normalized = str(file_path).replace('\\', '/')
+                    parts = [p for p in normalized.split('/') if p]
+                    full_path = self.source_root.joinpath(*parts)
+                else:
+                    # 保留旧行为：从 kb_path 的父目录解析
+                    engine_path = self.kb_path.parent
+                    full_path = engine_path / file_path
 
             if not full_path.exists():
                 return f"// 源文件不存在: {file_path}"
