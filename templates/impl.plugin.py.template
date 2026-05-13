@@ -38,6 +38,29 @@ def _resolve_kb_path(variant: str = None) -> Path:
 
 KB_PATH = _resolve_kb_path()
 
+
+def _resolve_source_root(variant: str = None) -> Optional[Path]:
+    """解析源码根目录（来自 registry versions.source_path），失败时返回 None"""
+    try:
+        return _branch_mgr.resolve_source_path(variant)
+    except Exception as e:
+        print(f"[KB] WARNING: resolve_source_path failed ({type(e).__name__}: {e})", file=sys.stderr)
+        return None
+
+
+SOURCE_ROOT = _resolve_source_root()
+
+
+def _resolve_source_file(path_value: str) -> Path:
+    """将 impl_file_path（可能是相对路径）解析为绝对路径"""
+    p = Path(path_value)
+    if p.is_absolute():
+        return p
+    if SOURCE_ROOT is not None:
+        parts = path_value.replace("\\", "/").split("/")
+        return SOURCE_ROOT.joinpath(*parts)
+    return p
+
 # KB 版本信息（插件模式）
 KB_PLUGIN_NAME = "{PLUGIN_NAME}"
 KB_PLUGIN_VERSION = "{PLUGIN_VERSION}"
@@ -557,8 +580,9 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
     func_info = results[0]
     impl_file = func_info.get('impl_file_path')
     impl_line = func_info.get('impl_line_number', 0)
+    impl_path = _resolve_source_file(impl_file) if impl_file else None
 
-    if not impl_file or not os.path.exists(impl_file):
+    if not impl_file or impl_path is None or not impl_path.exists():
         return {
             "error": f"Implementation file not found for {function_name}",
             "declaration_location": f"{func_info.get('file_path')}:{func_info.get('line_number')}"
@@ -566,7 +590,7 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
 
     # 读取实现文件内容
     try:
-        with open(impl_file, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(impl_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
 
         return {

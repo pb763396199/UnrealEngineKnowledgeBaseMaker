@@ -805,3 +805,174 @@ class TestEngineImplTemplate:
         assert "_FALLBACK_KB_PATH" in content, \
             "impl.py.template 应保留 _FALLBACK_KB_PATH 回退路径"
 
+
+# ---------------------------------------------------------------------------
+# 测试 g: BranchManager.resolve_source_path
+# ---------------------------------------------------------------------------
+
+class TestBranchManagerResolveSourcePath:
+
+    def _make_registry_with_source(
+        self, skill_dir: Path, branch: str, commit_id: str, source_path: str
+    ) -> None:
+        """构造带 source_path 的 registry/versions/branches/config"""
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir(parents=True, exist_ok=True)
+        db_path = skill_dir / "registry.db"
+        _make_registry(db_path, str(variants_dir))
+
+        conn = sqlite3.connect(str(db_path))
+        kb_dir = commit_id[:7]
+        (variants_dir / kb_dir).mkdir(exist_ok=True)
+        conn.execute(
+            "INSERT INTO versions (commit_id, kb_dir, build_status, source_path) VALUES (?, ?, 'complete', ?)",
+            (commit_id, kb_dir, source_path),
+        )
+        conn.execute(
+            "INSERT INTO branches (name, commit_id, status, vcs_type) VALUES (?, ?, 'active', 'git')",
+            (branch, commit_id),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)", (branch,)
+        )
+        conn.commit()
+        conn.close()
+
+    def test_active_branch_returns_source_path(self, tmp_path):
+        """resolve_source_path(None) 应返回 active branch 对应的 source_path"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill"
+        source_root = tmp_path / "plugin_src"
+        self._make_registry_with_source(
+            skill_dir, "main", "abc1234567890", str(source_root)
+        )
+
+        mgr = BranchManager(skill_dir)
+        result = mgr.resolve_source_path()
+
+        assert result == source_root, \
+            f"resolve_source_path() 应返回 {source_root}，实际: {result}"
+
+    def test_variant_branch_returns_source_path(self, tmp_path):
+        """resolve_source_path(variant) 应返回指定分支的 source_path"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill2"
+        source_a = tmp_path / "plugin_a"
+        source_b = tmp_path / "plugin_b"
+
+        self._make_registry_with_source(
+            skill_dir, "branch_a", "aaaa111122220000", str(source_a)
+        )
+
+        # 再插一条 branch_b
+        conn = sqlite3.connect(str(skill_dir / "registry.db"))
+        variants_dir = skill_dir / "variants"
+        kb_dir_b = "bbbb111"
+        (variants_dir / kb_dir_b).mkdir(exist_ok=True)
+        conn.execute(
+            "INSERT INTO versions (commit_id, kb_dir, build_status, source_path) VALUES (?, ?, 'complete', ?)",
+            ("bbbb1111222200000", kb_dir_b, str(source_b)),
+        )
+        conn.execute(
+            "INSERT INTO branches (name, commit_id, status, vcs_type) VALUES (?, ?, 'active', 'git')",
+            ("branch_b", "bbbb1111222200000"),
+        )
+        conn.commit()
+        conn.close()
+
+        mgr = BranchManager(skill_dir)
+        result_b = mgr.resolve_source_path("branch_b")
+        result_a = mgr.resolve_source_path("branch_a")
+
+        assert result_b == source_b, \
+            f"variant=branch_b 应返回 {source_b}，实际: {result_b}"
+        assert result_a == source_a, \
+            f"variant=branch_a 应返回 {source_a}，实际: {result_a}"
+
+    def test_empty_source_path_returns_none(self, tmp_path):
+        """source_path 为空字符串时应返回 None"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill3"
+        self._make_registry_with_source(
+            skill_dir, "main", "cccc1234567890ab", ""
+        )
+
+        mgr = BranchManager(skill_dir)
+        result = mgr.resolve_source_path()
+
+        assert result is None, \
+            f"source_path 为空时 resolve_source_path() 应返回 None，实际: {result}"
+
+    def test_registry_missing_raises(self, tmp_path):
+        """registry.db 不存在时应 raise FileNotFoundError"""
+        from ue5_kb.branch_manager import BranchManager
+        import pytest
+
+        skill_dir = tmp_path / "skill4"
+        skill_dir.mkdir()
+
+        mgr = BranchManager(skill_dir)
+        with pytest.raises(FileNotFoundError):
+            mgr.resolve_source_path()
+
+
+# ---------------------------------------------------------------------------
+# 测试 h: 两个 impl template 的文本校验
+# ---------------------------------------------------------------------------
+
+class TestImplTemplateSourceRootText:
+    """验证两个 impl 模板都包含 source path 相关代码，且修复了 os.path.exists(impl_file) 问题"""
+
+    def _read_engine_template(self) -> str:
+        from pathlib import Path
+        tpl = Path(__file__).parent.parent / "templates" / "impl.py.template"
+        return tpl.read_text(encoding="utf-8")
+
+    def _read_plugin_template(self) -> str:
+        from pathlib import Path
+        tpl = Path(__file__).parent.parent / "templates" / "impl.plugin.py.template"
+        return tpl.read_text(encoding="utf-8")
+
+    def test_engine_template_has_resolve_source_path(self):
+        content = self._read_engine_template()
+        assert "resolve_source_path" in content, \
+            "impl.py.template 应包含 resolve_source_path 调用"
+
+    def test_engine_template_has_source_root(self):
+        content = self._read_engine_template()
+        assert "SOURCE_ROOT" in content, \
+            "impl.py.template 应包含 SOURCE_ROOT"
+
+    def test_engine_template_has_resolve_source_file(self):
+        content = self._read_engine_template()
+        assert "_resolve_source_file" in content, \
+            "impl.py.template 应包含 _resolve_source_file"
+
+    def test_engine_template_no_os_path_exists_impl_file(self):
+        content = self._read_engine_template()
+        assert "os.path.exists(impl_file)" not in content, \
+            "impl.py.template get_function_implementation 不应再直接用 os.path.exists(impl_file)"
+
+    def test_plugin_template_has_resolve_source_path(self):
+        content = self._read_plugin_template()
+        assert "resolve_source_path" in content, \
+            "impl.plugin.py.template 应包含 resolve_source_path 调用"
+
+    def test_plugin_template_has_source_root(self):
+        content = self._read_plugin_template()
+        assert "SOURCE_ROOT" in content, \
+            "impl.plugin.py.template 应包含 SOURCE_ROOT"
+
+    def test_plugin_template_has_resolve_source_file(self):
+        content = self._read_plugin_template()
+        assert "_resolve_source_file" in content, \
+            "impl.plugin.py.template 应包含 _resolve_source_file"
+
+    def test_plugin_template_no_os_path_exists_impl_file(self):
+        content = self._read_plugin_template()
+        assert "os.path.exists(impl_file)" not in content, \
+            "impl.plugin.py.template get_function_implementation 不应再直接用 os.path.exists(impl_file)"
+

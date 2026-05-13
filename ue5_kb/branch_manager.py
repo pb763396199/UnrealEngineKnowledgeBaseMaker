@@ -891,6 +891,56 @@ class BranchManager:
         finally:
             conn.close()
 
+    def resolve_source_path(self, variant: Optional[str] = None) -> Optional[Path]:
+        """
+        解析活跃分支的源码根目录（来自 versions.source_path）。
+
+        Args:
+            variant: 指定分支名。None 则使用 active_branch。
+
+        Returns:
+            source_path 对应的 Path；若 source_path 未设置则返回 None。
+            不强制检查路径是否存在（源码工作区可能暂时不可用）。
+        """
+        if not self.registry_db.exists():
+            raise FileNotFoundError("Registry 未初始化")
+
+        conn = _db_connect(self.registry_db)
+        try:
+            if variant:
+                row = conn.execute(
+                    "SELECT commit_id FROM branches WHERE name = ?", (variant,)
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"分支 '{variant}' 不存在")
+                commit_id = row[0]
+            else:
+                active = conn.execute(
+                    "SELECT value FROM config WHERE key = 'active_branch'"
+                ).fetchone()
+                if not active:
+                    raise ValueError("无活跃分支")
+                row = conn.execute(
+                    "SELECT commit_id FROM branches WHERE name = ?", (active[0],)
+                ).fetchone()
+                if not row:
+                    raise ValueError(f"活跃分支 '{active[0]}' 数据缺失")
+                commit_id = row[0]
+
+            ver = conn.execute(
+                "SELECT source_path FROM versions WHERE commit_id = ? AND build_status = 'complete'",
+                (commit_id,),
+            ).fetchone()
+            if not ver:
+                raise ValueError(f"Commit {commit_id[:7]} 无可用 KB")
+
+            source_path = ver[0]
+            if not source_path:
+                return None
+            return Path(source_path)
+        finally:
+            conn.close()
+
     # ---- 内部辅助 ----
 
     @staticmethod
