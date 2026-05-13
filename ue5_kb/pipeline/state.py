@@ -17,16 +17,18 @@ class PipelineState:
     管理 .pipeline_state 文件
     """
 
-    def __init__(self, base_path: Path):
+    def __init__(self, base_path: Path, kb_path: Path = None):
         """
         初始化状态管理器
 
         Args:
             base_path: 引擎/插件根目录
+            kb_path: 知识库输出路径（外置路径；None 时默认 base_path/KnowledgeBase）
         """
         self.base_path = Path(base_path)
-        # 将状态文件放在 KnowledgeBase 目录下统一管理
-        self.state_file = self.base_path / "KnowledgeBase" / ".pipeline_state"
+        # 支持外置 KB 路径；默认使用 base_path/KnowledgeBase
+        _kb_root = Path(kb_path) if kb_path else self.base_path / "KnowledgeBase"
+        self.state_file = _kb_root / ".pipeline_state"
         self.state = self._load_state()
 
     def _load_state(self) -> Dict[str, Any]:
@@ -51,6 +53,7 @@ class PipelineState:
 
     def _save_state(self) -> None:
         """保存状态文件"""
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.state_file, 'w', encoding='utf-8') as f:
             json.dump(self.state, f, indent=2, ensure_ascii=False)
 
@@ -131,9 +134,18 @@ class PipelineState:
                     'total_modules', 'analyzed_count', 'total_classes', 'total_functions',
                     'kb_path', 'skill_name', 'skill_path']:
             if key in result:
-                summary[key] = result[key]
+                summary[key] = self._summarize_value(key, result[key])
 
         return summary
+
+    @staticmethod
+    def _summarize_value(key: str, value: Any) -> Any:
+        """状态文件只保留路径标签，避免写入机器相关绝对路径。"""
+        if key in {'kb_path', 'skill_path'} and isinstance(value, str):
+            value_path = Path(value)
+            if value_path.is_absolute():
+                return value_path.name
+        return value
 
     def get_all_states(self) -> Dict[str, Any]:
         """获取所有阶段的状态"""

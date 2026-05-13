@@ -28,7 +28,7 @@ class PipelineCoordinator:
 
     STAGES = ['discover', 'extract', 'analyze', 'build', 'generate']
 
-    def __init__(self, base_path: Path, is_plugin: bool = False, plugin_name: str = None):
+    def __init__(self, base_path: Path, is_plugin: bool = False, plugin_name: str = None, kb_path: Path = None):
         """
         初始化协调器
 
@@ -36,9 +36,12 @@ class PipelineCoordinator:
             base_path: 引擎/插件根目录
             is_plugin: 是否为插件模式
             plugin_name: 插件名称（插件模式下使用）
+            kb_path: 知识库输出路径（外置路径；None 时默认 base_path/KnowledgeBase）
         """
         self.base_path = Path(base_path)
-        self.state = PipelineState(base_path)
+        # 支持外置 KB 路径；默认使用 base_path/KnowledgeBase
+        self.kb_path = Path(kb_path) if kb_path else self.base_path / "KnowledgeBase"
+        self.state = PipelineState(base_path, kb_path=self.kb_path)
         self.is_plugin = is_plugin
         self.plugin_name = plugin_name
         self.console = Console()
@@ -49,18 +52,18 @@ class PipelineCoordinator:
 
         # v2.13.0: 加载现有 manifest（用于增量更新）
         from ..core.manifest import KBManifest
-        self.manifest = KBManifest.load(self.base_path / "KnowledgeBase")
+        self.manifest = KBManifest.load(self.kb_path)
 
         # 初始化阶段计时器
         self.timer = StageTimer()
 
-        # 初始化各阶段
+        # 初始化各阶段（统一传入 kb_path，支持外置路径）
         self.stages = {
-            'discover': DiscoverStage(base_path),
-            'extract': ExtractStage(base_path),
-            'analyze': AnalyzeStage(base_path),
-            'build': BuildStage(base_path),
-            'generate': GenerateStage(base_path, is_plugin=is_plugin, plugin_name=plugin_name)
+            'discover': DiscoverStage(base_path, kb_path=self.kb_path),
+            'extract': ExtractStage(base_path, kb_path=self.kb_path),
+            'analyze': AnalyzeStage(base_path, kb_path=self.kb_path),
+            'build': BuildStage(base_path, kb_path=self.kb_path),
+            'generate': GenerateStage(base_path, is_plugin=is_plugin, plugin_name=plugin_name, kb_path=self.kb_path)
         }
 
     def run_all(self, force: bool = False, parallel: int = 0, **kwargs) -> Dict[str, Any]:

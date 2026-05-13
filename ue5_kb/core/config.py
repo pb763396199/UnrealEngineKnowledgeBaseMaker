@@ -8,6 +8,7 @@ import os
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
+from copy import deepcopy
 
 
 class Config:
@@ -67,7 +68,7 @@ class Config:
                 'plugin_name': None,  # For plugin mode
             },
             'storage': {
-                'base_path': str(base_path),
+                'base_path': '.',
                 'global_index': 'global_index',
                 'module_graphs': 'module_graphs',
                 'cache': 'cache',
@@ -112,7 +113,12 @@ class Config:
 
         # 转换路径为绝对路径
         storage = config.get('storage', {})
-        base_path = storage.get('base_path', '')
+        raw_base_path = storage.get('base_path', '')
+        base_path_obj = Path(raw_base_path) if raw_base_path else self.config_path.parent
+        if not base_path_obj.is_absolute():
+            base_path_obj = self.config_path.parent / base_path_obj
+        base_path = str(base_path_obj.resolve())
+        storage['base_path'] = base_path
 
         # 确保所有路径都是绝对路径
         for key, value in storage.items():
@@ -164,8 +170,28 @@ class Config:
 
     def save(self) -> None:
         """保存配置到文件"""
+        config_to_save = deepcopy(self._config)
+        storage = config_to_save.get('storage', {})
+        base_path = Path(self._config.get('storage', {}).get('base_path', self.config_path.parent))
+        try:
+            resolved_base_path = base_path.resolve()
+        except OSError:
+            resolved_base_path = base_path
+
+        if storage:
+            storage['base_path'] = '.'
+            for key, value in list(storage.items()):
+                if key == 'base_path' or not isinstance(value, str):
+                    continue
+                value_path = Path(value)
+                if value_path.is_absolute():
+                    try:
+                        storage[key] = value_path.resolve().relative_to(resolved_base_path).as_posix()
+                    except (OSError, ValueError):
+                        pass
+
         with open(self.config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(self._config, f, allow_unicode=True, default_flow_style=False)
+            yaml.dump(config_to_save, f, allow_unicode=True, default_flow_style=False)
 
     # 便捷属性访问器
     @property

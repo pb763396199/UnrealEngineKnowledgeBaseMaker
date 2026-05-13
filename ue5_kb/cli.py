@@ -268,7 +268,7 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, workers
     try:
         from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
-        coordinator = PipelineCoordinator(engine_path)
+        coordinator = PipelineCoordinator(engine_path, kb_path=kb_path)
 
         if stage:
             # 仅运行指定阶段
@@ -281,16 +281,6 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, workers
 
         # 6. 显示结果
         display_pipeline_results(results)
-
-        # 7. 处理自定义路径
-        if kb_path != default_kb_path and default_kb_path.exists():
-            # 如果指定了自定义路径，移动知识库
-            console.print(f"\n[cyan]移动知识库到自定义路径...[/cyan]")
-            import shutil
-            if kb_path.exists():
-                shutil.rmtree(kb_path)
-            shutil.move(str(default_kb_path), str(kb_path))
-            console.print(f"[green]OK[/green] 知识库已移动到: {kb_path}")
 
         # 8. 处理自定义 Skill 路径
         if skill_path:
@@ -374,7 +364,7 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, workers
     try:
         from ue5_kb.pipeline.coordinator import PipelineCoordinator
 
-        coordinator = PipelineCoordinator(plugin_path, is_plugin=True, plugin_name=plugin_name)
+        coordinator = PipelineCoordinator(plugin_path, is_plugin=True, plugin_name=plugin_name, kb_path=kb_path)
 
         if stage:
             console.print(f"运行阶段: [cyan]{stage}[/cyan]\n")
@@ -385,15 +375,6 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, workers
 
         # 显示结果
         display_pipeline_results(results)
-
-        # 处理自定义路径
-        if kb_path != default_kb_path and default_kb_path.exists():
-            console.print(f"\n[cyan]移动知识库到自定义路径...[/cyan]")
-            import shutil
-            if kb_path.exists():
-                shutil.rmtree(kb_path)
-            shutil.move(str(default_kb_path), str(kb_path))
-            console.print(f"[green]OK[/green] 知识库已移动到: {kb_path}")
 
         # 完成
         console.print(f"\n[green]OK 全部完成![/green]")
@@ -471,11 +452,13 @@ def status():
               help='UE5 引擎路径（未指定时自动检测）')
 @click.option('--plugin-path', type=click.Path(exists=True),
               help='插件路径（未指定时自动检测）')
+@click.option('--kb-path', type=click.Path(),
+              help='知识库路径（默认: 引擎/插件目录下的 KnowledgeBase）')
 @click.option('--full', is_flag=True,
               help='强制完全重建（不使用增量更新）')
 @click.option('--check', is_flag=True,
               help='仅检查更新，不执行')
-def update(engine_path, plugin_path, full, check):
+def update(engine_path, plugin_path, kb_path, full, check):
     """增量更新知识库
 
     \b
@@ -498,7 +481,7 @@ def update(engine_path, plugin_path, full, check):
         console.print("[yellow]执行完全重建...[/yellow]")
         # 调用 init 命令
         ctx = click.get_current_context()
-        ctx.invoke(init, engine_path=engine_path, plugin_path=plugin_path, force=True)
+        ctx.invoke(init, engine_path=engine_path, plugin_path=plugin_path, kb_path=kb_path, force=True)
         return
 
     # 检测路径
@@ -523,10 +506,12 @@ def update(engine_path, plugin_path, full, check):
     # 运行增量更新
     from .pipeline.update import UpdateStage
 
-    updater = UpdateStage(base_path)
+    kb_path = Path(kb_path) if kb_path else base_path / "KnowledgeBase"
+    updater = UpdateStage(base_path, kb_path=kb_path)
 
     console.print(f"\n[bold cyan]增量更新检查[/bold cyan]")
     console.print(f"目标路径: [yellow]{base_path}[/yellow]\n")
+    console.print(f"知识库路径: [yellow]{kb_path}[/yellow]\n")
 
     if check:
         # 仅检查

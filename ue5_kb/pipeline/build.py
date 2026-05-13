@@ -28,8 +28,8 @@ class BuildStage(PipelineStage):
         return "build"
 
     def get_output_path(self) -> Path:
-        # 输出到 KnowledgeBase 目录
-        return self.base_path / "KnowledgeBase"
+        # 输出到 KnowledgeBase 目录（支持外置路径）
+        return self._kb_root
 
     def is_completed(self) -> bool:
         # 检查 KnowledgeBase 目录是否存在且有 global_index
@@ -59,7 +59,7 @@ class BuildStage(PipelineStage):
             console = Console()
             console.print(f"[cyan]使用并行模式: {parallel} workers[/cyan]")
 
-            parallel_stage = ParallelBuildStage(self.base_path, num_workers=parallel)
+            parallel_stage = ParallelBuildStage(self.base_path, num_workers=parallel, kb_path=self._kb_root)
             return parallel_stage.run()
 
         # 否则使用原有的串行逻辑
@@ -98,7 +98,7 @@ class BuildStage(PipelineStage):
         self._save_kb_manifest(kb_path, stats)
 
         result = {
-            'kb_path': str(kb_path),
+            'kb_path': kb_path.name,
             'global_index_created': True,
             'module_graphs_created': modules_built,
             'statistics': stats
@@ -179,7 +179,7 @@ class BuildStage(PipelineStage):
                 module_name,
                 {
                     'name': module_name,
-                    'path': module['path'],
+                    'path': str(module['path']).replace('\\', '/'),
                     'category': module['category'],
                     'dependencies': public_deps,
                     'public_dependencies': public_deps,
@@ -218,6 +218,7 @@ class BuildStage(PipelineStage):
         print(f"  同步到 SQLite...")
 
         # 获取数据库路径
+        os.makedirs(config.global_index_path, exist_ok=True)
         db_path = os.path.join(config.global_index_path, "index.db")
 
         # 连接数据库（启用 WAL 模式）
@@ -255,9 +256,10 @@ class BuildStage(PipelineStage):
         batch_data = []
         for module_name, module_info in all_modules.items():
             dependencies = module_info.get('dependencies', [])
+            module_path = str(module_info.get('path', '')).replace('\\', '/')
             batch_data.append((
                 module_name,
-                module_info.get('path', ''),
+                module_path,
                 module_info.get('category', ''),
                 'Engine',
                 json.dumps(dependencies),
@@ -416,10 +418,11 @@ class BuildStage(PipelineStage):
         Returns:
             (module_name, graph) 元组，失败返回 None
         """
+        from ..branch_manager import safe_pickle_load
         module_name = graph_file.stem
         try:
             with open(graph_file, 'rb') as f:
-                data = pickle.load(f)
+                data = safe_pickle_load(f)
                 graph = data.get('graph')
                 if not graph:
                     return None
@@ -639,7 +642,7 @@ class BuildStage(PipelineStage):
 
         # 获取工具版本
         from ..core.config import Config
-        config = Config(self.base_path / "KnowledgeBase")
+        config = Config(base_path=str(self._kb_root))
         tool_version = config.get('project.version', '2.14.0')
 
         # 确定构建模式
@@ -665,10 +668,11 @@ class BuildStage(PipelineStage):
 
         # 创建 KB 清单
         now = datetime.now().isoformat()
+        source_label = self.base_path.name
         manifest = KBManifest(
             kb_version=tool_version,
             engine_version=engine_version,
-            engine_path=str(self.base_path),
+            engine_path=source_label,
             plugin_name=plugin_name,
             created_at=now,  # 首次创建，创建时间和更新时间相同
             last_updated=now,
@@ -687,7 +691,7 @@ class BuildStage(PipelineStage):
         global_index.save_metadata({
             'kb_version': tool_version,
             'engine_version': engine_version,
-            'engine_path': str(self.base_path),
+            'engine_path': source_label,
             'plugin_name': plugin_name or '',
             'created_at': now,
             'last_updated': now

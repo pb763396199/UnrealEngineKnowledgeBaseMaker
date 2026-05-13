@@ -142,12 +142,13 @@ class DiscoverStage(PipelineStage):
             # 计算文件哈希
             file_stat = build_cs.stat()
             file_hash = Hasher.compute_sha256(build_cs)
+            rel_build_cs_path = build_cs.relative_to(self.base_path).as_posix()
 
             modules.append({
                 'name': module_name,
-                'path': str(build_cs.relative_to(self.base_path)),
+                'path': rel_build_cs_path,
                 'category': category,
-                'absolute_path': str(build_cs),
+                'absolute_path': rel_build_cs_path,
                 'file_hash': file_hash,
                 'file_size': file_stat.st_size,
                 'file_mtime': file_stat.st_mtime

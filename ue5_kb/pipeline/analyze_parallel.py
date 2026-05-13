@@ -30,12 +30,12 @@ def _analyze_module_worker(args: Tuple) -> Dict[str, Any]:
     - 1.3-1.8x 大文件读取性能提升
 
     Args:
-        args: (module_name, module_dir, stage_dir, worker_id, verbose)
+        args: (module_name, module_dir, stage_dir, worker_id, verbose, base_path)
 
     Returns:
         包含分析结果的字典
     """
-    module_name, module_dir, stage_dir, worker_id, verbose = args
+    module_name, module_dir, stage_dir, worker_id, verbose, base_path = args
 
     try:
         # 查找源文件
@@ -62,16 +62,22 @@ def _analyze_module_worker(args: Tuple) -> Dict[str, Any]:
                 # v2.15.0: 使用 mmap 读取文件（减少内存拷贝）
                 content = _read_file_with_mmap(source_file)
 
-                file_classes = parser.extract_classes(content, str(source_file))
+                # P1: 传相对 POSIX 路径，避免绝对路径入库
+                try:
+                    rel_path_posix = source_file.relative_to(base_path).as_posix()
+                except ValueError:
+                    rel_path_posix = source_file.as_posix()
+
+                file_classes = parser.extract_classes(content, rel_path_posix)
                 classes.extend(file_classes)
 
                 file_functions = parser.extract_functions(
-                    content, str(source_file)
+                    content, rel_path_posix
                 )
                 functions.extend(file_functions)
 
                 # v2.14.0: 提取枚举
-                file_enums = parser.extract_enums(content, str(source_file))
+                file_enums = parser.extract_enums(content, rel_path_posix)
                 enums.extend(file_enums)
 
             except Exception as e:
@@ -180,16 +186,18 @@ class ParallelAnalyzeStage:
     - 错误隔离
     """
 
-    def __init__(self, base_path: Path, num_workers: int = None):
+    def __init__(self, base_path: Path, num_workers: int = None, kb_path: Path = None):
         """
         初始化并行分析阶段
 
         Args:
             base_path: 引擎/插件根目录
             num_workers: 并行 worker 数量（None = 自动检测）
+            kb_path: 知识库输出路径（外置路径；None 时默认 base_path/KnowledgeBase）
         """
         self.base_path = Path(base_path)
-        self.data_dir = self.base_path / "KnowledgeBase" / "data"
+        _kb_root = Path(kb_path) if kb_path else self.base_path / "KnowledgeBase"
+        self.data_dir = _kb_root / "data"
         self.stage_dir = self.data_dir / "analyze"
         self.stage_dir.mkdir(parents=True, exist_ok=True)
 
@@ -199,6 +207,13 @@ class ParallelAnalyzeStage:
 
         self.num_workers = num_workers
         self.checkpoint_manager = CheckpointManager(self.stage_dir, "analyze")
+
+    def _resolve_source_path(self, path_value: str) -> Path:
+        source_path = Path(path_value)
+        if source_path.is_absolute():
+            return source_path
+        normalized_parts = str(path_value).replace('\\', '/').split('/')
+        return self.base_path.joinpath(*normalized_parts)
 
     def run(
         self,
@@ -248,10 +263,11 @@ class ParallelAnalyzeStage:
         tasks = [
             (
                 m["name"],
-                str(Path(m["absolute_path"]).parent),
+                str(self._resolve_source_path(m["absolute_path"]).parent),
                 str(self.stage_dir),
                 i % self.num_workers,
                 verbose,
+                str(self.base_path),
             )
             for i, m in enumerate(modules_to_process)
         ]

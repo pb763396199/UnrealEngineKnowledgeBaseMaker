@@ -11,8 +11,87 @@ import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-# 知识库路径 (绝对路径)
-KB_PATH = Path(r"{KB_PATH}")
+
+_PICKLE_MODULE_ALLOWLIST = {{
+    "networkx.classes.digraph",
+    "networkx.classes.graph",
+    "networkx.classes.reportviews",
+    "networkx.classes.coreviews",
+    "collections",
+}}
+
+_PICKLE_BUILTINS_ALLOW = {{
+    "set", "frozenset", "list", "dict", "tuple", "bytes", "bytearray",
+    "True", "False", "None", "int", "float", "complex", "str", "slice",
+    "range", "type",
+}}
+
+_PICKLE_BUILTINS_DENY = {{
+    "eval", "exec", "getattr", "setattr", "delattr", "__import__",
+    "compile", "execfile", "open", "input", "breakpoint",
+    "globals", "locals", "vars",
+}}
+
+
+class SafeUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str) -> Any:
+        top = module.split(".")[0]
+        if module == "builtins":
+            if name in _PICKLE_BUILTINS_DENY:
+                raise pickle.UnpicklingError("Blocked dangerous builtin: builtins.%s" % name)
+            if name in _PICKLE_BUILTINS_ALLOW:
+                return super().find_class(module, name)
+            raise pickle.UnpicklingError("Blocked unknown builtin: builtins.%s" % name)
+        if module in _PICKLE_MODULE_ALLOWLIST or top in ("collections", "networkx"):
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError("Blocked: %s.%s (not in allowlist)" % (module, name))
+
+
+def safe_pickle_load(file_obj) -> Any:
+    return SafeUnpickler(file_obj).load()
+
+# 知识库路径（优先从 skill 目录 registry.db 动态解析，失败时回退到硬编码路径）
+_FALLBACK_KB_PATH = Path(r"{KB_PATH}")
+
+
+def _resolve_kb_path() -> Path:
+    """运行时从 skill 目录的 registry.db 解析活跃 KB 路径，失败时回退到默认路径"""
+    try:
+        import sqlite3 as _sqlite3
+        _registry = Path(__file__).parent / "registry.db"
+        if not _registry.exists():
+            return _FALLBACK_KB_PATH
+        _conn = _sqlite3.connect(str(_registry))
+        try:
+            _active = _conn.execute(
+                "SELECT value FROM config WHERE key='active_branch'"
+            ).fetchone()
+            if not _active:
+                return _FALLBACK_KB_PATH
+            _commit_row = _conn.execute(
+                "SELECT commit_id FROM branches WHERE name=?", (_active[0],)
+            ).fetchone()
+            if not _commit_row:
+                return _FALLBACK_KB_PATH
+            _ver_row = _conn.execute(
+                "SELECT kb_dir FROM versions WHERE commit_id=? AND build_status='complete'",
+                (_commit_row[0],),
+            ).fetchone()
+            if not _ver_row:
+                return _FALLBACK_KB_PATH
+            _store_row = _conn.execute(
+                "SELECT value FROM config WHERE key='kb_store'"
+            ).fetchone()
+            _store = Path(_store_row[0]) if _store_row else Path(__file__).parent / "variants"
+            _kb = _store / _ver_row[0]
+            return _kb if _kb.exists() else _FALLBACK_KB_PATH
+        finally:
+            _conn.close()
+    except Exception:
+        return _FALLBACK_KB_PATH
+
+
+KB_PATH = _resolve_kb_path()
 
 # KB 版本信息
 KB_ENGINE_VERSION = "{ENGINE_VERSION}"
@@ -56,7 +135,7 @@ def _load_module_graph(module_name: str) -> Optional[Any]:
 
     try:
         with open(graph_file, 'rb') as f:
-            data = pickle.load(f)
+            data = safe_pickle_load(f)
             graph = data.get('graph')
             _module_graphs_cache[module_name] = graph
             return graph

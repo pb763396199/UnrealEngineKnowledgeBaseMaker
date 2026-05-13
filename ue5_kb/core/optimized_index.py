@@ -229,8 +229,10 @@ class OptimizedGlobalIndex:
         print(f"正在导入 {pickle_file} 到 SQLite...")
 
         # 加载 pickle 数据
+        from ..branch_manager import safe_pickle_load
+
         with open(pickle_file, 'rb') as f:
-            data = pickle.load(f)
+            data = safe_pickle_load(f)
             old_index = data.get('index', {})
 
         # 批量插入

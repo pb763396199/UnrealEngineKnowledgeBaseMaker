@@ -21,16 +21,18 @@ class PipelineStage(ABC):
     - is_completed(): 检查是否完成
     """
 
-    def __init__(self, base_path: Path):
+    def __init__(self, base_path: Path, kb_path: Path = None):
         """
         初始化阶段
 
         Args:
             base_path: 引擎/插件根目录
+            kb_path: 知识库输出路径（外置路径；None 时默认 base_path/KnowledgeBase）
         """
         self.base_path = Path(base_path)
-        # 将工作数据放在 KnowledgeBase 目录下统一管理
-        self.data_dir = self.base_path / "KnowledgeBase" / "data"
+        # 支持外置 KB 路径；默认使用 base_path/KnowledgeBase
+        self._kb_root = Path(kb_path) if kb_path else self.base_path / "KnowledgeBase"
+        self.data_dir = self._kb_root / "data"
         self.stage_dir = self.data_dir / self.stage_name
 
     @property
@@ -74,6 +76,14 @@ class PipelineStage(ABC):
         if self.stage_dir.exists():
             shutil.rmtree(self.stage_dir)
 
+    def _resolve_source_path(self, path_value: str) -> Path:
+        """Resolve a persisted relative POSIX path against the source root."""
+        source_path = Path(path_value)
+        if source_path.is_absolute():
+            return source_path
+        normalized_parts = str(path_value).replace('\\', '/').split('/')
+        return self.base_path.joinpath(*normalized_parts)
+
     def save_result(self, result: Dict[str, Any], filename: str = "result.json") -> None:
         """
         保存结果到文件
@@ -89,7 +99,7 @@ class PipelineStage(ABC):
         result['_metadata'] = {
             'stage': self.stage_name,
             'completed_at': datetime.now().isoformat(),
-            'base_path': str(self.base_path)
+            'base_path': self.base_path.name
         }
 
         with open(output_path, 'w', encoding='utf-8') as f:

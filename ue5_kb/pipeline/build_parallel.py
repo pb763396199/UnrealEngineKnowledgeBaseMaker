@@ -77,17 +77,19 @@ class ParallelBuildStage:
     - Pickle 序列化: 可并行
     """
 
-    def __init__(self, base_path: Path, num_workers: Optional[int] = None):
+    def __init__(self, base_path: Path, num_workers: Optional[int] = None, kb_path: Path = None):
         """
         初始化并行构建阶段
 
         Args:
             base_path: 引擎/插件根目录
             num_workers: 并行 worker 数量（None = 自动检测）
+            kb_path: 知识库输出路径（外置路径；None 时默认 base_path/KnowledgeBase）
         """
         self.base_path = Path(base_path)
-        self.data_dir = self.base_path / "KnowledgeBase" / "data"
-        self.kb_path = self.base_path / "KnowledgeBase"
+        _kb_root = Path(kb_path) if kb_path else self.base_path / "KnowledgeBase"
+        self.data_dir = _kb_root / "data"
+        self.kb_path = _kb_root
 
         if num_workers is None:
             num_workers = min(os.cpu_count() or 4, 4)  # 限制最大 4 个 worker
@@ -223,7 +225,7 @@ class ParallelBuildStage:
             console.print(f"[yellow]  警告: 符号引用索引构建失败: {e}[/yellow]")
 
         result = {
-            "kb_path": str(self.kb_path),
+            "kb_path": self.kb_path.name,
             "module_graphs_created": built_count,
             "failed_modules": failed_modules,
             "elapsed_time": stats["elapsed"],
@@ -548,8 +550,10 @@ class ParallelBuildStage:
             module_name = graph_file.stem
 
             try:
+                from ..branch_manager import safe_pickle_load
+
                 with open(graph_file, 'rb') as f:
-                    data = pickle.load(f)
+                    data = safe_pickle_load(f)
                     graph = data.get('graph')
 
                 if not graph:

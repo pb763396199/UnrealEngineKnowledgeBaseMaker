@@ -258,7 +258,7 @@ class LayeredQueryInterface:
 
         从 module_graphs 中加载类的详细信息
         """
-        import pickle
+        from ..branch_manager import safe_pickle_load
         from ..core.config import Config
         from ..core.global_index import GlobalIndex
 
@@ -275,7 +275,7 @@ class LayeredQueryInterface:
             for graph_file in graphs_dir.glob("*.pkl"):
                 try:
                     with open(graph_file, 'rb') as f:
-                        data = pickle.load(f)
+                        data = safe_pickle_load(f)
                         graph = data.get('graph')
 
                         if not graph:

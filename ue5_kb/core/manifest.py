@@ -86,7 +86,7 @@ class KBManifest:
 
     kb_version: str  # KB format version (from pyproject.toml)
     engine_version: str  # Detected UE5 engine version
-    engine_path: str  # Absolute path to engine
+    engine_path: str  # Source root label; not an absolute path
     plugin_name: Optional[str]  # For plugin mode
     created_at: str  # ISO timestamp
     last_updated: str  # ISO timestamp

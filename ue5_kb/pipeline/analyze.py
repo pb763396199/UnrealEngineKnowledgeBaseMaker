@@ -68,7 +68,7 @@ class AnalyzeStage(PipelineStage):
             console = Console()
             console.print(f"[cyan]使用并行模式: {parallel} workers[/cyan]")
 
-            parallel_stage = ParallelAnalyzeStage(self.base_path, num_workers=parallel)
+            parallel_stage = ParallelAnalyzeStage(self.base_path, num_workers=parallel, kb_path=self._kb_root)
             return parallel_stage.run(modules, force=False, verbose=verbose)
 
         # 否则使用原有的串行逻辑
@@ -93,7 +93,7 @@ class AnalyzeStage(PipelineStage):
 
             try:
                 # 获取模块目录
-                build_cs_path = Path(module['absolute_path'])
+                build_cs_path = self._resolve_source_path(module['absolute_path'])
                 module_dir = build_cs_path.parent
 
                 # 扫描源文件
@@ -261,13 +261,19 @@ class AnalyzeStage(PipelineStage):
                 # v2.15.0: 使用 mmap 读取文件（减少内存拷贝）
                 content = self._read_file_with_mmap(source_file)
 
-                file_classes = parser.extract_classes(content, str(source_file))
+                # P1: 传相对 POSIX 路径，避免绝对路径入库
+                try:
+                    rel_path_posix = source_file.relative_to(self.base_path).as_posix()
+                except ValueError:
+                    rel_path_posix = source_file.as_posix()
+
+                file_classes = parser.extract_classes(content, rel_path_posix)
                 classes.extend(file_classes)
 
-                file_functions = parser.extract_functions(content, str(source_file))
+                file_functions = parser.extract_functions(content, rel_path_posix)
                 functions.extend(file_functions)
 
-                file_enums = parser.extract_enums(content, str(source_file))
+                file_enums = parser.extract_enums(content, rel_path_posix)
                 enums.extend(file_enums)
 
                 # 缓存解析结果

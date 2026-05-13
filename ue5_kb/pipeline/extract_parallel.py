@@ -64,16 +64,18 @@ def _extract_module_worker(args: Tuple) -> Dict[str, Any]:
 class ParallelExtractStage:
     """并行提取阶段"""
 
-    def __init__(self, base_path: Path, num_workers: int = None):
+    def __init__(self, base_path: Path, num_workers: int = None, kb_path: Path = None):
         """
         初始化并行提取阶段
 
         Args:
             base_path: 引擎/插件根目录
             num_workers: 并行 worker 数量（None = 自动检测）
+            kb_path: 知识库输出路径（外置路径；None 时默认 base_path/KnowledgeBase）
         """
         self.base_path = Path(base_path)
-        self.data_dir = self.base_path / "KnowledgeBase" / "data"
+        _kb_root = Path(kb_path) if kb_path else self.base_path / "KnowledgeBase"
+        self.data_dir = _kb_root / "data"
         self.stage_dir = self.data_dir / "extract"
         self.stage_dir.mkdir(parents=True, exist_ok=True)
 
@@ -81,6 +83,13 @@ class ParallelExtractStage:
             num_workers = os.cpu_count() or 4
 
         self.num_workers = num_workers
+
+    def _resolve_source_path(self, path_value: str) -> Path:
+        source_path = Path(path_value)
+        if source_path.is_absolute():
+            return source_path
+        normalized_parts = str(path_value).replace('\\', '/').split('/')
+        return self.base_path.joinpath(*normalized_parts)
 
     def run(
         self,
@@ -105,7 +114,7 @@ class ParallelExtractStage:
         tasks = [
             (
                 m["name"],
-                m["absolute_path"],
+                str(self._resolve_source_path(m["absolute_path"])),
                 str(self.stage_dir),
                 m,
                 i % self.num_workers,  # 添加 worker_id

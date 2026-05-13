@@ -63,7 +63,7 @@ class ExtractStage(PipelineStage):
             console = Console()
             console.print(f"[cyan]使用并行模式: {parallel} workers[/cyan]")
 
-            parallel_stage = ParallelExtractStage(self.base_path, num_workers=parallel)
+            parallel_stage = ParallelExtractStage(self.base_path, num_workers=parallel, kb_path=self._kb_root)
             return parallel_stage.run(modules)
 
         # 否则使用原有的串行逻辑
@@ -83,7 +83,8 @@ class ExtractStage(PipelineStage):
 
             try:
                 # 解析 .Build.cs 文件
-                dependencies = parser.parse_file(module['absolute_path'])
+                build_cs_path = self._resolve_source_path(module['absolute_path'])
+                dependencies = parser.parse_file(str(build_cs_path))
 
                 # 保存到单独的文件
                 self._save_module_dependencies(module['name'], dependencies, module)
@@ -164,7 +165,7 @@ class ExtractStage(PipelineStage):
             module_info: 模块信息
             module_dir: 模块目录
         """
-        build_cs_path = Path(module_info['absolute_path'])
+        build_cs_path = self._resolve_source_path(module_info['absolute_path'])
         source_dir = build_cs_path.parent
 
         # 收集所有源文件
@@ -173,7 +174,7 @@ class ExtractStage(PipelineStage):
 
         for ext in ['*.h', '*.cpp', '*.inl']:
             for source_file in source_dir.rglob(ext):
-                rel_path = str(source_file.relative_to(self.base_path))
+                rel_path = source_file.relative_to(self.base_path).as_posix()
                 stat = source_file.stat()
                 file_hash = Hasher.compute_sha256(source_file)
 
@@ -190,7 +191,7 @@ class ExtractStage(PipelineStage):
 
         # 获取工具版本
         from ..core.config import Config
-        config = Config(self.base_path / "KnowledgeBase")
+        config = Config(base_path=str(self._kb_root))
         tool_version = config.get('project.version', '2.13.0')
 
         # 创建模块清单

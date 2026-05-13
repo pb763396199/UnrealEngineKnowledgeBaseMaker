@@ -75,8 +75,10 @@ class ModuleGraph:
         graph_path = self._get_graph_path()
 
         if os.path.exists(graph_path):
+            from ..branch_manager import safe_pickle_load
+
             with open(graph_path, 'rb') as f:
-                data = pickle.load(f)
+                data = safe_pickle_load(f)
                 self.graph = data.get('graph', nx.DiGraph())
 
     def save(self) -> None:

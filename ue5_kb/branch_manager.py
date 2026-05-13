@@ -334,6 +334,42 @@ class BranchManager:
         conn = _db_connect(self.registry_db)
         try:
             kb_store_dir = self._get_kb_store(conn)
+
+            # P0.3: 同 commit 复用检查 — 若已有完整 KB 且目录存在，仅更新分支指针
+            existing = conn.execute(
+                "SELECT kb_dir FROM versions WHERE commit_id = ? AND build_status = 'complete'",
+                (commit_id,),
+            ).fetchone()
+            if existing:
+                existing_path = Path(kb_store_dir) / existing[0]
+                if existing_path.exists():
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO branches
+                            (name, commit_id, status, vcs_type, description, updated_at)
+                            VALUES (?, ?, 'active', ?, ?, datetime('now'))
+                            """,
+                            (branch, commit_id, vcs_type, description),
+                        )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)",
+                            (branch,),
+                        )
+                        conn.execute("COMMIT")
+                    except Exception:
+                        conn.execute("ROLLBACK")
+                        raise
+                    return {
+                        "status": "ok",
+                        "message": f"已复用现有 KB ({commit_id[:7]})",
+                        "branch": branch,
+                        "commit": commit_id[:7],
+                        "reused": True,
+                    }
+                # 目录缺失 → 按新导入处理，继续走下方逻辑
+
             kb_dir = self._unique_kb_dir(commit_id, kb_store_dir)
             if kb_dir is None:
                 return {"error": f"Hash 碰撞无法解决: {commit_id}"}
@@ -362,15 +398,11 @@ class BranchManager:
                     """,
                     (branch, commit_id, vcs_type, description),
                 )
-                # 若无活跃分支，设为默认
-                active = conn.execute(
-                    "SELECT value FROM config WHERE key = 'active_branch'"
-                ).fetchone()
-                if not active:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)",
-                        (branch,),
-                    )
+                # 注册成功后始终把当前分支设为活跃
+                conn.execute(
+                    "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)",
+                    (branch,),
+                )
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -409,14 +441,18 @@ class BranchManager:
 
         conn = _db_connect(self.registry_db)
         try:
-            # 检查该 commit 是否已有 KB
-            if not force:
-                existing = conn.execute(
-                    "SELECT kb_dir FROM versions WHERE commit_id = ? AND build_status = 'complete'",
-                    (commit_id,),
-                ).fetchone()
-                if existing:
-                    # 仅更新分支指针
+            # 检查该 commit 是否已有完整 KB。非 force 直接复用；force 时复用同一 kb_dir 做原子替换，避免 orphan chain。
+            kb_store_dir = self._get_kb_store(conn)
+            existing = conn.execute(
+                "SELECT kb_dir FROM versions WHERE commit_id = ? AND build_status = 'complete'",
+                (commit_id,),
+            ).fetchone()
+            existing_kb_dir = existing[0] if existing else None
+            existing_kb_path = Path(kb_store_dir) / existing_kb_dir if existing_kb_dir else None
+            if existing_kb_path is not None and existing_kb_path.exists() and not force:
+                # 仅更新分支指针
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO branches
@@ -425,21 +461,20 @@ class BranchManager:
                         """,
                         (branch, commit_id, vcs_type, description),
                     )
-                    active = conn.execute(
-                        "SELECT value FROM config WHERE key = 'active_branch'"
-                    ).fetchone()
-                    if not active:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)",
-                            (branch,),
-                        )
-                    conn.commit()
-                    return {
-                        "status": "ok",
-                        "message": f"KB 已是最新 ({commit_id[:7]})，仅更新分支指针",
-                        "commit": commit_id[:7],
-                        "reused": True,
-                    }
+                    conn.execute(
+                        "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)",
+                        (branch,),
+                    )
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+                return {
+                    "status": "ok",
+                    "message": f"KB 已是最新 ({commit_id[:7]})，仅更新分支指针",
+                    "commit": commit_id[:7],
+                    "reused": True,
+                }
 
             # 查找插件根目录
             plugin_root = self._find_plugin_root(source_path)
@@ -447,7 +482,16 @@ class BranchManager:
                 return {"error": f"无法找到插件根目录（需要 .uplugin 文件）: {source}"}
 
             # 构建 KB
-            kb_output = plugin_root / "KnowledgeBase"
+            # P0.2: 使用 variants store 下的临时构建目录，避免写入 plugin_root/KnowledgeBase
+            safe_commit = "".join(
+                c if c.isalnum() or c in "-_" else "_" for c in commit_id[:7]
+            )
+            kb_build_dir = Path(kb_store_dir) / f"_build_tmp_{safe_commit}"
+
+            # 清理上次未完成的残留构建目录
+            if kb_build_dir.exists():
+                shutil.rmtree(str(kb_build_dir))
+
             print(
                 f"[update] commit={commit_id[:7]} dirty={is_dirty} plugin={plugin_root}",
                 file=sys.stderr,
@@ -455,7 +499,7 @@ class BranchManager:
             if is_dirty:
                 print("[update] 警告: 工作区有未提交变更，KB 可能不完整", file=sys.stderr)
 
-            # 查找基线版本
+            # 查找基线版本（用于 hardlink 去重）
             base_row = conn.execute(
                 """
                 SELECT v.kb_dir, v.commit_id FROM versions v
@@ -465,19 +509,21 @@ class BranchManager:
                 (branch,),
             ).fetchone()
 
-            incremental = bool(base_row and kb_output.exists())
-
-            build_result = self._build_kb(plugin_root, kb_output, incremental=incremental)
+            # P0.2: _build_kb 直接输出到临时目录，不再写 plugin_root/KnowledgeBase
+            build_result = self._build_kb(plugin_root, kb_build_dir, incremental=False)
             if build_result["status"] != "ok":
                 return build_result
 
-            # 导入到 variant 存储
-            if not kb_output.exists():
+            if not kb_build_dir.exists():
                 return {"error": "ue5_kb 构建后 KB 目录不存在"}
 
-            kb_store_dir = self._get_kb_store(conn)
-            kb_dir = self._unique_kb_dir(commit_id, kb_store_dir)
+            kb_dir = (
+                existing_kb_dir
+                if existing_kb_path is not None and existing_kb_path.exists()
+                else self._unique_kb_dir(commit_id, kb_store_dir)
+            )
             if kb_dir is None:
+                shutil.rmtree(str(kb_build_dir))
                 return {"error": f"Hash 碰撞无法解决: {commit_id}"}
 
             # P1-1: 基线 variant 去重
@@ -489,10 +535,15 @@ class BranchManager:
 
             try:
                 final_dir = _import_kb_to_store(
-                    kb_output, kb_store_dir, kb_dir, baseline_dir=baseline_variant_dir
+                    kb_build_dir, kb_store_dir, kb_dir, baseline_dir=baseline_variant_dir
                 )
+                # 导入成功后清理临时构建目录
+                if kb_build_dir.exists():
+                    shutil.rmtree(str(kb_build_dir))
                 self._run_post_import_migration(final_dir)
             except Exception as e:
+                if kb_build_dir.exists():
+                    shutil.rmtree(str(kb_build_dir))
                 return {"error": f"导入失败: {e}"}
 
             file_count = sum(1 for _ in final_dir.rglob("*") if _.is_file())
@@ -516,14 +567,11 @@ class BranchManager:
                     """,
                     (branch, commit_id, vcs_type, description),
                 )
-                active = conn.execute(
-                    "SELECT value FROM config WHERE key = 'active_branch'"
-                ).fetchone()
-                if not active:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)",
-                        (branch,),
-                    )
+                # update 成功后始终把当前分支设为活跃
+                conn.execute(
+                    "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)",
+                    (branch,),
+                )
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -535,7 +583,7 @@ class BranchManager:
                 "commit": commit_id[:7],
                 "kb_dir": kb_dir,
                 "file_count": file_count,
-                "incremental": incremental,
+                "incremental": False,
                 "dirty": is_dirty,
             }
         finally:
@@ -882,16 +930,25 @@ class BranchManager:
         kb_output: Path,
         incremental: bool = False,
     ) -> dict:
-        """调用 ue5_kb 构建 KB"""
+        """调用 ue5_kb 构建 KB（仅数据阶段，不运行 generate），输出到 kb_output"""
         try:
             from ue5_kb.pipeline.coordinator import PipelineCoordinator
+
+            # 非增量构建时清理旧数据，避免 stale DB
+            if not incremental and kb_output.exists():
+                import shutil as _shutil
+                _shutil.rmtree(str(kb_output))
 
             coord = PipelineCoordinator(
                 plugin_root,
                 is_plugin=True,
                 plugin_name=plugin_root.name,
+                kb_path=kb_output,
             )
-            coord.run_all()
+            # 仅运行数据构建阶段；generate（skill 生成）由调用方管理，避免双重导入
+            force = not incremental
+            for stage_name in ("discover", "extract", "analyze", "build"):
+                coord.run_stage(stage_name, force=force)
             return {"status": "ok"}
         except Exception as e:
             return {"status": "error", "error": str(e)}

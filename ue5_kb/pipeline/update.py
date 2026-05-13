@@ -24,7 +24,7 @@ class UpdateStage(PipelineStage):
         Update 阶段没有独立的输出文件，
         返回 manifest 文件路径作为输出路径
         """
-        return self.base_path / "KnowledgeBase" / ".kb_manifest.json"
+        return self._kb_root / ".kb_manifest.json"
 
     def is_completed(self) -> bool:
         """
@@ -37,7 +37,7 @@ class UpdateStage(PipelineStage):
 
     def run(self, **kwargs) -> Dict[str, Any]:
         """执行增量更新"""
-        kb_path = self.base_path / "KnowledgeBase"
+        kb_path = self._kb_root
         old_manifest = KBManifest.load(kb_path)
 
         if not old_manifest:
@@ -100,7 +100,7 @@ class UpdateStage(PipelineStage):
 
     def check(self) -> Dict[str, Any]:
         """仅检查变更，不执行更新"""
-        kb_path = self.base_path / "KnowledgeBase"
+        kb_path = self._kb_root
         old_manifest = KBManifest.load(kb_path)
 
         if not old_manifest:
@@ -129,7 +129,7 @@ class UpdateStage(PipelineStage):
         # 集成 DiscoverStage 逻辑
         from .discover import DiscoverStage
 
-        discover = DiscoverStage(self.base_path)
+        discover = DiscoverStage(self.base_path, kb_path=self._kb_root)
         discover_result = discover.run()
 
         # 为每个模块计算哈希
@@ -176,7 +176,7 @@ class UpdateStage(PipelineStage):
 
     def _compute_module_hash(self, module_info: Dict[str, Any]) -> str:
         """计算单个模块的哈希"""
-        build_cs_path = Path(module_info['absolute_path'])
+        build_cs_path = self._resolve_source_path(module_info['absolute_path'])
         module_dir = build_cs_path.parent
 
         # 查找所有源文件

@@ -17,7 +17,7 @@ class GenerateStage(PipelineStage):
     从模板生成 Claude Code Skill
     """
 
-    def __init__(self, base_path: Path, is_plugin: bool = False, plugin_name: str = None):
+    def __init__(self, base_path: Path, is_plugin: bool = False, plugin_name: str = None, kb_path: Path = None):
         """
         初始化生成阶段
 
@@ -25,8 +25,9 @@ class GenerateStage(PipelineStage):
             base_path: 引擎/插件根目录
             is_plugin: 是否为插件模式
             plugin_name: 插件名称
+            kb_path: 知识库输出路径（外置路径；None 时默认 base_path/KnowledgeBase）
         """
-        super().__init__(base_path)
+        super().__init__(base_path, kb_path=kb_path)
         self.is_plugin = is_plugin
         self.plugin_name = plugin_name
 
@@ -52,8 +53,8 @@ class GenerateStage(PipelineStage):
         """
         print(f"[Generate] 生成 Claude Code Skill...")
 
-        # 获取知识库路径
-        kb_path = self.base_path / "KnowledgeBase"
+        # 获取知识库路径（支持外置路径）
+        kb_path = self._kb_root
         if not kb_path.exists():
             raise RuntimeError("知识库不存在，请先运行 build 阶段")
 

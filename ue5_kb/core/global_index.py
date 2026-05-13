@@ -46,8 +46,10 @@ class GlobalIndex:
         index_file = os.path.join(self.config.global_index_path, "global_index.pkl")
 
         if os.path.exists(index_file):
+            from ..branch_manager import safe_pickle_load
+
             with open(index_file, 'rb') as f:
-                data = pickle.load(f)
+                data = safe_pickle_load(f)
                 self.index = data.get('index', {})
                 self.dependency_graph = data.get('dependency_graph')
 
