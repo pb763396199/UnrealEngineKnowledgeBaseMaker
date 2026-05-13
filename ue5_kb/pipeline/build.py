@@ -87,21 +87,25 @@ class BuildStage(PipelineStage):
         # 5. 构建符号引用索引（call graph）
         try:
             from ..core.symbol_reference_index import build_from_config as _build_sym_ref
-            _build_sym_ref(config)
+            _build_sym_ref(config, source_root=self.base_path)
         except Exception as e:
             print(f"  [警告] 符号引用索引构建失败: {e}")
 
-        # 6. 保存统计信息
+        # 6. 质量门禁检查（Phase 0：只警告，不中断）
+        quality = self._check_quality_gates(config)
+
+        # 7. 保存统计信息
         stats = global_index.get_statistics()
 
-        # 7. 创建并保存 KB 清单（v2.13.0 新增）
+        # 8. 创建并保存 KB 清单（v2.13.0 新增）
         self._save_kb_manifest(kb_path, stats)
 
         result = {
             'kb_path': kb_path.name,
             'global_index_created': True,
             'module_graphs_created': modules_built,
-            'statistics': stats
+            'statistics': stats,
+            'quality_gates': quality,
         }
 
         # 保存构建摘要
@@ -407,6 +411,100 @@ class BuildStage(PipelineStage):
 
         print(f"    类索引: {class_stats['total_classes']} 个类")
         print(f"    函数索引: {func_stats['total_functions']} 个函数")
+
+    def _check_quality_gates(self, config: Config) -> Dict[str, Any]:
+        """
+        Phase 0 质量门禁检查。统计关键指标并打印 warning。
+        不中断构建流程，结果写入 build_summary.json。
+        """
+        from ..core.class_index import ClassIndex
+        from ..core.function_index import FunctionIndex
+        import sqlite3
+
+        global_index_path_value = getattr(config, 'global_index_path', None)
+        if not global_index_path_value:
+            result = {
+                'quality_passed': False,
+                'class_count': 0,
+                'function_count': 0,
+                'short_name_count': 0,
+                'short_name_ratio': 0.0,
+                'unknown_signature_count': 0,
+                'unknown_signature_ratio': 0.0,
+                'symbol_reference_count': 0,
+            }
+            print("  [质量警告] 跳过质量门禁：config.global_index_path 不可用")
+            return result
+
+        global_index_path = Path(global_index_path_value)
+
+        # --- class_count ---
+        class_count = 0
+        try:
+            cls_idx = ClassIndex(str(global_index_path / "class_index.db"))
+            class_count = cls_idx.get_statistics().get('total_classes', 0)
+            cls_idx.close()
+        except Exception:
+            pass
+
+        # --- function_count / short_name / unknown_signature ---
+        function_count = 0
+        short_name_count = 0
+        unknown_signature_count = 0
+        try:
+            func_idx = FunctionIndex(str(global_index_path / "function_index.db"))
+            func_stats = func_idx.get_statistics()
+            function_count = func_stats.get('total_functions', 0)
+            short_name_count = func_stats.get('short_name_count', 0)
+            unknown_signature_count = func_stats.get('unknown_signature_count', 0)
+            func_idx.close()
+        except Exception:
+            pass
+
+        # --- symbol_reference_count ---
+        symbol_reference_count = 0
+        sr_db = global_index_path / "symbol_reference_index.db"
+        if sr_db.exists():
+            try:
+                conn = sqlite3.connect(str(sr_db))
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM symbol_references")
+                symbol_reference_count = cursor.fetchone()[0]
+                conn.close()
+            except Exception:
+                pass
+
+        short_name_ratio = short_name_count / function_count if function_count > 0 else 0.0
+        unknown_signature_ratio = unknown_signature_count / function_count if function_count > 0 else 0.0
+
+        checks = {
+            'class_count': (class_count > 0, class_count),
+            'function_count': (function_count > 0, function_count),
+            'short_name_ratio': (short_name_ratio <= 0.05, round(short_name_ratio, 4)),
+            'unknown_signature_ratio': (unknown_signature_ratio <= 0.30, round(unknown_signature_ratio, 4)),
+            'symbol_reference_count': (symbol_reference_count > 0, symbol_reference_count),
+        }
+
+        quality_passed = all(passed for passed, _ in checks.values())
+
+        result = {
+            'quality_passed': quality_passed,
+            'class_count': class_count,
+            'function_count': function_count,
+            'short_name_count': short_name_count,
+            'short_name_ratio': round(short_name_ratio, 4),
+            'unknown_signature_count': unknown_signature_count,
+            'unknown_signature_ratio': round(unknown_signature_ratio, 4),
+            'symbol_reference_count': symbol_reference_count,
+        }
+
+        if not quality_passed:
+            failed = [k for k, (passed, _) in checks.items() if not passed]
+            print(f"  [质量警告] 以下指标未通过门禁（不中断构建）: {', '.join(failed)}")
+            for k in failed:
+                print(f"    {k} = {checks[k][1]}")
+
+        return result
 
     def _load_graph_file(self, graph_file: Path) -> tuple:
         """

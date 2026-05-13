@@ -302,10 +302,20 @@ class FunctionIndex:
         """)
         top_modules = [{'module': row[0], 'count': row[1]} for row in cursor.fetchall()]
 
+        # Short-name noise: function names of 2 chars or fewer
+        cursor.execute("SELECT COUNT(*) FROM function_index WHERE LENGTH(name) <= 2")
+        short_name_count = cursor.fetchone()[0]
+
+        # Unknown-signature noise
+        cursor.execute("SELECT COUNT(*) FROM function_index WHERE signature LIKE '%unknown %'")
+        unknown_signature_count = cursor.fetchone()[0]
+
         return {
             'total_functions': total,
             'blueprint_callable': bp_count,
-            'top_modules': top_modules
+            'top_modules': top_modules,
+            'short_name_count': short_name_count,
+            'unknown_signature_count': unknown_signature_count,
         }
 
     def commit(self) -> None:

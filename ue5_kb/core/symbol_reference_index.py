@@ -103,6 +103,7 @@ class SymbolReferenceIndex:
         function_index_db: str,
         class_index_db: str,
         max_callers: int = 0,
+        source_root: Optional[Any] = None,
     ) -> Dict[str, int]:
         """
         从已有的 function_index.db 和 class_index.db 构建符号引用图谱
@@ -111,6 +112,7 @@ class SymbolReferenceIndex:
             function_index_db: function_index.db 路径
             class_index_db:    class_index.db 路径
             max_callers:       最多处理多少个 caller（0 = 全部）
+            source_root:       源码根目录；用于将 impl_file_path 相对路径解析为绝对路径
 
         Returns:
             {"callers_processed": N, "callers_skipped": N, "rows_inserted": N}
@@ -142,11 +144,14 @@ class SymbolReferenceIndex:
         if ci_path.exists():
             ci_conn = sqlite3.connect(str(ci_path))
             ci_conn.row_factory = sqlite3.Row
-            for row in ci_conn.execute(
-                "SELECT name, module, file_path, line_number FROM class_index"
-            ):
-                rec = dict(row)
-                known_classes[rec["name"]] = rec
+            try:
+                for row in ci_conn.execute(
+                    "SELECT name, module, file_path, line_number FROM class_index"
+                ):
+                    rec = dict(row)
+                    known_classes[rec["name"]] = rec
+            except sqlite3.OperationalError:
+                known_classes = {}
             ci_conn.close()
 
         known_func_names: Set[str] = set(func_by_name.keys()) - _CPP_KEYWORDS
@@ -185,7 +190,7 @@ class SymbolReferenceIndex:
             caller_decl_file = caller.get("file_path", "") or ""
             caller_decl_line = caller.get("line_number", 0) or 0
 
-            body_lines, body_start = _slice_function_body(impl_file, impl_line)
+            body_lines, body_start = _slice_function_body(impl_file, impl_line, source_root=source_root)
             if body_lines is None:
                 skipped += 1
                 continue
@@ -352,14 +357,15 @@ class SymbolReferenceIndex:
 # 公共入口：供 build 阶段调用
 # ===========================================================================
 
-def build_from_config(config: Any) -> Dict[str, Any]:
+def build_from_config(config: Any, source_root: Optional[Any] = None) -> Dict[str, Any]:
     """
     从 Config 对象构建符号引用索引
 
     BuildStage 和 ParallelBuildStage 共用此函数，避免重复实现。
 
     Args:
-        config: Config 对象（需有 global_index_path 属性）
+        config:      Config 对象（需有 global_index_path 属性）
+        source_root: 源码根目录；传给 build_from_indices 用于解析相对 impl_file_path
 
     Returns:
         统计字典
@@ -377,7 +383,7 @@ def build_from_config(config: Any) -> Dict[str, Any]:
 
     idx = SymbolReferenceIndex(sr_db)
     try:
-        build_stats = idx.build_from_indices(fi_db, ci_db)
+        build_stats = idx.build_from_indices(fi_db, ci_db, source_root=source_root)
         final_stats = idx.get_statistics()
     finally:
         idx.close()
@@ -400,19 +406,30 @@ def build_from_config(config: Any) -> Dict[str, Any]:
 def _slice_function_body(
     impl_file: str,
     impl_line: int,
+    source_root: Optional[Any] = None,
 ) -> Tuple[Optional[List[str]], int]:
     """
     从源文件切片函数体
 
     Args:
-        impl_file:  实现文件路径
-        impl_line:  函数定义起始行号（1-based）
+        impl_file:   实现文件路径（绝对或相对 POSIX 路径）
+        impl_line:   函数定义起始行号（1-based）
+        source_root: 源码根目录；当 impl_file 为相对路径时用于拼接为绝对路径
 
     Returns:
         (body_lines, first_brace_line_1based) 或 (None, 0) 表示失败
     """
+    impl_path = Path(impl_file)
+    if impl_path.is_absolute():
+        resolved = impl_path
+    elif source_root is not None:
+        # 将 Windows 反斜杠规范化为 POSIX 路径后拼接
+        normalized = impl_file.replace("\\", "/")
+        resolved = Path(source_root) / normalized
+    else:
+        resolved = impl_path
     try:
-        with open(impl_file, "r", encoding="utf-8", errors="ignore") as f:
+        with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
             all_lines = f.readlines()
     except OSError:
         return None, 0

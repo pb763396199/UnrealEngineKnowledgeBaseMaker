@@ -254,20 +254,43 @@ class LayeredQueryInterface:
 
     def _load_class_info(self, class_name: str) -> Optional[Dict[str, Any]]:
         """
-        加载类信息（真实实现）
+        加载类信息。优先从 SQLite ClassIndex 查询，失败时回退到 pkl 扫描。
+        """
+        # --- 优先路径：SQLite ClassIndex ---
+        try:
+            from ..core.class_index import ClassIndex
+            db_path = self.kb_path / "global_index" / "class_index.db"
+            if db_path.exists():
+                cls_idx = ClassIndex(str(db_path))
+                rows = cls_idx.query_by_name(class_name)
+                cls_idx.close()
+                if rows:
+                    r = rows[0]
+                    return {
+                        'name': r['name'],
+                        'module': r['module'],
+                        'parent_classes': r.get('parent_classes', []),
+                        'methods': [],          # ClassIndex 不存储方法列表
+                        'file': r.get('file_path', ''),
+                        'line': r.get('line_number', 0),
+                        'is_uclass': r.get('is_uclass', False),
+                        'is_blueprint': r.get('is_blueprintable', False),
+                        'properties': [],
+                    }
+        except Exception as e:
+            print(f"警告: SQLite ClassIndex 查询失败，回退 pkl 扫描: {e}")
 
-        从 module_graphs 中加载类的详细信息
+        # --- 回退路径：pkl 图谱扫描（保留旧逻辑）---
+        return self._load_class_info_from_pkl(class_name)
+
+    def _load_class_info_from_pkl(self, class_name: str) -> Optional[Dict[str, Any]]:
+        """
+        从 module_graphs pkl 文件扫描类信息（旧版回退逻辑）。
         """
         from ..branch_manager import safe_pickle_load
-        from ..core.config import Config
-        from ..core.global_index import GlobalIndex
 
         try:
-            # 1. 加载 global_index 查找模块
-            config = Config(str(self.kb_path / "config.yaml"))
-            global_index = GlobalIndex(config)
-
-            # 2. 遍历所有模块图谱查找类
+            # 遍历所有模块图谱查找类
             graphs_dir = self.kb_path / "module_graphs"
             if not graphs_dir.exists():
                 return None
@@ -281,22 +304,18 @@ class LayeredQueryInterface:
                         if not graph:
                             continue
 
-                        # 查找类节点
                         class_node = f"class_{class_name}"
                         if class_node not in graph.nodes:
                             continue
 
-                        # 找到了！提取信息
                         node_data = graph.nodes[class_node]
                         module_name = data.get('module', 'unknown')
 
-                        # 提取父类
                         parent_classes = []
                         for pred in graph.predecessors(class_node):
                             if pred.startswith('class_'):
                                 parent_classes.append(graph.nodes[pred].get('name', pred))
 
-                        # 提取方法
                         methods = []
                         for succ in graph.successors(class_node):
                             if succ.startswith('method_') or succ.startswith('function_'):
@@ -314,11 +333,9 @@ class LayeredQueryInterface:
                             'properties': node_data.get('properties', [])
                         }
 
-                except Exception as e:
-                    # 单个文件失败不影响其他文件
+                except Exception:
                     continue
 
-            # 没找到
             return None
 
         except Exception as e:

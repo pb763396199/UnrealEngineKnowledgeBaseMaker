@@ -220,7 +220,7 @@ class ParallelBuildStage:
         console.print(f"[cyan]构建符号引用索引...[/cyan]")
         try:
             from ..core.symbol_reference_index import build_from_config as _build_sym_ref
-            _build_sym_ref(config)
+            _build_sym_ref(config, source_root=self.base_path)
         except Exception as e:
             console.print(f"[yellow]  警告: 符号引用索引构建失败: {e}[/yellow]")
 

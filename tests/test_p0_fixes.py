@@ -335,3 +335,356 @@ class TestBranchManagerUpdateReuse:
         ).fetchone()
         conn.close()
         assert active == ("DEV",)
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 新增测试
+# ---------------------------------------------------------------------------
+
+class TestLayeredQuerySQLiteFirst:
+    """LayeredQuery._load_class_info 优先从 SQLite 返回，不扫 pkl"""
+
+    def test_load_class_info_from_sqlite(self, tmp_path):
+        from ue5_kb.core.class_index import ClassIndex
+        from ue5_kb.query.layered_query import LayeredQueryInterface
+
+        # 构造最小 kb_path 结构
+        gi_dir = tmp_path / "global_index"
+        gi_dir.mkdir(parents=True)
+        db_path = gi_dir / "class_index.db"
+
+        cls_idx = ClassIndex(str(db_path))
+        cls_idx.add_class({
+            'name': 'AMyTestActor',
+            'module': 'TestModule',
+            'namespace': '',
+            'parent_classes': ['AActor'],
+            'interfaces': [],
+            'file_path': '/Engine/Source/MyActor.h',
+            'line_number': 10,
+            'is_uclass': True,
+            'is_struct': False,
+            'is_interface': False,
+            'is_blueprintable': True,
+            'method_count': 3,
+            'property_count': 2,
+        })
+        cls_idx.close()
+
+        lq = LayeredQueryInterface(str(tmp_path))
+        info = lq._load_class_info('AMyTestActor')
+
+        assert info is not None, "应从 SQLite 返回结果"
+        assert info['name'] == 'AMyTestActor'
+        assert info['module'] == 'TestModule'
+        assert info['is_uclass'] is True
+        assert info['is_blueprint'] is True  # is_blueprintable 映射到 is_blueprint
+        assert info['parent_classes'] == ['AActor']
+
+    def test_load_class_info_fallback_on_missing_db(self, tmp_path):
+        """db 不存在时不抛异常，回退返回 None（没有 pkl）"""
+        from ue5_kb.query.layered_query import LayeredQueryInterface
+
+        lq = LayeredQueryInterface(str(tmp_path))
+        info = lq._load_class_info('SomeNonExistentClass')
+        assert info is None
+
+
+class TestClassIndexFTS:
+    """ClassIndex FTS5 full-text search"""
+
+    def test_search_fts_finds_written_class(self, tmp_path):
+        import pytest
+        from ue5_kb.core.class_index import ClassIndex
+
+        cls_idx = ClassIndex(str(tmp_path / "class_index.db"))
+
+        if not cls_idx._fts_enabled:
+            cls_idx.close()
+            pytest.skip("FTS5 not available in this SQLite build")
+
+        cls_idx.add_class({
+            'name': 'AWeaponComponent',
+            'module': 'CombatModule',
+            'namespace': '',
+            'parent_classes': ['UActorComponent'],
+            'interfaces': [],
+            'file_path': '/Game/Combat/WeaponComponent.h',
+            'line_number': 5,
+            'is_uclass': True,
+            'is_struct': False,
+            'is_interface': False,
+            'is_blueprintable': False,
+            'method_count': 1,
+            'property_count': 0,
+        })
+
+        results = cls_idx.search_fts('AWeaponComponent')
+        cls_idx.close()
+
+        assert len(results) >= 1
+        assert results[0]['name'] == 'AWeaponComponent'
+
+    def test_search_fts_empty_when_fts_disabled(self, tmp_path):
+        from ue5_kb.core.class_index import ClassIndex
+
+        cls_idx = ClassIndex(str(tmp_path / "class_index.db"))
+        cls_idx._fts_enabled = False  # 强制禁用
+        results = cls_idx.search_fts('anything')
+        cls_idx.close()
+        assert results == []
+
+
+class TestFunctionIndexStatistics:
+    """FunctionIndex.get_statistics 包含 short_name_count / unknown_signature_count"""
+
+    def test_statistics_contain_new_fields(self, tmp_path):
+        from ue5_kb.core.function_index import FunctionIndex
+
+        func_idx = FunctionIndex(str(tmp_path / "function_index.db"))
+        # 插入一个短名函数
+        func_idx.add_function({
+            'name': 'fx',          # len <= 2，计入 short_name_count
+            'module': 'M',
+            'class_name': 'C',
+            'return_type': 'void',
+            'parameters': [],
+            'signature': 'void fx(unknown int param)',  # 含 'unknown '
+            'file_path': '',
+            'line_number': 0,
+            'impl_file_path': '',
+            'impl_line_number': 0,
+            'is_virtual': False,
+            'is_const': False,
+            'is_static': False,
+            'is_override': False,
+            'is_blueprint_callable': False,
+            'ufunction_specifiers': {},
+        })
+        func_idx.add_function({
+            'name': 'DoSomethingLonger',
+            'module': 'M',
+            'class_name': 'C',
+            'return_type': 'bool',
+            'parameters': [],
+            'signature': 'bool DoSomethingLonger()',
+            'file_path': '',
+            'line_number': 1,
+            'impl_file_path': '',
+            'impl_line_number': 0,
+            'is_virtual': False,
+            'is_const': False,
+            'is_static': False,
+            'is_override': False,
+            'is_blueprint_callable': False,
+            'ufunction_specifiers': {},
+        })
+        func_idx.commit()
+        stats = func_idx.get_statistics()
+        func_idx.close()
+
+        assert 'short_name_count' in stats
+        assert 'unknown_signature_count' in stats
+        assert stats['short_name_count'] == 1      # 'fx' 计入
+        assert stats['unknown_signature_count'] == 1  # 签名含 'unknown '
+        assert stats['total_functions'] == 2
+
+
+class TestBuildStageQualityGates:
+    """BuildStage._check_quality_gates 在空索引下返回 quality_passed=False"""
+
+    def test_quality_gates_empty_indices(self, tmp_path):
+        from ue5_kb.pipeline.build import BuildStage
+        from ue5_kb.core.config import Config
+
+        kb_path = tmp_path / "KnowledgeBase"
+        (kb_path / "global_index").mkdir(parents=True)
+
+        stage = BuildStage(tmp_path, kb_path=kb_path)
+        config = Config(base_path=str(kb_path))
+
+        quality = stage._check_quality_gates(config)
+
+        assert 'quality_passed' in quality
+        assert 'symbol_reference_count' in quality
+        assert quality['quality_passed'] is False   # 空索引必然未通过
+        assert quality['class_count'] == 0
+        assert quality['function_count'] == 0
+        assert quality['symbol_reference_count'] == 0
+
+    def test_quality_gates_with_data_passes_count_checks(self, tmp_path):
+        from ue5_kb.pipeline.build import BuildStage
+        from ue5_kb.core.config import Config
+        from ue5_kb.core.class_index import ClassIndex
+        from ue5_kb.core.function_index import FunctionIndex
+
+        kb_path = tmp_path / "KnowledgeBase"
+        gi = kb_path / "global_index"
+        gi.mkdir(parents=True)
+
+        # 写入一个类
+        cls_idx = ClassIndex(str(gi / "class_index.db"))
+        cls_idx.add_class({
+            'name': 'ATestClass', 'module': 'M', 'namespace': '',
+            'parent_classes': [], 'interfaces': [],
+            'file_path': 'A.h', 'line_number': 1,
+            'is_uclass': True, 'is_struct': False,
+            'is_interface': False, 'is_blueprintable': False,
+            'method_count': 0, 'property_count': 0,
+        })
+        cls_idx.close()
+
+        # 写入一个函数
+        func_idx = FunctionIndex(str(gi / "function_index.db"))
+        func_idx.add_function({
+            'name': 'DoWork', 'module': 'M', 'class_name': 'ATestClass',
+            'return_type': 'void', 'parameters': [],
+            'signature': 'void DoWork()',
+            'file_path': '', 'line_number': 0,
+            'impl_file_path': '', 'impl_line_number': 0,
+            'is_virtual': False, 'is_const': False, 'is_static': False,
+            'is_override': False, 'is_blueprint_callable': False,
+            'ufunction_specifiers': {},
+        })
+        func_idx.commit()
+        func_idx.close()
+
+        stage = BuildStage(tmp_path, kb_path=kb_path)
+        config = Config(base_path=str(kb_path))
+        quality = stage._check_quality_gates(config)
+
+        assert quality['class_count'] == 1
+        assert quality['function_count'] == 1
+        # symbol_reference_count 仍为 0，所以 quality_passed 依然 False
+        assert quality['symbol_reference_count'] == 0
+        assert quality['quality_passed'] is False
+
+
+# ---------------------------------------------------------------------------
+# 新增测试: SymbolReferenceIndex source_root 支持
+# ---------------------------------------------------------------------------
+
+class TestSymbolReferenceIndexSourceRoot:
+    """验证 build_from_indices 通过 source_root 正确解析相对路径读取函数体"""
+
+    def _make_function_db(self, db_path: Path, impl_rel_posix: str, impl_line: int) -> None:
+        """构造最小 function_index.db，含一个有 impl_file_path 的 Caller 和一个无 impl 的 Callee"""
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS function_index (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                class_name TEXT,
+                module TEXT,
+                file_path TEXT,
+                line_number INTEGER,
+                impl_file_path TEXT,
+                impl_line_number INTEGER,
+                return_type TEXT,
+                parameters TEXT,
+                signature TEXT,
+                is_virtual INTEGER DEFAULT 0,
+                is_const INTEGER DEFAULT 0,
+                is_static INTEGER DEFAULT 0,
+                is_override INTEGER DEFAULT 0,
+                is_blueprint_callable INTEGER DEFAULT 0,
+                ufunction_specifiers TEXT DEFAULT '{}'
+            );
+        """)
+        # Caller: 有 impl，impl_file_path 是相对 POSIX 路径
+        conn.execute(
+            "INSERT INTO function_index (name, class_name, module, file_path, line_number,"
+            " impl_file_path, impl_line_number, return_type, parameters, signature)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("Caller", "Foo", "TestModule", "Source/Foo.h", 10,
+             impl_rel_posix, impl_line, "void", "[]", "void Foo::Caller()"),
+        )
+        # Callee: 只声明，无 impl
+        conn.execute(
+            "INSERT INTO function_index (name, class_name, module, file_path, line_number,"
+            " impl_file_path, impl_line_number, return_type, parameters, signature)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("Callee", "Foo", "TestModule", "Source/Foo.h", 20,
+             "", 0, "void", "[]", "void Foo::Callee()"),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_build_with_source_root_resolves_relative_impl_path(self, tmp_path):
+        """构造 source_root + 相对路径 impl_file_path，断言 rows_inserted>0 且 occurrence_file 为相对路径"""
+        from ue5_kb.core.symbol_reference_index import SymbolReferenceIndex
+
+        # 构造源码文件: source_root/Source/Foo.cpp
+        source_root = tmp_path / "plugin_src"
+        cpp_dir = source_root / "Source"
+        cpp_dir.mkdir(parents=True)
+        cpp_file = cpp_dir / "Foo.cpp"
+        cpp_file.write_text(
+            "void Foo::Caller()\n"
+            "{\n"
+            "    Callee();\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        # 相对 POSIX 路径（DB 中存储格式）
+        impl_rel_posix = "Source/Foo.cpp"
+
+        # 构造 function_index.db（impl_line=1，对应函数定义首行）
+        gi_dir = tmp_path / "global_index"
+        gi_dir.mkdir()
+        fi_db = gi_dir / "function_index.db"
+        ci_db = gi_dir / "class_index.db"
+        # class_index 可为空
+        sqlite3.connect(str(ci_db)).close()
+
+        self._make_function_db(fi_db, impl_rel_posix, impl_line=1)
+
+        sr_db = str(gi_dir / "symbol_reference_index.db")
+        idx = SymbolReferenceIndex(sr_db)
+        try:
+            stats = idx.build_from_indices(
+                str(fi_db), str(ci_db), source_root=source_root
+            )
+            callees = idx.query_callees("Caller", "Foo")
+        finally:
+            idx.close()
+
+        assert stats["rows_inserted"] > 0, f"应插入引用记录，但 rows_inserted={stats['rows_inserted']}"
+        assert stats["callers_skipped"] == 0, f"不应跳过 caller，但 callers_skipped={stats['callers_skipped']}"
+        callee_names = [r["target_symbol"] for r in callees]
+        assert "Callee" in callee_names, f"query_callees 应返回 Callee，实际: {callee_names}"
+        # occurrence_file 应保持相对路径（不是绝对路径）
+        for row in callees:
+            occ = row["occurrence_file"]
+            assert not Path(occ).is_absolute(), f"occurrence_file 应为相对路径，实际: {occ!r}"
+
+    def test_build_without_source_root_skips_missing_file(self, tmp_path):
+        """不传 source_root，cwd 下无对应文件时，caller 应被跳过（rows_inserted=0）"""
+        import os
+        from ue5_kb.core.symbol_reference_index import SymbolReferenceIndex
+
+        gi_dir = tmp_path / "global_index"
+        gi_dir.mkdir()
+        fi_db = gi_dir / "function_index.db"
+        ci_db = gi_dir / "class_index.db"
+        sqlite3.connect(str(ci_db)).close()
+
+        # impl_file_path 指向一个不存在的相对路径
+        self._make_function_db(fi_db, "Source/NonExistent.cpp", impl_line=1)
+
+        sr_db = str(gi_dir / "symbol_reference_index.db")
+        # 切换到不含该文件的目录，确保 open(relative) 失败
+        orig_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            idx = SymbolReferenceIndex(sr_db)
+            try:
+                stats = idx.build_from_indices(str(fi_db), str(ci_db))
+            finally:
+                idx.close()
+        finally:
+            os.chdir(orig_cwd)
+
+        assert stats["rows_inserted"] == 0
+        assert stats["callers_skipped"] > 0
