@@ -541,6 +541,83 @@ def update(engine_path, plugin_path, kb_path, full, check):
                 console.print(f"  移除模块数: {result['modules_removed']}")
 
 
+@cli.group()
+def branch():
+    """多分支 KB 管理命令"""
+    pass
+
+
+@branch.command('update-all')
+@click.option(
+    '--skill-path',
+    type=click.Path(),
+    default=str(Path.home() / '.claude' / 'skills' / 'AesWorld-kb'),
+    show_default=True,
+    help='Skill 目录（包含 registry.db）',
+)
+@click.option('--force', is_flag=True, help='强制对所有分支执行 update')
+@click.option('--check', is_flag=True, help='仅检查是否 stale，不执行构建')
+@click.option('--keep-old', is_flag=True, help='更新后保留旧 commit 的版本目录与记录')
+def branch_update_all(skill_path, force, check, keep_old):
+    """批量检查/更新 registry 中全部分支"""
+    from ue5_kb.branch_manager import BranchManager
+
+    manager = BranchManager(Path(skill_path))
+    result = manager.update_all(
+        force=force,
+        dry_run=check,
+        prune_old=not keep_old,
+    )
+
+    if result.get('error'):
+        console.print(f"[red]{result['error']}[/red]")
+        return
+
+    mode_text = '检查模式 (--check)' if check else '更新模式'
+    console.print(f"\n[bold cyan]branch update-all: {mode_text}[/bold cyan]")
+    console.print(f"Skill 路径: [yellow]{skill_path}[/yellow]\n")
+
+    table = Table()
+    table.add_column('Branch', style='cyan')
+    table.add_column('Registry', style='yellow')
+    table.add_column('Current', style='yellow')
+    table.add_column('Status')
+    table.add_column('Reason', style='dim')
+
+    for item in result.get('results', []):
+        status = item.get('status', 'unknown')
+        if status in ('updated',):
+            status_text = '[green]updated[/green]'
+        elif status in ('current',):
+            status_text = '[green]current[/green]'
+        elif status in ('stale',):
+            status_text = '[yellow]stale[/yellow]'
+        elif status in ('missing_source',):
+            status_text = '[yellow]missing_source[/yellow]'
+        elif status in ('failed', 'error'):
+            status_text = '[red]failed[/red]'
+        else:
+            status_text = status
+
+        reason = item.get('reason', '')
+        table.add_row(
+            str(item.get('branch', '')),
+            str(item.get('registry_commit') or '-'),
+            str(item.get('current_commit') or '-'),
+            status_text,
+            str(reason),
+        )
+
+    console.print(table)
+    console.print()
+    console.print(
+        f"总计: total={result.get('total', 0)}, "
+        f"updated={result.get('updated', 0)}, "
+        f"skipped={result.get('skipped', 0)}, "
+        f"failed={result.get('failed', 0)}"
+    )
+
+
 def detect_engine_version(engine_path: Path) -> str:
     """从引擎路径检测版本号"""
     # 方法1: 读取 Engine/Build/Build.version 文件 (最准确)

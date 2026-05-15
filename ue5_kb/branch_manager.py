@@ -280,6 +280,89 @@ class BranchManager:
         ).fetchone()
         return row[0] if row else str(self.skill_dir / "variants")
 
+    @staticmethod
+    def _short_commit(commit_id: Optional[str]) -> Optional[str]:
+        """截断 commit 显示，保持返回结构可读且兼容"""
+        if not commit_id:
+            return None
+        return commit_id[:7]
+
+    def _prune_version_if_unreferenced(
+        self,
+        conn: sqlite3.Connection,
+        commit_id: Optional[str],
+        kb_store_dir: str,
+    ) -> dict:
+        """
+        清理无分支引用的旧版本。
+
+        注意：commit_id 为空或 unknown* 时跳过，避免误删未知来源版本。
+        """
+        if not commit_id:
+            return {
+                "pruned": False,
+                "commit": None,
+                "reason": "empty_commit",
+            }
+
+        if commit_id.startswith("unknown"):
+            return {
+                "pruned": False,
+                "commit": self._short_commit(commit_id),
+                "reason": "skip_unknown_commit",
+            }
+
+        ref_count = conn.execute(
+            "SELECT COUNT(*) FROM branches WHERE commit_id = ?",
+            (commit_id,),
+        ).fetchone()[0]
+        if ref_count > 0:
+            return {
+                "pruned": False,
+                "commit": self._short_commit(commit_id),
+                "reason": "still_referenced",
+                "references": ref_count,
+            }
+
+        row = conn.execute(
+            "SELECT kb_dir FROM versions WHERE commit_id = ?",
+            (commit_id,),
+        ).fetchone()
+        if not row:
+            return {
+                "pruned": False,
+                "commit": self._short_commit(commit_id),
+                "reason": "version_not_found",
+            }
+
+        kb_dir = row[0]
+        variant_dir = Path(kb_store_dir) / kb_dir
+
+        # 先删 registry 记录，目录删除失败仅告警，不回滚成功更新。
+        conn.execute("DELETE FROM versions WHERE commit_id = ?", (commit_id,))
+        conn.commit()
+
+        warning = None
+        dir_deleted = False
+        if variant_dir.exists():
+            try:
+                shutil.rmtree(str(variant_dir))
+                dir_deleted = True
+            except Exception as e:
+                warning = f"failed_to_delete_variant_dir: {e}"
+        else:
+            warning = "variant_dir_not_found"
+
+        result = {
+            "pruned": True,
+            "commit": self._short_commit(commit_id),
+            "kb_dir": kb_dir,
+            "variant_dir_deleted": dir_deleted,
+        }
+        if warning:
+            result["warning"] = warning
+        return result
+
     # ---- 公开命令 ----
 
     def init_registry(self, kb_store: Optional[str] = None) -> dict:
@@ -424,6 +507,7 @@ class BranchManager:
         source: str,
         force: bool = False,
         description: str = "",
+        prune_old: bool = True,
     ) -> dict:
         """构建/增量更新分支 KB"""
         source_path = Path(source)
@@ -441,6 +525,12 @@ class BranchManager:
 
         conn = _db_connect(self.registry_db)
         try:
+            previous_row = conn.execute(
+                "SELECT commit_id FROM branches WHERE name = ?",
+                (branch,),
+            ).fetchone()
+            previous_commit = previous_row[0] if previous_row else None
+
             # 检查该 commit 是否已有完整 KB。非 force 直接复用；force 时复用同一 kb_dir 做原子替换，避免 orphan chain。
             kb_store_dir = self._get_kb_store(conn)
             existing = conn.execute(
@@ -469,11 +559,31 @@ class BranchManager:
                 except Exception:
                     conn.execute("ROLLBACK")
                     raise
+
+                prune_result = {
+                    "pruned": False,
+                    "reason": "not_required",
+                }
+                if prune_old and previous_commit and previous_commit != commit_id:
+                    try:
+                        prune_result = self._prune_version_if_unreferenced(
+                            conn, previous_commit, kb_store_dir
+                        )
+                    except Exception as e:
+                        prune_result = {
+                            "pruned": False,
+                            "commit": self._short_commit(previous_commit),
+                            "reason": "prune_failed",
+                            "warning": str(e),
+                        }
+
                 return {
                     "status": "ok",
                     "message": f"KB 已是最新 ({commit_id[:7]})，仅更新分支指针",
                     "commit": commit_id[:7],
                     "reused": True,
+                    "previous_commit": self._short_commit(previous_commit),
+                    "pruned_old_version": prune_result,
                 }
 
             # 查找插件根目录
@@ -577,6 +687,23 @@ class BranchManager:
                 conn.execute("ROLLBACK")
                 raise
 
+            prune_result = {
+                "pruned": False,
+                "reason": "not_required",
+            }
+            if prune_old and previous_commit and previous_commit != commit_id:
+                try:
+                    prune_result = self._prune_version_if_unreferenced(
+                        conn, previous_commit, kb_store_dir
+                    )
+                except Exception as e:
+                    prune_result = {
+                        "pruned": False,
+                        "commit": self._short_commit(previous_commit),
+                        "reason": "prune_failed",
+                        "warning": str(e),
+                    }
+
             return {
                 "status": "ok",
                 "message": f"已构建并注册 {branch} ({commit_id[:7]})",
@@ -585,9 +712,180 @@ class BranchManager:
                 "file_count": file_count,
                 "incremental": False,
                 "dirty": is_dirty,
+                "previous_commit": self._short_commit(previous_commit),
+                "pruned_old_version": prune_result,
             }
         finally:
             conn.close()
+
+    def check_updates(self, force: bool = False) -> dict:
+        """检查所有已注册分支是否需要更新（不执行构建）"""
+        return self.update_all(force=force, dry_run=True, prune_old=False)
+
+    def update_all(
+        self,
+        force: bool = False,
+        dry_run: bool = False,
+        prune_old: bool = True,
+    ) -> dict:
+        """
+        基于 registry 中 branch + versions.source_path 批量检查/更新。
+
+        dry_run=True 时仅返回状态，不构建，不写 registry。
+        """
+        if not self.registry_db.exists():
+            return {"error": "Registry 未初始化，请先运行 init"}
+
+        conn = _db_connect(self.registry_db)
+        try:
+            active_row = conn.execute(
+                "SELECT value FROM config WHERE key = 'active_branch'"
+            ).fetchone()
+            active_branch = active_row[0] if active_row else None
+
+            rows = conn.execute(
+                """
+                SELECT b.name, b.commit_id, v.source_path
+                FROM branches b
+                LEFT JOIN versions v ON b.commit_id = v.commit_id
+                ORDER BY b.name
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+        results: List[Dict[str, Any]] = []
+        updated = 0
+        skipped = 0
+        failed = 0
+
+        for branch_name, registry_commit, source_path in rows:
+            item: Dict[str, Any] = {
+                "branch": branch_name,
+                "registry_commit": self._short_commit(registry_commit),
+                "source": source_path,
+                "needs_update": False,
+            }
+
+            if not source_path:
+                item.update(
+                    {
+                        "status": "missing_source",
+                        "reason": "source_path_missing",
+                    }
+                )
+                results.append(item)
+                skipped += 1
+                continue
+
+            source_dir = Path(source_path)
+            if not source_dir.exists():
+                item.update(
+                    {
+                        "status": "missing_source",
+                        "reason": "source_path_not_found",
+                    }
+                )
+                results.append(item)
+                skipped += 1
+                continue
+
+            try:
+                vcs = VCSAdapter.detect(source_path)
+                current_commit = vcs.get_head_id()
+                dirty = vcs.is_dirty()
+            except Exception as e:
+                item.update(
+                    {
+                        "status": "error",
+                        "reason": str(e),
+                    }
+                )
+                results.append(item)
+                failed += 1
+                continue
+
+            if current_commit == "unknown":
+                current_commit = f"unknown_{int(time.time())}"
+
+            needs_update = current_commit != registry_commit
+            item.update(
+                {
+                    "current_commit": self._short_commit(current_commit),
+                    "dirty": dirty,
+                    "needs_update": needs_update,
+                }
+            )
+
+            if dry_run:
+                item["status"] = "stale" if needs_update else "current"
+                results.append(item)
+                continue
+
+            if not force and not needs_update:
+                item.update(
+                    {
+                        "status": "current",
+                        "reason": "already_up_to_date",
+                    }
+                )
+                results.append(item)
+                skipped += 1
+                continue
+
+            update_result = self.update(
+                branch=branch_name,
+                source=source_path,
+                force=force,
+                prune_old=prune_old,
+            )
+            if update_result.get("status") == "ok":
+                item.update(
+                    {
+                        "status": "updated",
+                        "update": update_result,
+                    }
+                )
+                updated += 1
+            else:
+                item.update(
+                    {
+                        "status": "failed",
+                        "reason": update_result.get("error", "unknown_error"),
+                    }
+                )
+                failed += 1
+            results.append(item)
+
+        # 批量更新可能会把 active_branch 改为最后一个更新分支，结束后恢复为调用前状态。
+        if not dry_run and active_branch:
+            conn = _db_connect(self.registry_db)
+            try:
+                exists = conn.execute(
+                    "SELECT 1 FROM branches WHERE name = ?",
+                    (active_branch,),
+                ).fetchone()
+                if exists:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO config VALUES ('active_branch', ?)",
+                        (active_branch,),
+                    )
+                    conn.commit()
+            finally:
+                conn.close()
+
+        summary = {
+            "status": "ok",
+            "dry_run": dry_run,
+            "total": len(rows),
+            "updated": updated,
+            "skipped": skipped,
+            "failed": failed,
+            "results": results,
+        }
+        if dry_run:
+            summary["checked"] = len(rows)
+        return summary
 
     def status(self) -> dict:
         """查看所有分支状态"""

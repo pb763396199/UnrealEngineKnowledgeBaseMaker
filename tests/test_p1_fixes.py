@@ -976,3 +976,312 @@ class TestImplTemplateSourceRootText:
         assert "os.path.exists(impl_file)" not in content, \
             "impl.plugin.py.template get_function_implementation 不应再直接用 os.path.exists(impl_file)"
 
+
+# ---------------------------------------------------------------------------
+# 测试 i: BranchManager update prune + update_all
+# ---------------------------------------------------------------------------
+
+class TestBranchManagerUpdatePruneAndUpdateAll:
+
+    def _insert_version_and_branch(
+        self,
+        registry_db: Path,
+        variants_dir: Path,
+        branch: str,
+        commit_id: str,
+        source_path: Optional[str],
+        kb_dir: Optional[str] = None,
+    ) -> str:
+        if kb_dir is None:
+            kb_dir = commit_id[:7]
+        kb_path = variants_dir / kb_dir
+        kb_path.mkdir(parents=True, exist_ok=True)
+        (kb_path / "dummy.txt").write_text(f"{branch}-{commit_id}", encoding="utf-8")
+
+        conn = sqlite3.connect(str(registry_db))
+        conn.execute(
+            "INSERT OR REPLACE INTO versions (commit_id, kb_dir, build_status, source_path) VALUES (?, ?, 'complete', ?)",
+            (commit_id, kb_dir, source_path),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO branches (name, commit_id, status, vcs_type, updated_at) VALUES (?, ?, 'active', 'git', datetime('now'))",
+            (branch, commit_id),
+        )
+        conn.commit()
+        conn.close()
+        return kb_dir
+
+    def test_update_new_commit_prunes_previous_branch_version(self, tmp_path):
+        """同 branch 更新到新 commit 且旧 commit 无引用时，清理旧 version 与目录"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_prune"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        old_commit = "1111111abcdef00"
+        new_commit = "2222222abcdef00"
+        old_kb_dir = self._insert_version_and_branch(
+            registry_db,
+            variants_dir,
+            "DEV",
+            old_commit,
+            source_path=str(tmp_path / "plugin_src"),
+            kb_dir="oldkb01",
+        )
+
+        source_dir = tmp_path / "plugin_src"
+        source_dir.mkdir(parents=True)
+        (source_dir / "MyPlugin.uplugin").write_text("{}", encoding="utf-8")
+
+        mock_vcs = mock.MagicMock()
+        mock_vcs.get_head_id.return_value = new_commit
+        mock_vcs.get_type.return_value = "git"
+        mock_vcs.is_dirty.return_value = False
+
+        def fake_build(plugin_root, kb_output, incremental=False):
+            Path(kb_output).mkdir(parents=True, exist_ok=True)
+            (Path(kb_output) / "new.txt").write_text("new", encoding="utf-8")
+            return {"status": "ok"}
+
+        mgr = BranchManager(skill_dir)
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", return_value=mock_vcs), \
+             mock.patch.object(BranchManager, "_build_kb", side_effect=fake_build):
+            result = mgr.update("DEV", str(source_dir), force=False)
+
+        assert result.get("status") == "ok", result
+        assert result.get("previous_commit") == old_commit[:7]
+        assert result.get("pruned_old_version", {}).get("pruned") is True
+
+        conn = sqlite3.connect(str(registry_db))
+        dev_row = conn.execute("SELECT commit_id FROM branches WHERE name='DEV'").fetchone()
+        old_version = conn.execute("SELECT kb_dir FROM versions WHERE commit_id=?", (old_commit,)).fetchone()
+        new_version = conn.execute("SELECT kb_dir FROM versions WHERE commit_id=?", (new_commit,)).fetchone()
+        conn.close()
+
+        assert dev_row == (new_commit,)
+        assert old_version is None
+        assert new_version is not None
+        assert not (variants_dir / old_kb_dir).exists()
+
+    def test_update_new_commit_keeps_previous_when_referenced_by_other_branch(self, tmp_path):
+        """旧 commit 被其他 branch 引用时，更新后不得删除旧 version/目录"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_keep"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        old_commit = "3333333abcdef00"
+        new_commit = "4444444abcdef00"
+        old_kb_dir = self._insert_version_and_branch(
+            registry_db,
+            variants_dir,
+            "DEV",
+            old_commit,
+            source_path=str(tmp_path / "plugin_src2"),
+            kb_dir="shared01",
+        )
+        self._insert_version_and_branch(
+            registry_db,
+            variants_dir,
+            "OTHER",
+            old_commit,
+            source_path=str(tmp_path / "plugin_src2"),
+            kb_dir=old_kb_dir,
+        )
+
+        source_dir = tmp_path / "plugin_src2"
+        source_dir.mkdir(parents=True)
+        (source_dir / "MyPlugin.uplugin").write_text("{}", encoding="utf-8")
+
+        mock_vcs = mock.MagicMock()
+        mock_vcs.get_head_id.return_value = new_commit
+        mock_vcs.get_type.return_value = "git"
+        mock_vcs.is_dirty.return_value = False
+
+        def fake_build(plugin_root, kb_output, incremental=False):
+            Path(kb_output).mkdir(parents=True, exist_ok=True)
+            (Path(kb_output) / "new.txt").write_text("new", encoding="utf-8")
+            return {"status": "ok"}
+
+        mgr = BranchManager(skill_dir)
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", return_value=mock_vcs), \
+             mock.patch.object(BranchManager, "_build_kb", side_effect=fake_build):
+            result = mgr.update("DEV", str(source_dir), force=False)
+
+        assert result.get("status") == "ok", result
+        assert result.get("pruned_old_version", {}).get("pruned") is False
+        assert result.get("pruned_old_version", {}).get("reason") == "still_referenced"
+
+        conn = sqlite3.connect(str(registry_db))
+        old_version = conn.execute("SELECT kb_dir FROM versions WHERE commit_id=?", (old_commit,)).fetchone()
+        other_row = conn.execute("SELECT commit_id FROM branches WHERE name='OTHER'").fetchone()
+        conn.close()
+
+        assert old_version == (old_kb_dir,)
+        assert other_row == (old_commit,)
+        assert (variants_dir / old_kb_dir).exists()
+
+    def test_update_all_dry_run_reports_stale_branch(self, tmp_path):
+        """dry_run 时，registry commit 与源码 commit 不同应标记为 stale"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_dryrun"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        source_dir = tmp_path / "plugin_src3"
+        source_dir.mkdir(parents=True)
+        self._insert_version_and_branch(
+            registry_db,
+            variants_dir,
+            "DEV",
+            "5555555abcdef00",
+            source_path=str(source_dir),
+            kb_dir="dryrun1",
+        )
+
+        mock_vcs = mock.MagicMock()
+        mock_vcs.get_head_id.return_value = "6666666abcdef00"
+        mock_vcs.is_dirty.return_value = False
+
+        mgr = BranchManager(skill_dir)
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", return_value=mock_vcs):
+            result = mgr.update_all(dry_run=True)
+
+        assert result.get("status") == "ok", result
+        row = next(r for r in result["results"] if r["branch"] == "DEV")
+        assert row["status"] == "stale"
+        assert row["needs_update"] is True
+
+    def test_update_all_preserves_active_branch(self, tmp_path):
+        """批量更新多个分支后，应恢复调用前的 active_branch"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_preserve_active"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        source_a = tmp_path / "plugin_a"
+        source_b = tmp_path / "plugin_b"
+        source_a.mkdir(parents=True)
+        source_b.mkdir(parents=True)
+        (source_a / "MyPlugin.uplugin").write_text("{}", encoding="utf-8")
+        (source_b / "MyPlugin.uplugin").write_text("{}", encoding="utf-8")
+
+        old_a = "aaaaaaa11111111"
+        old_b = "bbbbbbb11111111"
+        new_a = "aaaaaaa22222222"
+        new_b = "bbbbbbb22222222"
+
+        self._insert_version_and_branch(
+            registry_db,
+            variants_dir,
+            "BRANCH_A",
+            old_a,
+            source_path=str(source_a),
+            kb_dir="a_old",
+        )
+        self._insert_version_and_branch(
+            registry_db,
+            variants_dir,
+            "BRANCH_Z",
+            old_b,
+            source_path=str(source_b),
+            kb_dir="z_old",
+        )
+
+        # 预设 active 分支为 BRANCH_A（更新后应恢复）
+        conn = sqlite3.connect(str(registry_db))
+        conn.execute(
+            "INSERT OR REPLACE INTO config VALUES ('active_branch', 'BRANCH_A')"
+        )
+        conn.commit()
+        conn.close()
+
+        def fake_build(plugin_root, kb_output, incremental=False):
+            Path(kb_output).mkdir(parents=True, exist_ok=True)
+            (Path(kb_output) / "new.txt").write_text("new", encoding="utf-8")
+            return {"status": "ok"}
+
+        def detect_side_effect(source_path):
+            obj = mock.MagicMock()
+            if str(source_path) == str(source_a):
+                obj.get_head_id.return_value = new_a
+            elif str(source_path) == str(source_b):
+                obj.get_head_id.return_value = new_b
+            else:
+                obj.get_head_id.return_value = "unknown"
+            obj.get_type.return_value = "git"
+            obj.is_dirty.return_value = False
+            return obj
+
+        mgr = BranchManager(skill_dir)
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", side_effect=detect_side_effect), \
+             mock.patch.object(BranchManager, "_build_kb", side_effect=fake_build):
+            result = mgr.update_all(dry_run=False, force=False)
+
+        assert result.get("status") == "ok", result
+        assert result.get("updated") == 2, result
+
+        conn = sqlite3.connect(str(registry_db))
+        active = conn.execute(
+            "SELECT value FROM config WHERE key='active_branch'"
+        ).fetchone()
+        conn.close()
+
+        assert active == ("BRANCH_A",), \
+            f"update_all 后 active_branch 应恢复为 BRANCH_A，实际: {active}"
+
+    def test_update_all_skips_missing_source_path(self, tmp_path):
+        """source_path 缺失/不存在时应跳过并返回原因"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_missing_src"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        self._insert_version_and_branch(
+            registry_db,
+            variants_dir,
+            "NO_SRC",
+            "7777777abcdef00",
+            source_path=None,
+            kb_dir="nosrc01",
+        )
+        self._insert_version_and_branch(
+            registry_db,
+            variants_dir,
+            "BAD_SRC",
+            "8888888abcdef00",
+            source_path=str(tmp_path / "does_not_exist"),
+            kb_dir="badsrc1",
+        )
+
+        mgr = BranchManager(skill_dir)
+        result = mgr.update_all(dry_run=True)
+
+        assert result.get("status") == "ok", result
+        no_src = next(r for r in result["results"] if r["branch"] == "NO_SRC")
+        bad_src = next(r for r in result["results"] if r["branch"] == "BAD_SRC")
+        assert no_src["status"] == "missing_source"
+        assert no_src["reason"] == "source_path_missing"
+        assert bad_src["status"] == "missing_source"
+        assert bad_src["reason"] == "source_path_not_found"
+
