@@ -1317,3 +1317,240 @@ class TestBranchManagerUpdatePruneAndUpdateAll:
         assert bad_src["status"] == "missing_source"
         assert bad_src["reason"] == "source_path_not_found"
 
+    def test_update_all_dry_run_same_commit_fingerprint_changed_is_stale(self, tmp_path):
+        """dry_run 时，同 commit 但 dirty fingerprint 不同应标记 stale"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_dirty_dryrun"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        mgr = BranchManager(skill_dir)
+        mgr._init_registry()
+
+        source_dir = tmp_path / "plugin_dirty"
+        source_dir.mkdir(parents=True)
+        commit_id = "9999999abcdef00"
+        kb_dir = "dirty01"
+        (variants_dir / kb_dir).mkdir()
+
+        conn = sqlite3.connect(str(registry_db))
+        conn.execute(
+            """
+            INSERT INTO versions
+            (commit_id, kb_dir, build_status, source_path, dirty, worktree_fingerprint)
+            VALUES (?, ?, 'complete', ?, 1, ?)
+            """,
+            (commit_id, kb_dir, str(source_dir), "oldfingerprint"),
+        )
+        conn.execute(
+            "INSERT INTO branches (name, commit_id, status, vcs_type) VALUES ('DEV', ?, 'active', 'git')",
+            (commit_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_vcs = mock.MagicMock()
+        mock_vcs.get_head_id.return_value = commit_id
+        mock_vcs.is_dirty.return_value = True
+        mock_vcs.get_worktree_fingerprint.return_value = "newfingerprint"
+
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", return_value=mock_vcs):
+            result = mgr.update_all(dry_run=True)
+
+        row = next(r for r in result["results"] if r["branch"] == "DEV")
+        assert row["status"] == "stale"
+        assert row["needs_update"] is True
+        assert row["reason"] == "fingerprint_changed"
+        assert row["registry_dirty"] is True
+        assert row["current_dirty"] is True
+        assert row["registry_fingerprint"] == "oldfingerpri"
+        assert row["current_fingerprint"] == "newfingerpri"
+
+    def test_update_same_commit_dirty_fingerprint_change_rebuilds(self, tmp_path):
+        """同 commit dirty fingerprint 变化时不得复用旧 KB，应构建并更新 registry"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_dirty_update"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        mgr = BranchManager(skill_dir)
+        mgr._init_registry()
+
+        source_dir = tmp_path / "plugin_dirty_update"
+        source_dir.mkdir(parents=True)
+        (source_dir / "MyPlugin.uplugin").write_text("{}", encoding="utf-8")
+
+        commit_id = "aaaa9999abcdef0"
+        kb_dir = "dirtykb"
+        old_kb = variants_dir / kb_dir
+        old_kb.mkdir()
+        (old_kb / "old.txt").write_text("old", encoding="utf-8")
+
+        conn = sqlite3.connect(str(registry_db))
+        conn.execute(
+            """
+            INSERT INTO versions
+            (commit_id, kb_dir, build_status, source_path, dirty, worktree_fingerprint)
+            VALUES (?, ?, 'complete', ?, 1, ?)
+            """,
+            (commit_id, kb_dir, str(source_dir), "oldfingerprint"),
+        )
+        conn.execute(
+            "INSERT INTO branches (name, commit_id, status, vcs_type) VALUES ('DEV', ?, 'active', 'git')",
+            (commit_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_vcs = mock.MagicMock()
+        mock_vcs.get_head_id.return_value = commit_id
+        mock_vcs.get_type.return_value = "git"
+        mock_vcs.is_dirty.return_value = True
+        mock_vcs.get_worktree_fingerprint.return_value = "newfingerprint"
+
+        def fake_build(plugin_root, kb_output, incremental=False):
+            Path(kb_output).mkdir(parents=True, exist_ok=True)
+            (Path(kb_output) / "new.txt").write_text("new", encoding="utf-8")
+            return {"status": "ok"}
+
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", return_value=mock_vcs), \
+             mock.patch.object(BranchManager, "_build_kb", side_effect=fake_build) as build_mock:
+            result = mgr.update("DEV", str(source_dir), force=False)
+
+        assert result.get("status") == "ok", result
+        assert result.get("reused") is not True
+        assert result.get("dirty") is True
+        assert result.get("worktree_fingerprint") == "newfingerpri"
+        assert build_mock.call_count == 1
+
+        conn = sqlite3.connect(str(registry_db))
+        row = conn.execute(
+            "SELECT dirty, worktree_fingerprint, kb_dir FROM versions WHERE commit_id=?",
+            (commit_id,),
+        ).fetchone()
+        conn.close()
+
+        assert row == (1, "newfingerprint", kb_dir)
+        assert (variants_dir / kb_dir / "new.txt").exists()
+        assert not (variants_dir / kb_dir / "old.txt").exists()
+
+    def test_update_resamples_dirty_fingerprint_after_build(self, tmp_path):
+        """实际构建期间 fingerprint 变化时，registry 和返回值应记录构建后的值"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_dirty_resample"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        mgr = BranchManager(skill_dir)
+        mgr._init_registry()
+
+        source_dir = tmp_path / "plugin_dirty_resample"
+        source_dir.mkdir(parents=True)
+        (source_dir / "MyPlugin.uplugin").write_text("{}", encoding="utf-8")
+
+        commit_id = "cccc9999abcdef0"
+        kb_dir = "resamp1"
+        old_kb = variants_dir / kb_dir
+        old_kb.mkdir()
+        (old_kb / "old.txt").write_text("old", encoding="utf-8")
+
+        conn = sqlite3.connect(str(registry_db))
+        conn.execute(
+            """
+            INSERT INTO versions
+            (commit_id, kb_dir, build_status, source_path, dirty, worktree_fingerprint)
+            VALUES (?, ?, 'complete', ?, 1, ?)
+            """,
+            (commit_id, kb_dir, str(source_dir), "oldfingerprint"),
+        )
+        conn.execute(
+            "INSERT INTO branches (name, commit_id, status, vcs_type) VALUES ('DEV', ?, 'active', 'git')",
+            (commit_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_vcs = mock.MagicMock()
+        mock_vcs.get_head_id.return_value = commit_id
+        mock_vcs.get_type.return_value = "git"
+        mock_vcs.is_dirty.return_value = True
+        mock_vcs.get_worktree_fingerprint.return_value = "oldfingerprint"
+
+        def fake_build(plugin_root, kb_output, incremental=False):
+            Path(kb_output).mkdir(parents=True, exist_ok=True)
+            (Path(kb_output) / "new.txt").write_text("new", encoding="utf-8")
+            mock_vcs.get_worktree_fingerprint.return_value = "newfingerprint"
+            return {"status": "ok"}
+
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", return_value=mock_vcs), \
+             mock.patch.object(BranchManager, "_build_kb", side_effect=fake_build):
+            result = mgr.update("DEV", str(source_dir), force=True)
+
+        assert result.get("status") == "ok", result
+        assert result.get("dirty") is True
+        assert result.get("worktree_fingerprint") == "newfingerpri"
+        assert result.get("source_changed_during_build") is True
+
+        conn = sqlite3.connect(str(registry_db))
+        row = conn.execute(
+            "SELECT dirty, worktree_fingerprint, kb_dir FROM versions WHERE commit_id=?",
+            (commit_id,),
+        ).fetchone()
+        conn.close()
+
+        assert row == (1, "newfingerprint", kb_dir)
+        assert (variants_dir / kb_dir / "new.txt").exists()
+        assert not (variants_dir / kb_dir / "old.txt").exists()
+
+    def test_status_exposes_dirty_worktree_state(self, tmp_path):
+        """BranchManager.status 应暴露 registry 中记录的 dirty/fingerprint"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_dirty_status"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        mgr = BranchManager(skill_dir)
+        mgr._init_registry()
+
+        commit_id = "bbbb9999abcdef0"
+        kb_dir = "status1"
+        (variants_dir / kb_dir).mkdir()
+
+        conn = sqlite3.connect(str(registry_db))
+        conn.execute(
+            """
+            INSERT INTO versions
+            (commit_id, kb_dir, build_status, source_path, dirty, worktree_fingerprint)
+            VALUES (?, ?, 'complete', ?, 1, ?)
+            """,
+            (commit_id, kb_dir, str(tmp_path / "src"), "statusfingerprint"),
+        )
+        conn.execute(
+            "INSERT INTO branches (name, commit_id, status, vcs_type) VALUES ('DEV', ?, 'active', 'git')",
+            (commit_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        result = mgr.status()
+
+        dev = next(r for r in result["branches"] if r["branch"] == "DEV")
+        assert dev["dirty"] is True
+        assert dev["worktree_fingerprint"] == "statusfinger"
+

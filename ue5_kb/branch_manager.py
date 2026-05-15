@@ -263,15 +263,30 @@ class BranchManager:
                     built_at TEXT,
                     file_count INTEGER DEFAULT 0,
                     build_status TEXT DEFAULT 'building',
-                    source_path TEXT
+                    source_path TEXT,
+                    dirty INTEGER DEFAULT 0,
+                    worktree_fingerprint TEXT
                 );
                 CREATE TABLE IF NOT EXISTS config (
                     key TEXT PRIMARY KEY,
                     value TEXT
                 );
             """)
+            self._migrate_registry_schema(conn)
+            conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_registry_schema(conn: sqlite3.Connection) -> None:
+        """兼容旧 registry.db，补齐 versions 的 dirty worktree 字段"""
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(versions)").fetchall()
+        }
+        if "dirty" not in columns:
+            conn.execute("ALTER TABLE versions ADD COLUMN dirty INTEGER DEFAULT 0")
+        if "worktree_fingerprint" not in columns:
+            conn.execute("ALTER TABLE versions ADD COLUMN worktree_fingerprint TEXT")
 
     def _get_kb_store(self, conn: sqlite3.Connection) -> str:
         """获取 variant 存储目录"""
@@ -286,6 +301,63 @@ class BranchManager:
         if not commit_id:
             return None
         return commit_id[:7]
+
+    @staticmethod
+    def _short_fingerprint(fingerprint: Optional[str]) -> Optional[str]:
+        """截断 worktree fingerprint，避免状态输出过长"""
+        fingerprint = BranchManager._normalize_fingerprint(fingerprint)
+        if not fingerprint:
+            return None
+        return fingerprint[:12]
+
+    @staticmethod
+    def _normalize_dirty(value: Any) -> bool:
+        """SQLite/Mock 返回值统一转为 bool"""
+        return bool(int(value or 0))
+
+    @staticmethod
+    def _normalize_fingerprint(fingerprint: Any) -> Optional[str]:
+        """仅接受真实字符串 fingerprint，Mock/空值按 None 处理"""
+        return fingerprint if isinstance(fingerprint, str) and fingerprint else None
+
+    @staticmethod
+    def _normalize_current_dirty(value: Any) -> bool:
+        """VCSAdapter.is_dirty 正常返回 bool；未配置 Mock 按 clean 处理"""
+        return value if isinstance(value, bool) else False
+
+    @classmethod
+    def _worktree_matches(
+        cls,
+        registry_dirty: Any,
+        registry_fingerprint: Optional[str],
+        current_dirty: bool,
+        current_fingerprint: Optional[str],
+    ) -> bool:
+        """commit 相同时，仅 dirty 状态和 fingerprint 都一致才可复用"""
+        return (
+            cls._normalize_dirty(registry_dirty) == bool(current_dirty)
+            and cls._normalize_fingerprint(registry_fingerprint)
+            == cls._normalize_fingerprint(current_fingerprint)
+        )
+
+    @classmethod
+    def _stale_reason(
+        cls,
+        registry_commit: Optional[str],
+        current_commit: Optional[str],
+        registry_dirty: Any,
+        current_dirty: bool,
+        registry_fingerprint: Optional[str],
+        current_fingerprint: Optional[str],
+    ) -> Optional[str]:
+        """返回导致 registry stale 的首个明确原因"""
+        if current_commit != registry_commit:
+            return "commit_changed"
+        if cls._normalize_dirty(registry_dirty) != bool(current_dirty):
+            return "dirty_changed"
+        if cls._normalize_fingerprint(registry_fingerprint) != cls._normalize_fingerprint(current_fingerprint):
+            return "fingerprint_changed"
+        return None
 
     def _prune_version_if_unreferenced(
         self,
@@ -391,13 +463,14 @@ class BranchManager:
         vcs = VCSAdapter.detect(source)
         commit_id = vcs.get_head_id()
         vcs_type = vcs.get_type()
+        is_dirty = self._normalize_current_dirty(vcs.is_dirty())
+        worktree_fingerprint = self._normalize_fingerprint(vcs.get_worktree_fingerprint())
 
         # 非 git 仓库 commit_id="unknown" 会导致 PK 碰撞，附加时间戳
         if commit_id == "unknown":
             commit_id = f"unknown_{int(time.time())}"
 
-        if not self.registry_db.exists():
-            self._init_registry()
+        self._init_registry()
 
         # 确定 KB 源目录
         source_path = Path(source)
@@ -420,12 +493,19 @@ class BranchManager:
 
             # P0.3: 同 commit 复用检查 — 若已有完整 KB 且目录存在，仅更新分支指针
             existing = conn.execute(
-                "SELECT kb_dir FROM versions WHERE commit_id = ? AND build_status = 'complete'",
+                """
+                SELECT kb_dir, dirty, worktree_fingerprint
+                FROM versions
+                WHERE commit_id = ? AND build_status = 'complete'
+                """,
                 (commit_id,),
             ).fetchone()
-            if existing:
-                existing_path = Path(kb_store_dir) / existing[0]
-                if existing_path.exists():
+            existing_kb_dir = existing[0] if existing else None
+            existing_kb_path = Path(kb_store_dir) / existing_kb_dir if existing_kb_dir else None
+            if existing and self._worktree_matches(
+                existing[1], existing[2], is_dirty, worktree_fingerprint
+            ):
+                if existing_kb_path and existing_kb_path.exists():
                     try:
                         conn.execute("BEGIN IMMEDIATE")
                         conn.execute(
@@ -450,10 +530,16 @@ class BranchManager:
                         "branch": branch,
                         "commit": commit_id[:7],
                         "reused": True,
+                        "dirty": is_dirty,
+                        "worktree_fingerprint": self._short_fingerprint(worktree_fingerprint),
                     }
                 # 目录缺失 → 按新导入处理，继续走下方逻辑
 
-            kb_dir = self._unique_kb_dir(commit_id, kb_store_dir)
+            kb_dir = (
+                existing_kb_dir
+                if existing_kb_path is not None and existing_kb_path.exists()
+                else self._unique_kb_dir(commit_id, kb_store_dir)
+            )
             if kb_dir is None:
                 return {"error": f"Hash 碰撞无法解决: {commit_id}"}
 
@@ -468,10 +554,10 @@ class BranchManager:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO versions
-                    (commit_id, kb_dir, built_at, file_count, build_status, source_path)
-                    VALUES (?, ?, datetime('now'), ?, 'complete', ?)
+                    (commit_id, kb_dir, built_at, file_count, build_status, source_path, dirty, worktree_fingerprint)
+                    VALUES (?, ?, datetime('now'), ?, 'complete', ?, ?, ?)
                     """,
-                    (commit_id, kb_dir, file_count, str(source_path)),
+                    (commit_id, kb_dir, file_count, str(source_path), int(is_dirty), worktree_fingerprint),
                 )
                 conn.execute(
                     """
@@ -497,6 +583,8 @@ class BranchManager:
                 "branch": branch,
                 "commit": commit_id[:7],
                 "files": file_count,
+                "dirty": is_dirty,
+                "worktree_fingerprint": self._short_fingerprint(worktree_fingerprint),
             }
         finally:
             conn.close()
@@ -514,14 +602,14 @@ class BranchManager:
         vcs = VCSAdapter.detect(str(source_path))
         commit_id = vcs.get_head_id()
         vcs_type = vcs.get_type()
-        is_dirty = vcs.is_dirty()
+        is_dirty = self._normalize_current_dirty(vcs.is_dirty())
+        worktree_fingerprint = self._normalize_fingerprint(vcs.get_worktree_fingerprint())
 
         # 非 git 仓库 commit_id="unknown" 会导致 PK 碰撞，附加时间戳
         if commit_id == "unknown":
             commit_id = f"unknown_{int(time.time())}"
 
-        if not self.registry_db.exists():
-            self._init_registry()
+        self._init_registry()
 
         conn = _db_connect(self.registry_db)
         try:
@@ -534,12 +622,20 @@ class BranchManager:
             # 检查该 commit 是否已有完整 KB。非 force 直接复用；force 时复用同一 kb_dir 做原子替换，避免 orphan chain。
             kb_store_dir = self._get_kb_store(conn)
             existing = conn.execute(
-                "SELECT kb_dir FROM versions WHERE commit_id = ? AND build_status = 'complete'",
+                """
+                SELECT kb_dir, dirty, worktree_fingerprint
+                FROM versions
+                WHERE commit_id = ? AND build_status = 'complete'
+                """,
                 (commit_id,),
             ).fetchone()
             existing_kb_dir = existing[0] if existing else None
             existing_kb_path = Path(kb_store_dir) / existing_kb_dir if existing_kb_dir else None
-            if existing_kb_path is not None and existing_kb_path.exists() and not force:
+            existing_matches = bool(
+                existing
+                and self._worktree_matches(existing[1], existing[2], is_dirty, worktree_fingerprint)
+            )
+            if existing_kb_path is not None and existing_kb_path.exists() and existing_matches and not force:
                 # 仅更新分支指针
                 try:
                     conn.execute("BEGIN IMMEDIATE")
@@ -582,6 +678,9 @@ class BranchManager:
                     "message": f"KB 已是最新 ({commit_id[:7]})，仅更新分支指针",
                     "commit": commit_id[:7],
                     "reused": True,
+                    "dirty": is_dirty,
+                    "worktree_fingerprint": self._short_fingerprint(worktree_fingerprint),
+                    "source_changed_during_build": False,
                     "previous_commit": self._short_commit(previous_commit),
                     "pruned_old_version": prune_result,
                 }
@@ -656,6 +755,14 @@ class BranchManager:
                     shutil.rmtree(str(kb_build_dir))
                 return {"error": f"导入失败: {e}"}
 
+            final_vcs = VCSAdapter.detect(str(source_path))
+            final_is_dirty = self._normalize_current_dirty(final_vcs.is_dirty())
+            final_worktree_fingerprint = self._normalize_fingerprint(final_vcs.get_worktree_fingerprint())
+            source_changed_during_build = (
+                final_is_dirty != is_dirty
+                or final_worktree_fingerprint != worktree_fingerprint
+            )
+
             file_count = sum(1 for _ in final_dir.rglob("*") if _.is_file())
 
             # P0-3: 事务保护
@@ -664,10 +771,17 @@ class BranchManager:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO versions
-                    (commit_id, kb_dir, built_at, file_count, build_status, source_path)
-                    VALUES (?, ?, datetime('now'), ?, 'complete', ?)
+                    (commit_id, kb_dir, built_at, file_count, build_status, source_path, dirty, worktree_fingerprint)
+                    VALUES (?, ?, datetime('now'), ?, 'complete', ?, ?, ?)
                     """,
-                    (commit_id, kb_dir, file_count, str(source_path)),
+                    (
+                        commit_id,
+                        kb_dir,
+                        file_count,
+                        str(source_path),
+                        int(final_is_dirty),
+                        final_worktree_fingerprint,
+                    ),
                 )
                 conn.execute(
                     """
@@ -711,7 +825,9 @@ class BranchManager:
                 "kb_dir": kb_dir,
                 "file_count": file_count,
                 "incremental": False,
-                "dirty": is_dirty,
+                "dirty": final_is_dirty,
+                "worktree_fingerprint": self._short_fingerprint(final_worktree_fingerprint),
+                "source_changed_during_build": source_changed_during_build,
                 "previous_commit": self._short_commit(previous_commit),
                 "pruned_old_version": prune_result,
             }
@@ -736,6 +852,8 @@ class BranchManager:
         if not self.registry_db.exists():
             return {"error": "Registry 未初始化，请先运行 init"}
 
+        self._init_registry()
+
         conn = _db_connect(self.registry_db)
         try:
             active_row = conn.execute(
@@ -745,7 +863,7 @@ class BranchManager:
 
             rows = conn.execute(
                 """
-                SELECT b.name, b.commit_id, v.source_path
+                SELECT b.name, b.commit_id, v.source_path, v.dirty, v.worktree_fingerprint
                 FROM branches b
                 LEFT JOIN versions v ON b.commit_id = v.commit_id
                 ORDER BY b.name
@@ -759,10 +877,12 @@ class BranchManager:
         skipped = 0
         failed = 0
 
-        for branch_name, registry_commit, source_path in rows:
+        for branch_name, registry_commit, source_path, registry_dirty, registry_fingerprint in rows:
             item: Dict[str, Any] = {
                 "branch": branch_name,
                 "registry_commit": self._short_commit(registry_commit),
+                "registry_dirty": self._normalize_dirty(registry_dirty),
+                "registry_fingerprint": self._short_fingerprint(registry_fingerprint),
                 "source": source_path,
                 "needs_update": False,
             }
@@ -793,7 +913,8 @@ class BranchManager:
             try:
                 vcs = VCSAdapter.detect(source_path)
                 current_commit = vcs.get_head_id()
-                dirty = vcs.is_dirty()
+                current_dirty = self._normalize_current_dirty(vcs.is_dirty())
+                current_fingerprint = self._normalize_fingerprint(vcs.get_worktree_fingerprint())
             except Exception as e:
                 item.update(
                     {
@@ -808,14 +929,26 @@ class BranchManager:
             if current_commit == "unknown":
                 current_commit = f"unknown_{int(time.time())}"
 
-            needs_update = current_commit != registry_commit
+            reason = self._stale_reason(
+                registry_commit,
+                current_commit,
+                registry_dirty,
+                current_dirty,
+                registry_fingerprint,
+                current_fingerprint,
+            )
+            needs_update = reason is not None
             item.update(
                 {
                     "current_commit": self._short_commit(current_commit),
-                    "dirty": dirty,
+                    "current_dirty": current_dirty,
+                    "current_fingerprint": self._short_fingerprint(current_fingerprint),
+                    "dirty": current_dirty,
                     "needs_update": needs_update,
                 }
             )
+            if reason:
+                item["reason"] = reason
 
             if dry_run:
                 item["status"] = "stale" if needs_update else "current"
@@ -892,6 +1025,8 @@ class BranchManager:
         if not self.registry_db.exists():
             return {"error": "Registry 未初始化，请先运行 init"}
 
+        self._init_registry()
+
         conn = _db_connect(self.registry_db)
         try:
             active = conn.execute(
@@ -902,7 +1037,8 @@ class BranchManager:
             rows = conn.execute(
                 """
                 SELECT b.name, b.commit_id, b.status, b.vcs_type,
-                       v.built_at, v.file_count, v.build_status, v.source_path
+                      v.built_at, v.file_count, v.build_status, v.source_path,
+                      v.dirty, v.worktree_fingerprint
                 FROM branches b
                 LEFT JOIN versions v ON b.commit_id = v.commit_id
                 ORDER BY b.updated_at DESC
@@ -921,6 +1057,8 @@ class BranchManager:
                         "files": r[5],
                         "build_ok": r[6] == "complete",
                         "source": r[7],
+                        "dirty": self._normalize_dirty(r[8]),
+                        "worktree_fingerprint": self._short_fingerprint(r[9]),
                         "active": r[0] == active_branch,
                     }
                 )
@@ -955,7 +1093,8 @@ class BranchManager:
         """检查 KB 相对于源码的新鲜度"""
         vcs = VCSAdapter.detect(source)
         current_commit = vcs.get_head_id()
-        is_dirty = vcs.is_dirty()
+        is_dirty = self._normalize_current_dirty(vcs.is_dirty())
+        current_fingerprint = self._normalize_fingerprint(vcs.get_worktree_fingerprint())
 
         if not self.registry_db.exists():
             return {
@@ -963,6 +1102,8 @@ class BranchManager:
                 "reason": "Registry 未初始化",
                 "current_commit": current_commit[:7],
             }
+
+        self._init_registry()
 
         conn = _db_connect(self.registry_db)
         try:
@@ -987,13 +1128,29 @@ class BranchManager:
                 }
 
             kb_commit = row[0]
-            fresh = kb_commit == current_commit and not is_dirty
+            version = conn.execute(
+                "SELECT dirty, worktree_fingerprint FROM versions WHERE commit_id = ?",
+                (kb_commit,),
+            ).fetchone()
+            registry_dirty = version[0] if version else 0
+            registry_fingerprint = version[1] if version else None
+            fresh = self._stale_reason(
+                kb_commit,
+                current_commit,
+                registry_dirty,
+                is_dirty,
+                registry_fingerprint,
+                current_fingerprint,
+            ) is None
 
             return {
                 "fresh": fresh,
                 "kb_commit": kb_commit[:7],
                 "current_commit": current_commit[:7],
                 "dirty": is_dirty,
+                "registry_dirty": self._normalize_dirty(registry_dirty),
+                "worktree_fingerprint": self._short_fingerprint(current_fingerprint),
+                "registry_fingerprint": self._short_fingerprint(registry_fingerprint),
                 "branch": active[0],
             }
         finally:

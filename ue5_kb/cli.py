@@ -581,6 +581,7 @@ def branch_update_all(skill_path, force, check, keep_old):
     table.add_column('Branch', style='cyan')
     table.add_column('Registry', style='yellow')
     table.add_column('Current', style='yellow')
+    table.add_column('Worktree')
     table.add_column('Status')
     table.add_column('Reason', style='dim')
 
@@ -600,10 +601,19 @@ def branch_update_all(skill_path, force, check, keep_old):
             status_text = status
 
         reason = item.get('reason', '')
+        current_dirty = item.get('current_dirty', item.get('dirty'))
+        registry_dirty = item.get('registry_dirty')
+        if current_dirty is None:
+            worktree = '-'
+        else:
+            worktree = 'dirty' if current_dirty else 'clean'
+            if registry_dirty is not None and bool(registry_dirty) != bool(current_dirty):
+                worktree = f"{('dirty' if registry_dirty else 'clean')}->{worktree}"
         table.add_row(
             str(item.get('branch', '')),
             str(item.get('registry_commit') or '-'),
             str(item.get('current_commit') or '-'),
+            worktree,
             status_text,
             str(reason),
         )
