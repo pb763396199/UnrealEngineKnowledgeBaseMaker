@@ -37,14 +37,24 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 
 ### 查询步骤
 
-1. **使用 Bash 工具执行 impl.py 脚本:**
+1. **先检查知识库是否过期（必须）:**
+   ```bash
+   python -m ue5_kb.cli branch update-all --check --skill-path "{SKILL_PATH}"
+   ```
+   如果输出中有 `stale`，先执行：
+   ```bash
+   python -m ue5_kb.cli branch update-all --skill-path "{SKILL_PATH}"
+   ```
+   更新完成后再次执行 `--check`，确认目标分支为 `current`。
+
+2. **使用 Bash 工具执行 impl.py 脚本:**
    ```bash
    python "{SKILL_PATH}/impl.py" <command> [args...]
    ```
 
-2. **解析返回的 JSON 结果**
+3. **解析返回的 JSON 结果**
 
-3. **向用户展示结果**
+4. **向用户展示结果**
 
 ### 可用 CLI 命令
 
@@ -87,10 +97,11 @@ python "{SKILL_PATH}/impl.py" get_statistics
 
 ## 使用建议
 
-1. **始终使用 CLI 查询**：不要直接使用 Glob/Grep 搜索源码，知识库查询更快更准确
-2. **优先使用精确查询**：如果知道具体的类名或模块名，使用 `query_class_info` 或 `query_module_dependencies`
-3. **使用搜索功能**：如果只知道关键字，使用 `search_modules`、`search_classes` 或 `search_functions`
-4. **处理错误结果**：如果返回的 JSON 包含 `error` 字段，说明查询失败
+1. **先检查更新**：每次开始使用此技能时，先运行 `branch update-all --check`；发现 `stale` 必须先更新
+2. **始终使用 CLI 查询**：不要直接使用 Glob/Grep 搜索源码，知识库查询更快更准确
+3. **优先使用精确查询**：如果知道具体的类名或模块名，使用 `query_class_info` 或 `query_module_dependencies`
+4. **使用搜索功能**：如果只知道关键字，使用 `search_modules`、`search_classes` 或 `search_functions`
+5. **处理错误结果**：如果返回的 JSON 包含 `error` 字段，说明查询失败
 
 ---
 
@@ -138,7 +149,7 @@ python "{SKILL_PATH}/impl.py" get_statistics
 
 ## 知识库路径
 
-知识库位于: `{KB_PATH}`
+知识库位于: 优先由 `{SKILL_PATH}/registry.db` 动态解析到 `variants/<commit>`；不要依赖旧的固定 `KnowledgeBase` 路径。
 
 Skill 路径: `{SKILL_PATH}`
 

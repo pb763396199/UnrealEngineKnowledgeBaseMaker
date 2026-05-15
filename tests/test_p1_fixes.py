@@ -977,6 +977,38 @@ class TestImplTemplateSourceRootText:
             "impl.plugin.py.template get_function_implementation 不应再直接用 os.path.exists(impl_file)"
 
 
+class TestSkillTemplateAutoUpdateInstructions:
+    """验证生成的 skill 文档会指导 AI 在查询前检查并更新 KB"""
+
+    def _read_engine_skill_template(self) -> str:
+        tpl = Path(__file__).parent.parent / "templates" / "skill.md.template"
+        return tpl.read_text(encoding="utf-8")
+
+    def _read_plugin_skill_template(self) -> str:
+        tpl = Path(__file__).parent.parent / "templates" / "skill.plugin.md.template"
+        return tpl.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("template_reader", [
+        _read_engine_skill_template,
+        _read_plugin_skill_template,
+    ])
+    def test_skill_template_requires_update_check(self, template_reader):
+        content = template_reader(self)
+        assert "branch update-all --check" in content
+        assert "branch update-all --skill-path" in content
+        assert "stale" in content
+        assert "current" in content
+
+    @pytest.mark.parametrize("template_reader", [
+        _read_engine_skill_template,
+        _read_plugin_skill_template,
+    ])
+    def test_skill_template_does_not_present_fixed_kb_path_as_authority(self, template_reader):
+        content = template_reader(self)
+        assert "registry.db" in content
+        assert "variants/<commit>" in content
+
+
 # ---------------------------------------------------------------------------
 # 测试 i: BranchManager update prune + update_all
 # ---------------------------------------------------------------------------
