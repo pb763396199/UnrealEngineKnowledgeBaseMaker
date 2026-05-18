@@ -97,6 +97,8 @@ def cli():
               help='知识库保存路径 (默认: 引擎/插件根目录/KnowledgeBase)')
 @click.option('--skill-path', type=click.Path(),
               help='Skill 保存路径 (默认: ~/.claude/skills/ue5kb-{版本})')
+@click.option('--skill-name', type=str, default=None,
+              help='Skill 名称 (默认: ue5kb-{版本} 或 {插件名}-kb)')
 @click.option('--force', is_flag=True,
               help='强制重新运行所有阶段（忽略已完成的阶段）')
 @click.option('--stage', type=click.Choice(['discover', 'extract', 'analyze', 'build', 'generate']),
@@ -106,7 +108,7 @@ def cli():
 @click.option('--verbose', '-v', is_flag=True,
               help='显示详细输出（用于调试）')
 @click.pass_context
-def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, workers, verbose):
+def init(ctx, engine_path, plugin_path, kb_path, skill_path, skill_name, force, stage, workers, verbose):
     """初始化并生成知识库和 Skill
 
     \b
@@ -214,13 +216,13 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, force, stage, worke
     # 判断模式
     if plugin_path:
         # 插件模式
-        init_plugin_mode(plugin_path, kb_path, skill_path, force, stage, workers, verbose)
+        init_plugin_mode(plugin_path, kb_path, skill_path, skill_name, force, stage, workers, verbose)
     else:
         # 引擎模式
-        init_engine_mode(engine_path, kb_path, skill_path, force, stage, workers, verbose)
+        init_engine_mode(engine_path, kb_path, skill_path, skill_name, force, stage, workers, verbose)
 
 
-def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, workers, verbose=False):
+def init_engine_mode(engine_path_str, kb_path, skill_path, skill_name, force, stage, workers, verbose=False):
     """引擎模式：为整个 UE5 引擎生成知识库（使用 Pipeline 架构）"""
     console.print("\n[bold cyan]模式: 引擎知识库生成[/bold cyan]\n")
 
@@ -273,11 +275,11 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, workers
         if stage:
             # 仅运行指定阶段
             console.print(f"运行阶段: [cyan]{stage}[/cyan]\n")
-            result = coordinator.run_stage(stage, force=force, parallel=workers, verbose=verbose)
+            result = coordinator.run_stage(stage, force=force, parallel=workers, verbose=verbose, skill_name=skill_name)
             results = {stage: result}
         else:
             # 运行完整 Pipeline
-            results = coordinator.run_all(force=force, parallel=workers, verbose=verbose)
+            results = coordinator.run_all(force=force, parallel=workers, verbose=verbose, skill_name=skill_name)
 
         # 6. 显示结果
         display_pipeline_results(results)
@@ -314,7 +316,7 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, force, stage, workers
         return
 
 
-def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, workers, verbose=False):
+def init_plugin_mode(plugin_path_str, kb_path, skill_path, skill_name, force, stage, workers, verbose=False):
     """插件模式：为单个插件生成知识库（使用 Pipeline 架构）"""
     console.print("\n[bold cyan]模式: 插件知识库生成[/bold cyan]\n")
 
@@ -368,10 +370,10 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, force, stage, workers
 
         if stage:
             console.print(f"运行阶段: [cyan]{stage}[/cyan]\n")
-            result = coordinator.run_stage(stage, force=force, parallel=workers, verbose=verbose)
+            result = coordinator.run_stage(stage, force=force, parallel=workers, verbose=verbose, skill_name=skill_name)
             results = {stage: result}
         else:
-            results = coordinator.run_all(force=force, parallel=workers, verbose=verbose)
+            results = coordinator.run_all(force=force, parallel=workers, verbose=verbose, skill_name=skill_name)
 
         # 显示结果
         display_pipeline_results(results)

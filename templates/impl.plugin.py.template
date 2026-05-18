@@ -709,7 +709,7 @@ if __name__ == "__main__":
     import json
 
     def _print_usage():
-        print("Usage: python impl.py <command> [args...]", file=sys.stderr)
+        print("Usage: py impl.py <command> [args...]", file=sys.stderr)
         print("", file=sys.stderr)
         print("Commands:", file=sys.stderr)
         print("  query_class_info <class_name>              - 查询类信息", file=sys.stderr)
@@ -738,12 +738,12 @@ if __name__ == "__main__":
         print("  gc [--dry-run]                             - 垃圾回收", file=sys.stderr)
         print("", file=sys.stderr)
         print("Examples:", file=sys.stderr)
-        print('  python impl.py query_class_info AActor', file=sys.stderr)
-        print('  python impl.py query_class_hierarchy AActor 5', file=sys.stderr)
-        print('  python impl.py search_classes "Player" 20', file=sys.stderr)
-        print('  python impl.py init', file=sys.stderr)
-        print('  python impl.py register DEV /path/to/source', file=sys.stderr)
-        print('  python impl.py set_active DEV', file=sys.stderr)
+        print('  py impl.py query_class_info AActor', file=sys.stderr)
+        print('  py impl.py query_class_hierarchy AActor 5', file=sys.stderr)
+        print('  py impl.py search_classes "Player" 20', file=sys.stderr)
+        print('  py impl.py init', file=sys.stderr)
+        print('  py impl.py register DEV /path/to/source', file=sys.stderr)
+        print('  py impl.py set_active DEV', file=sys.stderr)
         sys.exit(1)
 
     if len(sys.argv) < 2:
