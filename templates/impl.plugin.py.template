@@ -622,6 +622,14 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
             break
     impl_file = func_info.get('impl_file_path')
     impl_line = func_info.get('impl_line_number', 0)
+
+    # 回退：如果 impl_file 为空但声明文件本身是 .cpp，则声明即实现
+    if not impl_file:
+        decl_file = func_info.get('file_path', '')
+        if decl_file.endswith('.cpp'):
+            impl_file = decl_file
+            impl_line = func_info.get('line_number', 0)
+
     impl_path = _resolve_source_file(impl_file) if impl_file else None
 
     if not impl_file or impl_path is None or not impl_path.exists():
