@@ -39,17 +39,17 @@ description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息�
 
 1. **先检查知识库是否过期（必须）:**
    ```bash
-   python -m ue5_kb.cli branch update-all --check --skill-path "{SKILL_PATH}"
+   py -m ue5_kb.cli branch update-all --check --skill-path "{SKILL_PATH}"
    ```
    如果输出中有 `stale`，先执行：
    ```bash
-   python -m ue5_kb.cli branch update-all --skill-path "{SKILL_PATH}"
+   py -m ue5_kb.cli branch update-all --skill-path "{SKILL_PATH}"
    ```
    更新完成后再次执行 `--check`，确认目标分支为 `current`。
 
 2. **使用 Bash 工具执行 impl.py 脚本:**
    ```bash
-   python "{SKILL_PATH}/impl.py" <command> [args...]
+   py "{SKILL_PATH}/impl.py" <command> [args...]
    ```
 
 3. **解析返回的 JSON 结果**
@@ -75,19 +75,19 @@ description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息�
 
 ```bash
 # 查询类信息
-python "{SKILL_PATH}/impl.py" query_class_info AActor
+py "{SKILL_PATH}/impl.py" query_class_info AActor
 
 # 查询类继承关系（深度5层）
-python "{SKILL_PATH}/impl.py" query_class_hierarchy AActor 5
+py "{SKILL_PATH}/impl.py" query_class_hierarchy AActor 5
 
 # 查询模块依赖
-python "{SKILL_PATH}/impl.py" query_module_dependencies Core
+py "{SKILL_PATH}/impl.py" query_module_dependencies Core
 
 # 搜索类（限制20个结果）
-python "{SKILL_PATH}/impl.py" search_classes Player 20
+py "{SKILL_PATH}/impl.py" search_classes Player 20
 
 # 获取统计信息
-python "{SKILL_PATH}/impl.py" get_statistics
+py "{SKILL_PATH}/impl.py" get_statistics
 ```
 
 ## 使用建议
@@ -155,21 +155,21 @@ Skill 路径: `{SKILL_PATH}`
 **用户**: "AActor 类继承自什么？"
 **助手**:
 ```bash
-python "{SKILL_PATH}/impl.py" query_class_hierarchy AActor
+py "{SKILL_PATH}/impl.py" query_class_hierarchy AActor
 ```
 → 解析 JSON 结果并展示继承链
 
 **用户**: "{PLUGIN_NAME} 有哪些模块？"
 **助手**:
 ```bash
-python "{SKILL_PATH}/impl.py" get_statistics
+py "{SKILL_PATH}/impl.py" get_statistics
 ```
 → 展示模块列表
 
 **用户**: "查找所有包含 PlayerController 的类"
 **助手**:
 ```bash
-python "{SKILL_PATH}/impl.py" search_classes PlayerController
+py "{SKILL_PATH}/impl.py" search_classes PlayerController
 ```
 → 解析 JSON 结果并展示匹配的类
 
@@ -185,13 +185,13 @@ python "{SKILL_PATH}/impl.py" search_classes PlayerController
 
 ```bash
 # 基本用法
-python "{SKILL_PATH}/impl.py" get_function_implementation "Tick"
+py "{SKILL_PATH}/impl.py" get_function_implementation "Tick"
 
 # 指定类名（处理同名函数）
-python "{SKILL_PATH}/impl.py" get_function_implementation "Tick" "AActor"
+py "{SKILL_PATH}/impl.py" get_function_implementation "Tick" "AActor"
 
 # 指定模块提示（加速查询）
-python "{SKILL_PATH}/impl.py" get_function_implementation "Tick" "AActor" "Engine"
+py "{SKILL_PATH}/impl.py" get_function_implementation "Tick" "AActor" "Engine"
 ```
 
 返回结果包含：
@@ -204,7 +204,7 @@ python "{SKILL_PATH}/impl.py" get_function_implementation "Tick" "AActor" "Engin
 `query_function_info` 现在返回函数的实现位置：
 
 ```bash
-python "{SKILL_PATH}/impl.py" query_function_info "BeginPlay"
+py "{SKILL_PATH}/impl.py" query_function_info "BeginPlay"
 ```
 
 返回结果包含：
@@ -227,5 +227,5 @@ python "{SKILL_PATH}/impl.py" query_function_info "BeginPlay"
 
 查询知识库版本信息：
 ```bash
-python "{SKILL_PATH}/impl.py" get_kb_info
+py "{SKILL_PATH}/impl.py" get_kb_info
 ```
