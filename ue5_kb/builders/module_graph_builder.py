@@ -245,7 +245,28 @@ class ModuleGraphBuilder:
                         if line_num > 0:
                             func_info.impl_line_number = line_num
 
-                # 跳过类方法（已在类中处理）
+                # 收集函数信息用于索引（包括类方法 — 在 skip 之前）
+                signature = self.parser.format_function_signature(func_info)
+                func_infos_for_index.append({
+                    'name': func_info.name,
+                    'module': graph.module_name,
+                    'class_name': func_info.class_name,
+                    'return_type': func_info.return_type,
+                    'parameters': [p.to_dict() for p in func_info.parameters],
+                    'signature': signature,
+                    'file_path': func_info.file_path,
+                    'line_number': func_info.line_number,
+                    'impl_file_path': func_info.impl_file_path,
+                    'impl_line_number': func_info.impl_line_number,
+                    'is_virtual': func_info.is_virtual,
+                    'is_const': func_info.is_const,
+                    'is_static': func_info.is_static,
+                    'is_override': func_info.is_override,
+                    'is_blueprint_callable': func_info.is_blueprint_callable,
+                    'ufunction_specifiers': func_info.ufunction_specifiers
+                })
+
+                # 跳过类方法的图谱节点（已在类中处理）
                 if func_info.class_name:
                     continue
 
@@ -266,27 +287,6 @@ class ModuleGraphBuilder:
                     impl_line=func_info.impl_line_number
                 )
                 graph.add_edge(file_id, func_id, ModuleGraph.REL_TYPE_CONTAINS)
-
-                # 收集函数信息用于索引
-                signature = self.parser.format_function_signature(func_info)
-                func_infos_for_index.append({
-                    'name': func_info.name,
-                    'module': graph.module_name,
-                    'class_name': func_info.class_name,
-                    'return_type': func_info.return_type,
-                    'parameters': [p.to_dict() for p in func_info.parameters],
-                    'signature': signature,
-                    'file_path': func_info.file_path,
-                    'line_number': func_info.line_number,
-                    'impl_file_path': func_info.impl_file_path,
-                    'impl_line_number': func_info.impl_line_number,
-                    'is_virtual': func_info.is_virtual,
-                    'is_const': func_info.is_const,
-                    'is_static': func_info.is_static,
-                    'is_override': func_info.is_override,
-                    'is_blueprint_callable': func_info.is_blueprint_callable,
-                    'ufunction_specifiers': func_info.ufunction_specifiers
-                })
 
             # v2.14.0: 添加枚举节点
             for enum_name, enum_info in enums.items():

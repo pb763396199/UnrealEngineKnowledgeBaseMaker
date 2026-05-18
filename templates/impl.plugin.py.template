@@ -76,6 +76,32 @@ _db_connection = None
 _class_index_cache = None
 _function_index_cache = None
 _symbol_reference_index_cache = None
+_kb_meta_cache = None
+
+
+def _get_kb_meta() -> Dict[str, Any]:
+    """获取当前 KB 的分支/commit/新鲜度元数据（缓存）"""
+    global _kb_meta_cache
+    if _kb_meta_cache is not None:
+        return _kb_meta_cache
+
+    meta = {{"branch": None, "commit": None, "built_at": None, "data_trust": "unknown"}}
+    try:
+        st = _branch_mgr.status()
+        active = st.get("active_branch")
+        if active:
+            meta["branch"] = active
+            for b in st.get("branches", []):
+                if b.get("active"):
+                    meta["commit"] = b.get("commit")
+                    meta["built_at"] = b.get("built_at")
+                    meta["data_trust"] = "stale" if b.get("dirty") else "fresh"
+                    break
+    except Exception:
+        pass
+
+    _kb_meta_cache = meta
+    return meta
 
 
 # ============================================================================
@@ -194,6 +220,7 @@ def query_module_dependencies(module_name: str) -> Dict[str, Any]:
 
     info = all_modules[module_name]
     return {{
+        "_meta": _get_kb_meta(),
         "module": module_name,
         "path": info['path'],
         "category": info['category'],
@@ -218,6 +245,7 @@ def search_modules(keyword: str) -> Dict[str, Any]:
             }})
 
     return {{
+        "_meta": _get_kb_meta(),
         "keyword": keyword,
         "found_count": len(results),
         "results": results[:50]
@@ -235,6 +263,7 @@ def get_statistics() -> Dict[str, Any]:
         categories[cat] = categories.get(cat, 0) + 1
 
     return {{
+        "_meta": _get_kb_meta(),
         "total_modules": len(all_modules),
         "categories": categories
     }}
@@ -243,6 +272,7 @@ def get_statistics() -> Dict[str, Any]:
 def get_kb_info() -> Dict[str, Any]:
     """获取知识库版本信息"""
     return {{
+        "_meta": _get_kb_meta(),
         "plugin_name": KB_PLUGIN_NAME,
         "plugin_version": KB_PLUGIN_VERSION,
         "kb_format_version": KB_FORMAT_VERSION,
@@ -282,6 +312,7 @@ def query_class_info(class_name: str) -> Dict[str, Any]:
     node_data = graph.nodes[class_node]
 
     return {{
+        "_meta": _get_kb_meta(),
         "class_name": class_name,
         "module": module_name,
         "file": node_data.get('file', ''),
@@ -319,6 +350,7 @@ def query_class_hierarchy(class_name: str, depth: int = 3) -> Dict[str, Any]:
         current_class = parents[0]
 
     return {{
+        "_meta": _get_kb_meta(),
         "class": class_name,
         "hierarchy": result,
         "depth": len(result)
@@ -352,6 +384,7 @@ def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, 
         }})
 
     return {{
+        "_meta": _get_kb_meta(),
         "module": module_name,
         "total_classes": len(classes),
         "classes": classes[:100]
@@ -405,6 +438,7 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
         }}
 
     return {{
+        "_meta": _get_kb_meta(),
         "function_name": function_name,
         "found_count": len(results),
         "results": results[:20]
@@ -419,6 +453,7 @@ def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
         # 使用索引搜索（快速 < 10ms）
         results = class_idx.search_by_keyword(keyword, limit)
         return {{
+            "_meta": _get_kb_meta(),
             "keyword": keyword,
             "found_count": len(results),
             "results": results
@@ -454,6 +489,7 @@ def search_classes(keyword: str, limit: int = 50) -> Dict[str, Any]:
                 break
 
         return {{
+            "_meta": _get_kb_meta(),
             "keyword": keyword,
             "found_count": len(results),
             "results": results
@@ -468,6 +504,7 @@ def search_functions(keyword: str, limit: int = 50) -> Dict[str, Any]:
         # 使用索引搜索（快速 < 10ms）
         results = func_idx.search_by_keyword(keyword, limit)
         return {{
+            "_meta": _get_kb_meta(),
             "keyword": keyword,
             "found_count": len(results),
             "results": results
@@ -506,6 +543,7 @@ def search_functions(keyword: str, limit: int = 50) -> Dict[str, Any]:
                 break
 
         return {{
+            "_meta": _get_kb_meta(),
             "keyword": keyword,
             "found_count": len(results),
             "results": results
@@ -576,8 +614,12 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
     if not results:
         return {"error": f"Function {function_name} not found"}
 
-    # 获取第一个匹配结果的实现文件
+    # 优先选择有 impl_file_path 的结果
     func_info = results[0]
+    for r in results:
+        if r.get('impl_file_path'):
+            func_info = r
+            break
     impl_file = func_info.get('impl_file_path')
     impl_line = func_info.get('impl_line_number', 0)
     impl_path = _resolve_source_file(impl_file) if impl_file else None
@@ -594,6 +636,7 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
             content = f.read()
 
         return {
+            "_meta": _get_kb_meta(),
             "function": function_name,
             "class": func_info.get('class_name'),
             "module": func_info.get('module'),
@@ -613,6 +656,7 @@ def query_callees(function_name: str, class_name: str = None, limit: int = 50) -
         return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
     rows = sri.query_callees(function_name, class_name, limit)
     return {{
+        "_meta": _get_kb_meta(),
         "function_name": function_name,
         "class_name": class_name,
         "found_count": len(rows),
@@ -627,6 +671,7 @@ def query_callers(function_name: str, class_name: str = None, limit: int = 50) -
         return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
     rows = sri.query_callers(function_name, class_name, limit)
     return {{
+        "_meta": _get_kb_meta(),
         "function_name": function_name,
         "class_name": class_name,
         "found_count": len(rows),
@@ -641,6 +686,7 @@ def query_symbol_references(symbol_name: str, limit: int = 50) -> Dict[str, Any]
         return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
     rows = sri.query_symbol_references(symbol_name, limit)
     return {{
+        "_meta": _get_kb_meta(),
         "symbol_name": symbol_name,
         "found_count": len(rows),
         "results": rows,
