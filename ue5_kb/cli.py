@@ -543,6 +543,47 @@ def update(engine_path, plugin_path, kb_path, full, check):
                 console.print(f"  移除模块数: {result['modules_removed']}")
 
 
+@cli.command()
+@click.argument('uproject_path', type=click.Path(exists=True))
+def resolve(uproject_path):
+    """根据 .uproject 自动查找匹配的 KB skill
+
+    \b
+    解析 .uproject 的 EngineAssociation 字段，在已安装的
+    ue5kb-* skills 中查找匹配版本的知识库。
+
+    \b
+    示例：
+      ue5kb resolve MyGame.uproject
+      ue5kb resolve D:\\Projects\\MyGame\\MyGame.uproject
+    """
+    from .project_resolver import resolve_engine_kb
+
+    result = resolve_engine_kb(Path(uproject_path))
+
+    if result is None:
+        console.print("[red]无法解析 .uproject 文件[/red]")
+        return
+
+    console.print(f"\n[bold cyan].uproject KB 映射[/bold cyan]\n")
+    console.print(f"  EngineAssociation: [yellow]{result['engine_association']}[/yellow]")
+
+    if result.get('error'):
+        console.print(f"  匹配结果: [red]{result['error']}[/red]")
+        return
+
+    console.print(f"  匹配版本: [green]{result['matched_version']}[/green]")
+    console.print(f"  Skill 路径: {result['skill_path']}")
+    if result.get('kb_path'):
+        console.print(f"  KB 路径: {result['kb_path']}")
+    else:
+        console.print(f"  KB 路径: [yellow]未解析（registry 未配置）[/yellow]")
+
+    # JSON 输出供脚本消费
+    console.print(f"\n[dim]JSON:[/dim]")
+    console.print_json(data=result)
+
+
 @cli.group()
 def branch():
     """多分支 KB 管理命令"""
