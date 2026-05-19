@@ -990,7 +990,6 @@ class TestSkillTemplateAutoUpdateInstructions:
 
     @pytest.mark.parametrize("template_reader", [
         _read_engine_skill_template,
-        _read_plugin_skill_template,
     ])
     def test_skill_template_requires_update_check(self, template_reader):
         content = template_reader(self)
@@ -998,6 +997,11 @@ class TestSkillTemplateAutoUpdateInstructions:
         assert "branch update-all --skill-path" in content
         assert "stale" in content
         assert "current" in content
+
+    def test_plugin_skill_template_uses_inline_freshness(self):
+        """P4: plugin template 不再要求前置 stale check，改用 _meta.data_trust"""
+        content = self._read_plugin_skill_template()
+        assert "data_trust" in content
 
     @pytest.mark.parametrize("template_reader", [
         _read_engine_skill_template,

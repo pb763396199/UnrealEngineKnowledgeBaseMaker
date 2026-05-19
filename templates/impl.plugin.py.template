@@ -393,16 +393,27 @@ def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, 
 
 def query_function_info(function_name: str, module_hint: str = None) -> Dict[str, Any]:
     """查询函数信息"""
-    results = []
+    func_idx = _get_function_index()
 
-    # 确定要搜索的模块
+    if func_idx:
+        # 使用 SQLite 索引查询（< 10ms）
+        results = func_idx.query_by_name(function_name, module_hint)
+        if results:
+            return {{
+                "_meta": _get_kb_meta(),
+                "function_name": function_name,
+                "found_count": len(results),
+                "results": results[:20]
+            }}
+
+    # SQLite 索引不可用或未找到，回退到 pkl 遍历
+    results = []
     if module_hint:
         modules = [module_hint]
     else:
         all_modules = _get_global_modules()
         modules = list(all_modules.keys())[:50]
 
-    # 搜索函数
     for mod in modules:
         graph = _load_module_graph(mod)
         if not graph:
@@ -411,7 +422,6 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
         for node, node_data in graph.nodes(data=True):
             if node_data.get('type') != 'function':
                 continue
-
             if node_data.get('name') == function_name:
                 results.append({{
                     "function": function_name,
@@ -429,7 +439,6 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
                 }})
 
     if not results:
-        # 提取关键字用于模糊搜索
         keyword = function_name[:8] if len(function_name) > 8 else function_name
         return {{
             "error": f"未找到函数: {{function_name}}",
@@ -641,7 +650,20 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
     # 读取实现文件内容
     try:
         with open(impl_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
+            lines = f.readlines()
+
+        # 按行号提取函数附近代码（前 10 行 ~ 后 200 行）
+        if impl_line and impl_line > 0:
+            start = max(0, impl_line - 11)
+            end = min(len(lines), impl_line + 200)
+            context_lines = lines[start:end]
+            content = ''.join(context_lines)
+            line_info = f"lines {start+1}-{end}"
+        else:
+            content = ''.join(lines)
+            if len(content) > 10000:
+                content = content[:10000] + "... (truncated)"
+            line_info = f"lines 1-{len(lines)}"
 
         return {
             "_meta": _get_kb_meta(),
@@ -652,7 +674,8 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
             "declaration_line": func_info.get('line_number'),
             "implementation_file": impl_file,
             "implementation_line": impl_line,
-            "file_content": content if len(content) < 10000 else content[:10000] + "... (truncated)"
+            "file_content": content,
+            "extracted_range": line_info
         }
     except Exception as e:
         return {"error": f"Failed to read implementation file: {e}"}

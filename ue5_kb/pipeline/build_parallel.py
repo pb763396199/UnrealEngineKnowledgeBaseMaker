@@ -208,6 +208,15 @@ class ParallelBuildStage:
 
         stats = tracker.stop()
 
+        # 2.5. 清理 module_graphs json 副本（仅保留 pkl）
+        removed = 0
+        for json_file in graphs_dir.glob("*.json"):
+            if json_file.with_suffix(".pkl").exists():
+                json_file.unlink()
+                removed += 1
+        if removed:
+            console.print(f"[dim]  清理: 删除 {removed} 个 module_graphs json 副本[/dim]")
+
         # 3. 串行构建全局索引和 SQLite
         console.print(f"\n[cyan]构建全局索引...[/cyan]")
         global_index = self._build_global_index(config)

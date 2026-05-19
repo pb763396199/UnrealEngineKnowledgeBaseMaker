@@ -91,6 +91,9 @@ class BuildStage(PipelineStage):
         except Exception as e:
             print(f"  [警告] 符号引用索引构建失败: {e}")
 
+        # 5.5. 清理存储冗余：删除 module_graphs 中的 json 副本（仅保留 pkl）
+        self._cleanup_build_artifacts(kb_path)
+
         # 6. 质量门禁检查（Phase 0：只警告，不中断）
         quality = self._check_quality_gates(config)
 
@@ -613,6 +616,20 @@ class BuildStage(PipelineStage):
                 print(f"    警告: 构建 {module_name} 图谱失败: {e}")
 
         return built_count
+
+    def _cleanup_build_artifacts(self, kb_path: Path) -> None:
+        """清理构建冗余产物：module_graphs json 副本"""
+        graphs_dir = kb_path / "module_graphs"
+        if not graphs_dir.exists():
+            return
+        removed = 0
+        for json_file in graphs_dir.glob("*.json"):
+            pkl_file = json_file.with_suffix(".pkl")
+            if pkl_file.exists():
+                json_file.unlink()
+                removed += 1
+        if removed:
+            print(f"  清理: 删除 {removed} 个 module_graphs json 副本")
 
     def _create_networkx_graph(self, code_graph: Dict[str, Any]) -> nx.DiGraph:
         """

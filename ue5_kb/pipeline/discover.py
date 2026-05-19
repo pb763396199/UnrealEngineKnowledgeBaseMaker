@@ -133,6 +133,11 @@ class DiscoverStage(PipelineStage):
         modules = []
 
         for build_cs in directory.rglob('*.Build.cs'):
+            # P0: 跳过 ThirdParty 模块（排除第三方库噪声）
+            rel_path = build_cs.relative_to(self.base_path).as_posix()
+            if '/ThirdParty/' in rel_path or '/thirdparty/' in rel_path:
+                continue
+
             # 提取模块名
             module_name = build_cs.stem.replace('.Build', '')
 
@@ -142,7 +147,7 @@ class DiscoverStage(PipelineStage):
             # 计算文件哈希
             file_stat = build_cs.stat()
             file_hash = Hasher.compute_sha256(build_cs)
-            rel_build_cs_path = build_cs.relative_to(self.base_path).as_posix()
+            rel_build_cs_path = rel_path
 
             modules.append({
                 'name': module_name,
