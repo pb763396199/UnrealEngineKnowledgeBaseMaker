@@ -166,6 +166,25 @@ def _hardlink_copy_dedup(src: Path, dst: Path, baseline: Optional[Path] = None) 
 
 
 # ---------------------------------------------------------------------------
+# 临时目录清理
+# ---------------------------------------------------------------------------
+
+def _cleanup_stale_temp_dirs(store_dir: str) -> None:
+    """清理上次中断遗留的临时目录（_build_tmp_* / _building_* / _old_*）"""
+    store_path = Path(store_dir)
+    if not store_path.exists():
+        return
+    for pattern in ("_build_tmp_*", "_building_*", "_old_*"):
+        for d in store_path.glob(pattern):
+            if d.is_dir():
+                try:
+                    shutil.rmtree(str(d))
+                    print(f"  [cleanup] 清理残留临时目录: {d.name}", file=sys.stderr)
+                except OSError:
+                    pass  # 权限或锁定问题，跳过
+
+
+# ---------------------------------------------------------------------------
 # P0-2: 原子导入（rename-aside 模式）
 # ---------------------------------------------------------------------------
 
@@ -689,6 +708,9 @@ class BranchManager:
             plugin_root = self._find_plugin_root(source_path)
             if not plugin_root:
                 return {"error": f"无法找到插件根目录（需要 .uplugin 文件）: {source}"}
+
+            # 清理上次中断遗留的所有临时目录
+            _cleanup_stale_temp_dirs(kb_store_dir)
 
             # 构建 KB
             # P0.2: 使用 variants store 下的临时构建目录，避免写入 plugin_root/KnowledgeBase
