@@ -91,9 +91,6 @@ class BuildStage(PipelineStage):
         except Exception as e:
             print(f"  [警告] 符号引用索引构建失败: {e}")
 
-        # 5.5. 清理存储冗余：删除 module_graphs 中的 json 副本（仅保留 pkl）
-        self._cleanup_build_artifacts(kb_path)
-
         # 6. 质量门禁检查（Phase 0：只警告，不中断）
         quality = self._check_quality_gates(config)
 
@@ -113,6 +110,9 @@ class BuildStage(PipelineStage):
 
         # 保存构建摘要
         self.save_result(result, "build_summary.json")
+
+        # 清理构建冗余和中间产物，保留摘要与最终 SQLite 索引
+        self._cleanup_build_artifacts(kb_path)
 
         print(f"[Build] 完成！")
         print(f"  知识库路径: {kb_path}")
@@ -288,6 +288,17 @@ class BuildStage(PipelineStage):
 
         print(f"  已同步 {len(all_modules)} 个模块到 SQLite (批量写入)")
 
+    @staticmethod
+    def _reset_sqlite_db(db_path: Path) -> None:
+        db_path = Path(db_path)
+        for path in (
+            db_path,
+            db_path.with_name(db_path.name + "-wal"),
+            db_path.with_name(db_path.name + "-shm"),
+        ):
+            if path.exists():
+                path.unlink()
+
     def _build_fast_indices(self, config: Config) -> None:
         """
         构建快速索引（ClassIndex 和 FunctionIndex）
@@ -301,6 +312,7 @@ class BuildStage(PipelineStage):
             config: 配置对象
         """
         from ..core.class_index import ClassIndex
+        from ..core.enum_index import EnumIndex
         from ..core.function_index import FunctionIndex
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -309,10 +321,15 @@ class BuildStage(PipelineStage):
         # 创建索引文件路径（确保使用 Path 对象）
         global_index_path = Path(config.global_index_path)
         class_index_db = global_index_path / "class_index.db"
+        enum_index_db = global_index_path / "enum_index.db"
         function_index_db = global_index_path / "function_index.db"
+
+        for db_path in (class_index_db, function_index_db, enum_index_db):
+            self._reset_sqlite_db(db_path)
 
         class_idx = ClassIndex(str(class_index_db))
         func_idx = FunctionIndex(str(function_index_db))
+        enum_idx = EnumIndex(str(enum_index_db))
 
         # 遍历所有模块图谱，收集类和函数信息
         graphs_dir = Path(config.module_graphs_path)
@@ -325,6 +342,7 @@ class BuildStage(PipelineStage):
 
         classes_batch = []
         functions_batch = []
+        enums_batch = []
 
         # 性能优化：并行读取 pickle 文件 (v2.15.0)
         num_workers = min(8, os.cpu_count() or 4)
@@ -363,7 +381,8 @@ class BuildStage(PipelineStage):
                                 'is_interface': node_data.get('is_interface', False),
                                 'is_blueprintable': node_data.get('is_blueprintable', False),
                                 'method_count': len(node_data.get('methods', [])),
-                                'property_count': len(node_data.get('properties', []))
+                                'property_count': len(node_data.get('properties', [])),
+                                'doc_comment': node_data.get('doc_comment', ''),
                             }
                             classes_batch.append(class_info)
 
@@ -387,6 +406,20 @@ class BuildStage(PipelineStage):
                             }
                             functions_batch.append(func_info)
 
+                        elif node_data.get('type') == 'enum':
+                            enum_info = {
+                                'name': node_data.get('name', ''),
+                                'module': module_name,
+                                'namespace': node_data.get('namespace', ''),
+                                'values': node_data.get('values', []),
+                                'is_uenum': node_data.get('is_uenum', False),
+                                'file_path': node_data.get('file', ''),
+                                'line_number': node_data.get('line', 0),
+                                'doc_comment': node_data.get('doc_comment', ''),
+                                'specifiers': node_data.get('specifiers', {}),
+                            }
+                            enums_batch.append(enum_info)
+
                     # 批量提交（每 1000 条）
                     if len(classes_batch) >= 1000:
                         class_idx.add_classes_batch(classes_batch)
@@ -396,6 +429,10 @@ class BuildStage(PipelineStage):
                         func_idx.add_functions_batch(functions_batch)
                         functions_batch.clear()
 
+                    if len(enums_batch) >= 1000:
+                        enum_idx.add_enums_batch(enums_batch)
+                        enums_batch.clear()
+
                 except Exception as e:
                     print(f"    警告: 处理 {module_name} 图谱失败: {e}")
 
@@ -404,16 +441,21 @@ class BuildStage(PipelineStage):
             class_idx.add_classes_batch(classes_batch)
         if functions_batch:
             func_idx.add_functions_batch(functions_batch)
+        if enums_batch:
+            enum_idx.add_enums_batch(enums_batch)
 
         class_idx.commit()
         func_idx.commit()
+        enum_idx.commit()
 
         # 输出统计
         class_stats = class_idx.get_statistics()
         func_stats = func_idx.get_statistics()
+        enum_stats = enum_idx.get_statistics()
 
         print(f"    类索引: {class_stats['total_classes']} 个类")
         print(f"    函数索引: {func_stats['total_functions']} 个函数")
+        print(f"    枚举索引: {enum_stats['total_enums']} 个枚举")
 
     def _check_quality_gates(self, config: Config) -> Dict[str, Any]:
         """
@@ -617,19 +659,62 @@ class BuildStage(PipelineStage):
 
         return built_count
 
-    def _cleanup_build_artifacts(self, kb_path: Path) -> None:
-        """清理构建冗余产物：module_graphs json 副本"""
-        graphs_dir = kb_path / "module_graphs"
-        if not graphs_dir.exists():
-            return
+    @staticmethod
+    def _cleanup_build_artifacts(kb_path: Path) -> None:
+        """清理构建冗余和阶段中间产物，保留可追踪摘要。"""
+        import shutil
+
+        kb_path = Path(kb_path)
         removed = 0
-        for json_file in graphs_dir.glob("*.json"):
-            pkl_file = json_file.with_suffix(".pkl")
-            if pkl_file.exists():
-                json_file.unlink()
+        removed_dirs = 0
+
+        def unlink_file(path: Path) -> None:
+            nonlocal removed
+            try:
+                path.unlink()
                 removed += 1
-        if removed:
-            print(f"  清理: 删除 {removed} 个 module_graphs json 副本")
+            except OSError as e:
+                print(f"  [警告] 清理文件失败 {path}: {e}")
+
+        def remove_dir(path: Path) -> None:
+            nonlocal removed_dirs
+            try:
+                shutil.rmtree(path)
+                removed_dirs += 1
+            except OSError as e:
+                print(f"  [警告] 清理目录失败 {path}: {e}")
+
+        graphs_dir = kb_path / "module_graphs"
+        if graphs_dir.exists():
+            for json_file in graphs_dir.glob("*.json"):
+                if json_file.with_suffix(".pkl").exists():
+                    unlink_file(json_file)
+
+        global_index_dir = kb_path / "global_index"
+        if (global_index_dir / "index.db").exists():
+            for filename in ("global_index.json", "global_index.pkl"):
+                artifact = global_index_dir / filename
+                if artifact.exists():
+                    unlink_file(artifact)
+
+        analyze_dir = kb_path / "data" / "analyze"
+        checkpoint = analyze_dir / ".analyze_checkpoint"
+        if checkpoint.exists():
+            if checkpoint.is_dir():
+                remove_dir(checkpoint)
+            else:
+                unlink_file(checkpoint)
+
+        for stage_name in ("analyze", "extract"):
+            stage_dir = kb_path / "data" / stage_name
+            if not stage_dir.exists():
+                continue
+            for child in stage_dir.iterdir():
+                if child.is_dir():
+                    remove_dir(child)
+
+        if removed or removed_dirs:
+            print(f"  清理: 删除 {removed} 个文件，{removed_dirs} 个目录")
 
     def _create_networkx_graph(self, code_graph: Dict[str, Any]) -> nx.DiGraph:
         """
@@ -684,7 +769,8 @@ class BuildStage(PipelineStage):
                 is_struct=cls.get('is_struct', False),
                 is_interface=cls.get('is_interface', False),
                 is_blueprintable=cls.get('is_blueprintable', False),
-                specifiers=cls.get('specifiers', {})
+                specifiers=cls.get('specifiers', {}),
+                doc_comment=cls.get('doc_comment', '')
             )
 
             # 添加继承边
@@ -733,6 +819,24 @@ class BuildStage(PipelineStage):
                 is_static=func.get('is_static', False),
                 is_override=func.get('is_override', False),
                 ufunction_specifiers=func.get('ufunction_specifiers', {})
+            )
+
+        for enum in code_graph.get('enums', []):
+            enum_name = enum['name']
+            file_path = enum.get('file') or enum.get('file_path', '')
+            line_num = enum.get('line') or enum.get('line_number', 0)
+
+            graph.add_node(
+                f"enum_{enum_name}",
+                type='enum',
+                name=enum_name,
+                file=file_path,
+                line=line_num,
+                values=enum.get('values', []),
+                is_uenum=enum.get('is_uenum', False),
+                namespace=enum.get('namespace', ''),
+                doc_comment=enum.get('doc_comment', ''),
+                specifiers=enum.get('specifiers', {})
             )
 
         return graph

@@ -278,6 +278,7 @@ class GenerateStage(PipelineStage):
                 source=source_path,
                 kb_path=str(kb_path),
                 description="Auto-registered during skill generation",
+                force=True,
             )
             print(f"  初始化多分支注册表，注册 default 分支")
         except Exception as e:

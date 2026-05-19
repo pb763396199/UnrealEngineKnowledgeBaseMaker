@@ -477,6 +477,7 @@ class BranchManager:
         source: str,
         kb_path: Optional[str] = None,
         description: str = "",
+        force: bool = False,
     ) -> dict:
         """注册分支并导入已有 KB"""
         vcs = VCSAdapter.detect(source)
@@ -521,7 +522,7 @@ class BranchManager:
             ).fetchone()
             existing_kb_dir = existing[0] if existing else None
             existing_kb_path = Path(kb_store_dir) / existing_kb_dir if existing_kb_dir else None
-            if existing and self._worktree_matches(
+            if existing and not force and self._worktree_matches(
                 existing[1], existing[2], is_dirty, worktree_fingerprint
             ):
                 if existing_kb_path and existing_kb_path.exists():
@@ -602,6 +603,7 @@ class BranchManager:
                 "branch": branch,
                 "commit": commit_id[:7],
                 "files": file_count,
+                "refreshed": bool(existing_kb_dir),
                 "dirty": is_dirty,
                 "worktree_fingerprint": self._short_fingerprint(worktree_fingerprint),
             }

@@ -575,6 +575,65 @@ class TestBuildStageLoadGraphFileSafePickle:
             "safe_pickle_load 应被调用一次"
 
 
+class TestBuildStageFastIndexRebuild:
+
+    def test_rebuild_removes_stale_function_rows(self, tmp_path):
+        """快速索引重建前应删除旧 function_index.db，避免 stale row 累积"""
+        import networkx as nx
+        from ue5_kb.core.config import Config
+        from ue5_kb.core.function_index import FunctionIndex
+        from ue5_kb.pipeline.build import BuildStage
+
+        base_path = tmp_path / "plugin"
+        base_path.mkdir()
+        kb_path = tmp_path / "kb"
+        config = Config(base_path=str(kb_path))
+
+        function_index_db = kb_path / "global_index" / "function_index.db"
+        stale_index = FunctionIndex(str(function_index_db))
+        stale_index.add_function({
+            "name": "StaleFunction",
+            "module": "OldModule",
+            "class_name": "",
+            "return_type": "void",
+            "parameters": [],
+            "signature": "void StaleFunction()",
+            "file_path": "Source/OldModule/Stale.h",
+            "line_number": 1,
+        })
+        stale_index.close()
+        function_index_db.with_name(function_index_db.name + "-wal").write_text("stale", encoding="utf-8")
+        function_index_db.with_name(function_index_db.name + "-shm").write_text("stale", encoding="utf-8")
+
+        graphs_dir = kb_path / "module_graphs"
+        graphs_dir.mkdir(parents=True)
+        graph = nx.DiGraph()
+        graph.add_node(
+            "FreshFunction",
+            type="function",
+            name="FreshFunction",
+            class_name="",
+            return_type="void",
+            parameters=[],
+            signature="void FreshFunction()",
+            file="Source/FreshModule/Fresh.h",
+            line=7,
+        )
+        with open(graphs_dir / "FreshModule.pkl", "wb") as f:
+            pickle.dump({"graph": graph}, f)
+
+        stage = BuildStage(base_path, kb_path=kb_path)
+        stage._build_fast_indices(config)
+
+        conn = sqlite3.connect(str(function_index_db))
+        rows = conn.execute("SELECT name, module FROM function_index ORDER BY name").fetchall()
+        conn.close()
+
+        assert rows == [("FreshFunction", "FreshModule")]
+        assert not function_index_db.with_name(function_index_db.name + "-wal").exists()
+        assert not function_index_db.with_name(function_index_db.name + "-shm").exists()
+
+
 # ---------------------------------------------------------------------------
 # P2 回归测试 d: analyze cache 文件名使用 POSIX 平铺格式
 # ---------------------------------------------------------------------------
@@ -1557,4 +1616,246 @@ class TestBranchManagerUpdatePruneAndUpdateAll:
         dev = next(r for r in result["branches"] if r["branch"] == "DEV")
         assert dev["dirty"] is True
         assert dev["worktree_fingerprint"] == "statusfinger"
+
+
+# ---------------------------------------------------------------------------
+# P1 回归测试 j: register(force=True) / doc_comment / call graph confidence
+# ---------------------------------------------------------------------------
+
+class TestP1KbQualityRegressions:
+
+    def test_register_force_refreshes_same_commit_variant(self, tmp_path):
+        """register(force=True) 应刷新同 commit 的已有 variant，而不是复用旧快照"""
+        from ue5_kb.branch_manager import BranchManager, _db_connect
+
+        skill_dir = tmp_path / "skill_force_register"
+        skill_dir.mkdir()
+        registry_db = skill_dir / "registry.db"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir()
+        _make_registry(registry_db, str(variants_dir))
+
+        commit_id = "feedbee12345678"
+        kb_dir = "feedbee"
+        existing_variant = variants_dir / kb_dir
+        existing_variant.mkdir()
+        (existing_variant / "old.txt").write_text("old", encoding="utf-8")
+
+        conn = _db_connect(registry_db)
+        conn.execute(
+            "INSERT INTO versions (commit_id, kb_dir, build_status) VALUES (?, ?, 'complete')",
+            (commit_id, kb_dir),
+        )
+        conn.commit()
+        conn.close()
+
+        source_dir = tmp_path / "plugin_src"
+        source_dir.mkdir()
+        (source_dir / "Dummy.uplugin").write_text("{}", encoding="utf-8")
+        fresh_kb = source_dir / "KnowledgeBase"
+        fresh_kb.mkdir()
+        (fresh_kb / "new.txt").write_text("new", encoding="utf-8")
+
+        mock_vcs = mock.MagicMock()
+        mock_vcs.get_head_id.return_value = commit_id
+        mock_vcs.get_type.return_value = "git"
+        mock_vcs.is_dirty.return_value = False
+
+        mgr = BranchManager(skill_dir)
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", return_value=mock_vcs):
+            result = mgr.register(
+                branch="default",
+                source=str(source_dir),
+                kb_path=str(fresh_kb),
+                force=True,
+            )
+
+        assert result.get("status") == "ok", result
+        assert result.get("reused") is not True
+        assert result.get("refreshed") is True
+        assert (variants_dir / kb_dir / "new.txt").exists()
+        assert not (variants_dir / kb_dir / "old.txt").exists()
+
+    def test_class_index_migrates_and_persists_doc_comment(self, tmp_path):
+        """旧 class_index.db 缺 doc_comment 列时，ClassIndex 应自动迁移并持久化注释"""
+        from ue5_kb.core.class_index import ClassIndex
+
+        db_path = tmp_path / "class_index.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE class_index (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                module TEXT NOT NULL,
+                namespace TEXT,
+                parent_classes TEXT,
+                interfaces TEXT,
+                file_path TEXT,
+                line_number INTEGER,
+                is_uclass BOOLEAN DEFAULT 0,
+                is_struct BOOLEAN DEFAULT 0,
+                is_interface BOOLEAN DEFAULT 0,
+                is_blueprintable BOOLEAN DEFAULT 0,
+                method_count INTEGER DEFAULT 0,
+                property_count INTEGER DEFAULT 0,
+                UNIQUE(name, module, file_path, line_number)
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        idx = ClassIndex(str(db_path))
+        idx.add_class({
+            "name": "FDocumentedStruct",
+            "module": "DocModule",
+            "file_path": "Source/Doc.h",
+            "line_number": 12,
+            "is_struct": True,
+            "doc_comment": "Important UE struct",
+        })
+
+        result = idx.query_by_name("FDocumentedStruct")
+        idx.close()
+
+        assert result[0]["doc_comment"] == "Important UE struct"
+
+    def test_symbol_reference_queries_default_to_resolved(self, tmp_path):
+        """call graph 查询默认只返回 resolved，confidence='all' 时返回 resolved+ambiguous"""
+        from ue5_kb.core.symbol_reference_index import SymbolReferenceIndex
+
+        idx = SymbolReferenceIndex(str(tmp_path / "symbol_reference_index.db"))
+        idx._insert_batch([
+            (
+                "Caller", "FThing", "Mod", "Caller.cpp", 10,
+                "Target", "function", "FThing", "Mod", "Target.cpp", 20,
+                "call", "Caller.cpp", 11, "Target();", "resolved", 1,
+            ),
+            (
+                "Caller", "FThing", "Mod", "Caller.cpp", 10,
+                "Target", "function", "", "", "", 0,
+                "call", "Caller.cpp", 12, "Target();", "ambiguous", 3,
+            ),
+        ])
+
+        resolved = idx.query_callees("Caller", "FThing")
+        all_rows = idx.query_callees("Caller", "FThing", confidence="all")
+        callers = idx.query_callers("Target")
+        refs = idx.query_symbol_references("Target")
+        idx.close()
+
+        assert len(resolved) == 1
+        assert resolved[0]["confidence"] == "resolved"
+        assert len(all_rows) == 2
+        assert len(callers) == 1
+        assert callers[0]["confidence"] == "resolved"
+        assert len(refs) == 1
+        assert refs[0]["confidence"] == "resolved"
+
+
+class TestFunctionIndexFtsSearch:
+    """FunctionIndex 应优先使用 FTS5，且在无结果/不可用时回退 LIKE。"""
+
+    def test_search_by_keyword_finds_function_with_fallback(self, tmp_path):
+        from ue5_kb.core.function_index import FunctionIndex
+
+        idx = FunctionIndex(str(tmp_path / "function_index.db"))
+        try:
+            idx.add_functions_batch([
+                {
+                    "name": "BuildMesh",
+                    "module": "RenderModule",
+                    "class_name": "FMeshBuilder",
+                    "return_type": "void",
+                    "parameters": [],
+                    "signature": "void FMeshBuilder::BuildMesh()",
+                    "file_path": "Source/Render/MeshBuilder.h",
+                    "line_number": 12,
+                },
+                {
+                    "name": "CreateActor",
+                    "module": "GameplayModule",
+                    "class_name": "AActorFactory",
+                    "return_type": "AActor*",
+                    "parameters": [],
+                    "signature": "AActor* AActorFactory::CreateActor()",
+                    "file_path": "Source/Gameplay/ActorFactory.h",
+                    "line_number": 20,
+                },
+            ])
+
+            results = idx.search_by_keyword("Mesh", 10)
+        finally:
+            idx.close()
+
+        assert any(row["name"] == "BuildMesh" for row in results)
+
+    def test_function_fts_table_exists_when_sqlite_supports_fts5(self, tmp_path):
+        from ue5_kb.core.function_index import FunctionIndex
+
+        idx = FunctionIndex(str(tmp_path / "function_index.db"))
+        try:
+            row = idx.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='function_fts'"
+            ).fetchone()
+            if not idx._fts_enabled or row is None:
+                pytest.skip("当前 SQLite 构建不支持 FTS5")
+            assert row[0] == "function_fts"
+        finally:
+            idx.close()
+
+
+class TestBuildStageCleanupArtifacts:
+    """BuildStage 清理冗余产物时应保留摘要文件和 discover 结果。"""
+
+    def test_cleanup_removes_redundant_artifacts_and_preserves_summaries(self, tmp_path):
+        from ue5_kb.pipeline.build import BuildStage
+
+        kb_path = tmp_path / "KnowledgeBase"
+        graphs_dir = kb_path / "module_graphs"
+        global_index_dir = kb_path / "global_index"
+        analyze_dir = kb_path / "data" / "analyze"
+        extract_dir = kb_path / "data" / "extract"
+        discover_dir = kb_path / "data" / "discover"
+        build_dir = kb_path / "data" / "build"
+
+        for directory in (graphs_dir, global_index_dir, analyze_dir, extract_dir, discover_dir, build_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        (graphs_dir / "WithPkl.json").write_text("{}", encoding="utf-8")
+        (graphs_dir / "WithPkl.pkl").write_bytes(b"pickle")
+        (graphs_dir / "JsonOnly.json").write_text("{}", encoding="utf-8")
+
+        (global_index_dir / "index.db").write_bytes(b"sqlite")
+        (global_index_dir / "global_index.json").write_text("{}", encoding="utf-8")
+        (global_index_dir / "global_index.pkl").write_bytes(b"pickle")
+
+        (discover_dir / "modules.json").write_text("{\"modules\": []}", encoding="utf-8")
+        (analyze_dir / "summary.json").write_text("{}", encoding="utf-8")
+        (extract_dir / "summary.json").write_text("{}", encoding="utf-8")
+        (build_dir / "build_summary.json").write_text("{}", encoding="utf-8")
+        (analyze_dir / ".analyze_checkpoint").write_text("checkpoint", encoding="utf-8")
+
+        (analyze_dir / "ModuleA").mkdir()
+        (analyze_dir / "ModuleA" / "code_graph.json").write_text("{}", encoding="utf-8")
+        (extract_dir / "ModuleA").mkdir()
+        (extract_dir / "ModuleA" / "dependencies.json").write_text("{}", encoding="utf-8")
+
+        BuildStage._cleanup_build_artifacts(kb_path)
+
+        assert not (graphs_dir / "WithPkl.json").exists()
+        assert (graphs_dir / "WithPkl.pkl").exists()
+        assert (graphs_dir / "JsonOnly.json").exists()
+
+        assert (global_index_dir / "index.db").exists()
+        assert not (global_index_dir / "global_index.json").exists()
+        assert not (global_index_dir / "global_index.pkl").exists()
+
+        assert not (analyze_dir / ".analyze_checkpoint").exists()
+        assert not (analyze_dir / "ModuleA").exists()
+        assert not (extract_dir / "ModuleA").exists()
+
+        assert (discover_dir / "modules.json").exists()
+        assert (analyze_dir / "summary.json").exists()
+        assert (extract_dir / "summary.json").exists()
+        assert (build_dir / "build_summary.json").exists()
 

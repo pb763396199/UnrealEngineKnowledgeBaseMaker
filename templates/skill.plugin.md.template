@@ -57,8 +57,12 @@ description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息�
 | `get_function_implementation` | `<function_name> [class_name] [module_hint]` | 获取函数的完整实现代码 |
 | `search_functions` | `<keyword> [limit=50]` | 搜索包含关键字的函数 |
 | `search_classes` | `<keyword> [limit=50]` | 搜索包含关键字的类 |
+| `search_enums` | `<keyword> [limit=50]` | 搜索包含关键字的枚举/UENUM |
 | `search_modules` | `<keyword>` | 搜索包含关键字的模块 |
 | `get_statistics` | - | 获取知识库统计信息 |
+| `query_callees` | `<function_name> [class_name] [limit=50] [confidence=resolved]` | 查询函数调用目标，默认仅 resolved |
+| `query_callers` | `<function_name> [class_name] [limit=50] [confidence=resolved]` | 查询调用某函数的位置，默认仅 resolved |
+| `query_symbol_references` | `<symbol_name> [limit=50] [confidence=resolved]` | 查询符号引用，默认仅 resolved |
 
 ### 查询示例
 
@@ -74,6 +78,18 @@ py "{SKILL_PATH}/impl.py" query_module_dependencies Core
 
 # 搜索类（限制20个结果）
 py "{SKILL_PATH}/impl.py" search_classes Player 20
+
+# 搜索枚举/UENUM
+py "{SKILL_PATH}/impl.py" search_enums Collision 20
+
+# 查询函数调用目标（默认仅 resolved）
+py "{SKILL_PATH}/impl.py" query_callees BeginPlay AActor 50
+
+# 查询调用某函数的位置（包含 ambiguous）
+py "{SKILL_PATH}/impl.py" query_callers ProcessEvent 50 ambiguous
+
+# 查询符号引用（全部 confidence）
+py "{SKILL_PATH}/impl.py" query_symbol_references UObject 100 all
 
 # 获取统计信息
 py "{SKILL_PATH}/impl.py" get_statistics

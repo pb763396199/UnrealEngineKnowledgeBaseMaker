@@ -92,6 +92,14 @@ class SymbolReferenceIndex:
             "CREATE INDEX IF NOT EXISTS idx_sr_relation "
             "ON symbol_references(relation_type)"
         )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sr_confidence "
+            "ON symbol_references(confidence)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sr_relation_confidence "
+            "ON symbol_references(relation_type, confidence)"
+        )
         self.conn.commit()
 
     # ------------------------------------------------------------------
@@ -124,6 +132,7 @@ class SymbolReferenceIndex:
         ci_path = Path(class_index_db)
 
         if not fi_path.exists():
+            self._checkpoint_and_vacuum()
             return {"error": "function_index.db not found", "rows_inserted": 0,
                     "callers_processed": 0, "callers_skipped": 0}
 
@@ -251,6 +260,8 @@ class SymbolReferenceIndex:
             self._insert_batch(batch)
             rows_inserted += len(batch)
 
+        self._checkpoint_and_vacuum()
+
         return {
             "callers_processed": processed,
             "callers_skipped": skipped,
@@ -272,6 +283,14 @@ class SymbolReferenceIndex:
         )
         self.conn.commit()
 
+    def _checkpoint_and_vacuum(self) -> None:
+        """收缩构建后的 WAL 和数据库文件；SQLite 不支持时静默降级。"""
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.conn.execute("VACUUM")
+        except sqlite3.OperationalError:
+            pass
+
     # ------------------------------------------------------------------
     # 查询接口
     # ------------------------------------------------------------------
@@ -281,21 +300,33 @@ class SymbolReferenceIndex:
         function_name: str,
         class_name: Optional[str] = None,
         limit: int = 50,
+        confidence: str = "resolved",
     ) -> List[Dict]:
         """查询某函数调用的所有目标（callees）"""
+        confidence_filter = "" if confidence == "all" else " AND confidence=?"
         if class_name:
+            params = [function_name, class_name]
+            if confidence != "all":
+                params.append(confidence)
+            params.append(limit)
             cursor = self.conn.execute(
                 "SELECT * FROM symbol_references "
                 "WHERE caller_name=? AND caller_class=? AND relation_type='call' "
+                f"{confidence_filter} "
                 "ORDER BY occurrence_line LIMIT ?",
-                (function_name, class_name, limit),
+                params,
             )
         else:
+            params = [function_name]
+            if confidence != "all":
+                params.append(confidence)
+            params.append(limit)
             cursor = self.conn.execute(
                 "SELECT * FROM symbol_references "
                 "WHERE caller_name=? AND relation_type='call' "
+                f"{confidence_filter} "
                 "ORDER BY occurrence_line LIMIT ?",
-                (function_name, limit),
+                params,
             )
         return [dict(r) for r in cursor.fetchall()]
 
@@ -304,21 +335,33 @@ class SymbolReferenceIndex:
         function_name: str,
         class_name: Optional[str] = None,
         limit: int = 50,
+        confidence: str = "resolved",
     ) -> List[Dict]:
         """查询调用某函数的所有 callers"""
+        confidence_filter = "" if confidence == "all" else " AND confidence=?"
         if class_name:
+            params = [function_name, class_name]
+            if confidence != "all":
+                params.append(confidence)
+            params.append(limit)
             cursor = self.conn.execute(
                 "SELECT * FROM symbol_references "
                 "WHERE target_symbol=? AND target_class=? AND relation_type='call' "
+                f"{confidence_filter} "
                 "ORDER BY caller_name LIMIT ?",
-                (function_name, class_name, limit),
+                params,
             )
         else:
+            params = [function_name]
+            if confidence != "all":
+                params.append(confidence)
+            params.append(limit)
             cursor = self.conn.execute(
                 "SELECT * FROM symbol_references "
                 "WHERE target_symbol=? AND relation_type='call' "
+                f"{confidence_filter} "
                 "ORDER BY caller_name LIMIT ?",
-                (function_name, limit),
+                params,
             )
         return [dict(r) for r in cursor.fetchall()]
 
@@ -326,13 +369,20 @@ class SymbolReferenceIndex:
         self,
         symbol_name: str,
         limit: int = 50,
+        confidence: str = "resolved",
     ) -> List[Dict]:
         """查询所有引用某 symbol 的记录（call 或 type_reference）"""
+        confidence_filter = "" if confidence == "all" else " AND confidence=?"
+        params = [symbol_name]
+        if confidence != "all":
+            params.append(confidence)
+        params.append(limit)
         cursor = self.conn.execute(
             "SELECT * FROM symbol_references "
             "WHERE target_symbol=? "
+            f"{confidence_filter} "
             "ORDER BY relation_type, caller_name LIMIT ?",
-            (symbol_name, limit),
+            params,
         )
         return [dict(r) for r in cursor.fetchall()]
 

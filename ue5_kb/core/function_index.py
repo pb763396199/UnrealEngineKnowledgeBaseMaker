@@ -32,6 +32,8 @@ class FunctionIndex:
 
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row  # 支持字典式访问
+        self._fts_enabled = False
+        self._fts_rebuilt_on_demand = False
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -86,6 +88,19 @@ class FunctionIndex:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_func_class ON function_index(class_name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_func_bp ON function_index(is_blueprint_callable)")
 
+        # FTS5 virtual table for full-text search
+        try:
+            cursor.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS function_fts USING fts5(
+                    name, module, class_name, signature, file_path,
+                    content='function_index', content_rowid='id'
+                )
+            """)
+            self._fts_enabled = True
+        except sqlite3.OperationalError:
+            # FTS5 unavailable in this SQLite build; degrade gracefully
+            self._fts_enabled = False
+
         self.conn.commit()
 
     def add_function(self, func_info: Dict[str, Any]) -> None:
@@ -126,6 +141,57 @@ class FunctionIndex:
             func_info.get('is_blueprint_callable', False),
             ufunction_spec_json
         ))
+        self.conn.commit()
+        self._rebuild_fts()
+
+    def _rebuild_fts(self) -> None:
+        """Rebuild FTS5 index from function_index content."""
+        if not self._fts_enabled:
+            return
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("INSERT INTO function_fts(function_fts) VALUES('rebuild')")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            self._fts_enabled = False
+
+    def search_fts(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Full-text search using FTS5.
+
+        Args:
+            query: FTS5 query string (e.g. 'MyFunction*')
+            limit: max results
+
+        Returns:
+            List of function dicts. Returns empty list if FTS5 unavailable.
+        """
+        if not self._fts_enabled:
+            return []
+
+        results = self._search_fts_once(query, limit)
+        if results or self._fts_rebuilt_on_demand:
+            return results
+
+        self._fts_rebuilt_on_demand = True
+        self._rebuild_fts()
+        return self._search_fts_once(query, limit)
+
+    def _search_fts_once(self, query: str, limit: int) -> List[Dict[str, Any]]:
+        """Run one FTS query attempt without rebuilding."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT fi.* FROM function_fts
+                JOIN function_index fi ON fi.id = function_fts.rowid
+                WHERE function_fts MATCH ?
+                ORDER BY fi.is_blueprint_callable DESC, fi.name ASC
+                LIMIT ?
+            """, (query, limit))
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            self._fts_enabled = False
+            return []
 
     def add_functions_batch(self, func_infos: List[Dict[str, Any]]) -> None:
         """
@@ -170,6 +236,7 @@ class FunctionIndex:
         """, data)
 
         self.conn.commit()
+        self._rebuild_fts()
 
     def query_by_name(self, name: str, module_hint: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -229,6 +296,11 @@ class FunctionIndex:
         Returns:
             函数信息列表
         """
+        if keyword:
+            fts_results = self.search_fts(f'{keyword}*', limit)
+            if fts_results:
+                return fts_results
+
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT * FROM function_index

@@ -58,9 +58,16 @@ class ClassIndex:
                 is_blueprintable BOOLEAN DEFAULT 0,
                 method_count INTEGER DEFAULT 0,
                 property_count INTEGER DEFAULT 0,
+                doc_comment TEXT DEFAULT '',
                 UNIQUE(name, module, file_path, line_number)
             )
         """)
+
+        columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(class_index)").fetchall()
+        }
+        if "doc_comment" not in columns:
+            cursor.execute("ALTER TABLE class_index ADD COLUMN doc_comment TEXT DEFAULT ''")
 
         # 创建索引以优化查询
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_class_name ON class_index(name)")
@@ -98,8 +105,8 @@ class ClassIndex:
                 name, module, namespace, parent_classes, interfaces,
                 file_path, line_number,
                 is_uclass, is_struct, is_interface, is_blueprintable,
-                method_count, property_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                method_count, property_count, doc_comment
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             class_info['name'],
             class_info['module'],
@@ -113,7 +120,8 @@ class ClassIndex:
             class_info.get('is_interface', False),
             class_info.get('is_blueprintable', False),
             class_info.get('method_count', 0),
-            class_info.get('property_count', 0)
+            class_info.get('property_count', 0),
+            class_info.get('doc_comment', '')
         ))
         self.conn.commit()
         self._rebuild_fts()
@@ -191,7 +199,8 @@ class ClassIndex:
                 cls_info.get('is_interface', False),
                 cls_info.get('is_blueprintable', False),
                 cls_info.get('method_count', 0),
-                cls_info.get('property_count', 0)
+                cls_info.get('property_count', 0),
+                cls_info.get('doc_comment', '')
             ))
 
         cursor.executemany("""
@@ -199,8 +208,8 @@ class ClassIndex:
                 name, module, namespace, parent_classes, interfaces,
                 file_path, line_number,
                 is_uclass, is_struct, is_interface, is_blueprintable,
-                method_count, property_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                method_count, property_count, doc_comment
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, data)
 
         self.conn.commit()
@@ -328,7 +337,8 @@ class ClassIndex:
             'is_interface': bool(row['is_interface']),
             'is_blueprintable': bool(row['is_blueprintable']),
             'method_count': row['method_count'],
-            'property_count': row['property_count']
+            'property_count': row['property_count'],
+            'doc_comment': row['doc_comment'] if 'doc_comment' in row.keys() else '',
         }
 
     def get_statistics(self) -> Dict[str, Any]:

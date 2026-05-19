@@ -208,15 +208,6 @@ class ParallelBuildStage:
 
         stats = tracker.stop()
 
-        # 2.5. 清理 module_graphs json 副本（仅保留 pkl）
-        removed = 0
-        for json_file in graphs_dir.glob("*.json"):
-            if json_file.with_suffix(".pkl").exists():
-                json_file.unlink()
-                removed += 1
-        if removed:
-            console.print(f"[dim]  清理: 删除 {removed} 个 module_graphs json 副本[/dim]")
-
         # 3. 串行构建全局索引和 SQLite
         console.print(f"\n[cyan]构建全局索引...[/cyan]")
         global_index = self._build_global_index(config)
@@ -232,6 +223,13 @@ class ParallelBuildStage:
             _build_sym_ref(config, source_root=self.base_path)
         except Exception as e:
             console.print(f"[yellow]  警告: 符号引用索引构建失败: {e}[/yellow]")
+
+        # 6. 清理构建冗余和阶段中间产物，保留摘要与最终 SQLite 索引
+        try:
+            from .build import BuildStage
+            BuildStage._cleanup_build_artifacts(self.kb_path)
+        except Exception as e:
+            console.print(f"[yellow]  警告: 构建产物清理失败: {e}[/yellow]")
 
         result = {
             "kb_path": self.kb_path.name,
@@ -331,6 +329,7 @@ class ParallelBuildStage:
                 is_interface=cls.get("is_interface", False),
                 is_blueprintable=cls.get("is_blueprintable", False),
                 specifiers=cls.get("specifiers", {}),
+                doc_comment=cls.get("doc_comment", ""),
             )
 
             for parent in parent_classes:
@@ -376,6 +375,24 @@ class ParallelBuildStage:
                 is_static=func.get("is_static", False),
                 is_override=func.get("is_override", False),
                 ufunction_specifiers=func.get("ufunction_specifiers", {}),
+            )
+
+        for enum in code_graph.get("enums", []):
+            enum_name = enum["name"]
+            file_path = enum.get("file") or enum.get("file_path", "")
+            line_num = enum.get("line") or enum.get("line_number", 0)
+
+            graph.add_node(
+                f"enum_{enum_name}",
+                type="enum",
+                name=enum_name,
+                file=file_path,
+                line=line_num,
+                values=enum.get("values", []),
+                is_uenum=enum.get("is_uenum", False),
+                namespace=enum.get("namespace", ""),
+                doc_comment=enum.get("doc_comment", ""),
+                specifiers=enum.get("specifiers", {}),
             )
 
         return graph
@@ -536,15 +553,22 @@ class ParallelBuildStage:
     def _build_fast_indices(self, config: Config) -> None:
         """构建快速索引（串行）"""
         from ..core.class_index import ClassIndex
+        from ..core.enum_index import EnumIndex
         from ..core.function_index import FunctionIndex
 
         # 创建索引文件路径
         global_index_path = Path(config.global_index_path)
         class_index_db = global_index_path / "class_index.db"
+        enum_index_db = global_index_path / "enum_index.db"
         function_index_db = global_index_path / "function_index.db"
+
+        from .build import BuildStage
+        for db_path in (class_index_db, function_index_db, enum_index_db):
+            BuildStage._reset_sqlite_db(db_path)
 
         class_idx = ClassIndex(str(class_index_db))
         func_idx = FunctionIndex(str(function_index_db))
+        enum_idx = EnumIndex(str(enum_index_db))
 
         # 遍历所有模块图谱，收集类和函数信息
         graphs_dir = Path(config.module_graphs_path)
@@ -554,6 +578,7 @@ class ParallelBuildStage:
 
         classes_batch = []
         functions_batch = []
+        enums_batch = []
 
         for graph_file in graphs_dir.glob("*.pkl"):
             module_name = graph_file.stem
@@ -584,7 +609,8 @@ class ParallelBuildStage:
                             'is_interface': node_data.get('is_interface', False),
                             'is_blueprintable': node_data.get('is_blueprintable', False),
                             'method_count': len(node_data.get('methods', [])),
-                            'property_count': len(node_data.get('properties', []))
+                            'property_count': len(node_data.get('properties', [])),
+                            'doc_comment': node_data.get('doc_comment', ''),
                         }
                         classes_batch.append(class_info)
 
@@ -608,6 +634,20 @@ class ParallelBuildStage:
                         }
                         functions_batch.append(func_info)
 
+                    elif node_data.get('type') == 'enum':
+                        enum_info = {
+                            'name': node_data.get('name', ''),
+                            'module': module_name,
+                            'namespace': node_data.get('namespace', ''),
+                            'values': node_data.get('values', []),
+                            'is_uenum': node_data.get('is_uenum', False),
+                            'file_path': node_data.get('file', ''),
+                            'line_number': node_data.get('line', 0),
+                            'doc_comment': node_data.get('doc_comment', ''),
+                            'specifiers': node_data.get('specifiers', {}),
+                        }
+                        enums_batch.append(enum_info)
+
                 # 批量提交（每 1000 条）
                 if len(classes_batch) >= 1000:
                     class_idx.add_classes_batch(classes_batch)
@@ -617,6 +657,10 @@ class ParallelBuildStage:
                     func_idx.add_functions_batch(functions_batch)
                     functions_batch.clear()
 
+                if len(enums_batch) >= 1000:
+                    enum_idx.add_enums_batch(enums_batch)
+                    enums_batch.clear()
+
             except Exception:
                 pass  # 跳过错误文件
 
@@ -625,6 +669,9 @@ class ParallelBuildStage:
             class_idx.add_classes_batch(classes_batch)
         if functions_batch:
             func_idx.add_functions_batch(functions_batch)
+        if enums_batch:
+            enum_idx.add_enums_batch(enums_batch)
 
         class_idx.commit()
         func_idx.commit()
+        enum_idx.commit()
