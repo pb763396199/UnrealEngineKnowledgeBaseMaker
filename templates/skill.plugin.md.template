@@ -37,13 +37,21 @@ description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息�
 
 ### 查询步骤
 
-1. **使用 Bash 工具执行 impl.py 脚本:**
+1. **先确保 KB 对应当前工作区源码:**
+   ```bash
+   py "{SKILL_PATH}/impl.py" ensure_fresh
+   ```
+   `ensure_fresh` 会优先从当前终端工作目录向上查找 `.uplugin`，因此在 AesWorld 工作区内会自动更新到当前分支/工作树，而不是复用旧分支的全局 KB。
+
+2. **使用 Bash 工具执行 impl.py 脚本:**
    ```bash
    py "{SKILL_PATH}/impl.py" <command> [args...]
    ```
    每个查询结果的 `_meta.data_trust` 字段会标注数据新鲜度。
 
-2. **解析返回的 JSON 结果并向用户展示**
+3. **如果查询结果的 `_meta.data_trust` 是 `stale`，必须立即执行 `ensure_fresh --force`，然后重试原查询一次。**
+
+4. **解析返回的 JSON 结果并向用户展示**
 
 ### 可用 CLI 命令
 
@@ -60,6 +68,7 @@ description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息�
 | `search_enums` | `<keyword> [limit=50]` | 搜索包含关键字的枚举/UENUM |
 | `search_modules` | `<keyword>` | 搜索包含关键字的模块 |
 | `get_statistics` | - | 获取知识库统计信息 |
+| `ensure_fresh` | `[source] [--force]` | 检查并更新当前插件源码对应的 KB |
 | `query_callees` | `<function_name> [class_name] [limit=50] [confidence=resolved]` | 查询函数调用目标，默认仅 resolved |
 | `query_callers` | `<function_name> [class_name] [limit=50] [confidence=resolved]` | 查询调用某函数的位置，默认仅 resolved |
 | `query_symbol_references` | `<symbol_name> [limit=50] [confidence=resolved]` | 查询符号引用，默认仅 resolved |
@@ -110,8 +119,10 @@ py "{SKILL_PATH}/impl.py" get_statistics
 
 ### 查询降级流程
 
-1. **精确查询失败** → 使用模糊搜索
-2. **模糊搜索失败** → 明确告知用户"知识库中未找到该信息"
+1. **精确查询失败且 `_meta.data_trust=stale`** → 先执行 `ensure_fresh --force`，然后重试原查询一次
+2. **精确查询仍失败** → 使用模糊搜索
+3. **模糊搜索失败且 `_meta.data_trust=stale`** → 先执行 `ensure_fresh --force`，然后重试模糊搜索一次
+4. **模糊搜索仍失败** → 明确告知用户"知识库中未找到该信息"
 
 ### 具体降级命令
 
@@ -141,6 +152,7 @@ py "{SKILL_PATH}/impl.py" get_statistics
 ### 关键原则
 
 - **严禁在查询失败时基于训练数据回答** - 这会导致过时或错误的信息
+- **严禁在 stale KB 查询失败后直接改用 Glob/Grep** - 必须先 `ensure_fresh --force` 并重试 KB
 - **必须使用工具搜索** - 模糊搜索找不到时，明确告知用户
 - **返回错误信息中的提示** - 如果 error 包含 `fallback_command` 字段，必须执行
 

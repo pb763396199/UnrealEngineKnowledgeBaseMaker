@@ -80,6 +80,69 @@ _enum_index_cache = None
 _kb_meta_cache = None
 
 
+def _normalize_path_for_compare(path: Path) -> str:
+    """Return a normalized path string for cross-drive/source comparisons."""
+    try:
+        return str(path.resolve()).lower()
+    except Exception:
+        return str(path).lower()
+
+
+def _find_plugin_root_from_cwd() -> Optional[Path]:
+    """Find a .uplugin-owning plugin root from the current working directory."""
+    cwd = Path.cwd()
+    for candidate in [cwd] + list(cwd.parents):
+        try:
+            if any(candidate.glob("*.uplugin")):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _get_active_branch_record() -> Optional[Dict[str, Any]]:
+    """Return the active branch record from BranchManager.status()."""
+    try:
+        status = _branch_mgr.status()
+    except Exception:
+        return None
+    active = status.get("active_branch")
+    for branch in status.get("branches", []):
+        if branch.get("active") or branch.get("branch") == active:
+            return branch
+    return None
+
+
+def _find_branch_record_for_source(source: Path) -> Optional[Dict[str, Any]]:
+    """Return the registered branch whose source path matches source."""
+    try:
+        status = _branch_mgr.status()
+    except Exception:
+        return None
+
+    normalized_source = _normalize_path_for_compare(source)
+    default_match = None
+    for branch in status.get("branches", []):
+        branch_source = branch.get("source")
+        if not branch_source:
+            continue
+        if _normalize_path_for_compare(Path(branch_source)) == normalized_source:
+            if branch.get("branch") != "default":
+                return branch
+            default_match = branch
+    return default_match
+
+
+def _derive_branch_name_from_source(source: Path) -> str:
+    """Derive a stable registry branch name from a plugin source path."""
+    try:
+        if source.parent.name.lower() == "plugins" and source.parent.parent.name:
+            return source.parent.parent.name
+    except Exception:
+        pass
+    return source.name or "default"
+
+
 def _get_kb_meta() -> Dict[str, Any]:
     """获取当前 KB 的分支/commit/新鲜度元数据（缓存）"""
     global _kb_meta_cache
@@ -88,16 +151,26 @@ def _get_kb_meta() -> Dict[str, Any]:
 
     meta = {{"branch": None, "commit": None, "built_at": None, "data_trust": "unknown"}}
     try:
-        st = _branch_mgr.status()
-        active = st.get("active_branch")
-        if active:
-            meta["branch"] = active
-            for b in st.get("branches", []):
-                if b.get("active"):
-                    meta["commit"] = b.get("commit")
-                    meta["built_at"] = b.get("built_at")
-                    meta["data_trust"] = "stale" if b.get("dirty") else "fresh"
-                    break
+        active_record = _get_active_branch_record()
+        if active_record:
+            meta["branch"] = active_record.get("branch")
+            meta["commit"] = active_record.get("commit")
+            meta["built_at"] = active_record.get("built_at")
+            meta["source"] = active_record.get("source")
+            meta["data_trust"] = "unknown"
+
+            cwd_source = _find_plugin_root_from_cwd()
+            selected_source = cwd_source or (Path(active_record.get("source")) if active_record.get("source") else None)
+            if cwd_source:
+                meta["current_source"] = str(cwd_source)
+                registry_source = active_record.get("source")
+                if registry_source and _normalize_path_for_compare(Path(registry_source)) != _normalize_path_for_compare(cwd_source):
+                    meta["data_trust"] = "stale"
+                    meta["stale_reason"] = "current_source_mismatch"
+            if selected_source and "stale_reason" not in meta:
+                freshness = _branch_mgr.check_freshness(str(selected_source))
+                meta["data_trust"] = "fresh" if freshness.get("fresh") else "stale"
+                meta["freshness"] = freshness
     except Exception:
         pass
 
@@ -295,6 +368,70 @@ def get_kb_info() -> Dict[str, Any]:
         "created_at": KB_CREATED_AT,
         "last_updated": KB_LAST_UPDATED,
         "kb_path": str(KB_PATH)
+    }}
+
+
+def ensure_fresh(source: str = None, force: bool = False) -> Dict[str, Any]:
+    """Ensure the active KB matches the current plugin source before querying."""
+    active_record = _get_active_branch_record()
+    if not active_record:
+        return {{"fresh": False, "updated": False, "error": "No active KB branch"}}
+
+    cwd_source = _find_plugin_root_from_cwd()
+    selected_source = Path(source) if source else (cwd_source or Path(active_record.get("source", "")))
+    if not str(selected_source):
+        return {{"fresh": False, "updated": False, "error": "No source path available"}}
+
+    source_record = _find_branch_record_for_source(selected_source)
+    branch_name = (
+        source_record.get("branch")
+        if source_record
+        else _derive_branch_name_from_source(selected_source)
+    )
+
+    active_branch = active_record.get("branch")
+    active_switched = False
+    if source_record and branch_name and branch_name != active_branch:
+        switch_result = _branch_mgr.set_active(branch_name)
+        active_switched = "error" not in switch_result
+
+    registry_source = source_record.get("source") if source_record else None
+    source_mismatch = source_record is None
+    if registry_source:
+        source_mismatch = _normalize_path_for_compare(Path(registry_source)) != _normalize_path_for_compare(selected_source)
+
+    freshness = _branch_mgr.check_freshness(str(selected_source))
+    needs_update = force or source_mismatch or not freshness.get("fresh", False)
+    if not needs_update:
+        global _kb_meta_cache
+        _kb_meta_cache = None
+        return {{
+            "fresh": True,
+            "updated": False,
+            "branch": branch_name,
+            "source": str(selected_source),
+            "active_switched": active_switched,
+            "freshness": freshness,
+        }}
+
+    update_result = _branch_mgr.update(
+        branch_name,
+        str(selected_source),
+        force=force or source_mismatch,
+        description="auto ensure_fresh before query",
+    )
+
+    _kb_meta_cache = None
+
+    return {{
+        "fresh": "error" not in update_result,
+        "updated": "error" not in update_result,
+        "branch": branch_name,
+        "source": str(selected_source),
+        "active_switched": active_switched,
+        "source_mismatch": source_mismatch,
+        "freshness_before": freshness,
+        "update": update_result,
     }}
 
 
@@ -948,6 +1085,7 @@ if __name__ == "__main__":
         print("  search_modules <keyword>                   - 搜索模块", file=sys.stderr)
         print("  get_statistics                             - 获取统计信息", file=sys.stderr)
         print("  get_kb_info                                - 获取知识库版本信息", file=sys.stderr)
+        print("  ensure_fresh [source] [--force]            - 检查并更新当前插件源码对应的 KB", file=sys.stderr)
         print("  query_callees <function_name> [class_name] [limit] [confidence=resolved|all|ambiguous] - 查询函数调用的 callees", file=sys.stderr)
         print("  query_callers <function_name> [class_name] [limit] [confidence=resolved|all|ambiguous] - 查询调用该函数的 callers", file=sys.stderr)
         print("  query_symbol_references <symbol_name> [limit] [confidence=resolved|all|ambiguous]      - 查询符号的所有引用", file=sys.stderr)
@@ -1061,6 +1199,16 @@ if __name__ == "__main__":
 
         elif command == "get_kb_info":
             result = get_kb_info()
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        elif command == "ensure_fresh":
+            force = "--force" in sys.argv
+            source = None
+            for arg in sys.argv[2:]:
+                if arg != "--force":
+                    source = arg
+                    break
+            result = ensure_fresh(source, force)
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         elif command == "query_callees":

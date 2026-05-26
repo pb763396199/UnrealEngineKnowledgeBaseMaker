@@ -1035,6 +1035,15 @@ class TestImplTemplateSourceRootText:
         assert "os.path.exists(impl_file)" not in content, \
             "impl.plugin.py.template get_function_implementation 不应再直接用 os.path.exists(impl_file)"
 
+    def test_plugin_template_ensure_fresh_selects_branch_by_source(self):
+        """ensure_fresh 不应把当前 cwd source 写进错误的 active branch。"""
+        content = self._read_plugin_template()
+        assert "_find_branch_record_for_source" in content
+        assert "_derive_branch_name_from_source" in content
+        assert "set_active(branch_name)" in content
+        assert "description=\"auto ensure_fresh before query\"" in content
+        assert "desc=\"auto ensure_fresh before query\"" not in content
+
 
 class TestSkillTemplateAutoUpdateInstructions:
     """验证生成的 skill 文档会指导 AI 在查询前检查并更新 KB"""
@@ -1057,10 +1066,13 @@ class TestSkillTemplateAutoUpdateInstructions:
         assert "stale" in content
         assert "current" in content
 
-    def test_plugin_skill_template_uses_inline_freshness(self):
-        """P4: plugin template 不再要求前置 stale check，改用 _meta.data_trust"""
+    def test_plugin_skill_template_requires_ensure_fresh(self):
+        """Plugin KB 查询前必须确保当前工作区源码对应的 KB 是新鲜的。"""
         content = self._read_plugin_skill_template()
+        assert "ensure_fresh" in content
+        assert "ensure_fresh --force" in content
         assert "data_trust" in content
+        assert "当前终端工作目录" in content
 
     @pytest.mark.parametrize("template_reader", [
         _read_engine_skill_template,
