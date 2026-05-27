@@ -6,8 +6,30 @@ VCS (Version Control System) 适配器
 
 import subprocess
 import hashlib
+import os
 from pathlib import Path
 from typing import Optional
+
+
+SOURCE_FINGERPRINT_SUFFIXES = (".h", ".hpp", ".cpp", ".inl", ".ush", ".usf")
+SOURCE_FINGERPRINT_NAMES = (".uplugin", ".uproject")
+SOURCE_FINGERPRINT_BUILD_SUFFIX = ".Build.cs"
+SOURCE_FINGERPRINT_SKIP_DIRS = {
+    ".git",
+    ".history",
+    ".hg",
+    ".svn",
+    ".vs",
+    ".idea",
+    "__pycache__",
+    "Binaries",
+    "DerivedDataCache",
+    "Intermediate",
+    "Saved",
+    "Temp",
+    "Generated",
+}
+SOURCE_FINGERPRINT_SKIP_DIRS_NORM = {name.lower() for name in SOURCE_FINGERPRINT_SKIP_DIRS}
 
 
 class VCSAdapter:
@@ -64,9 +86,9 @@ class VCSAdapter:
             return False
 
     def get_worktree_fingerprint(self) -> Optional[str]:
-        """返回 dirty 工作区的稳定指纹；clean 或非 git 返回 None"""
+        """返回工作区源码指纹；Git clean 返回 None，非 Git 返回源码树指纹。"""
         if self._type == "none":
-            return None
+            return self._get_source_tree_fingerprint()
         try:
             status = subprocess.run(
                 ["git", "status", "--porcelain=v1", "-uall"],
@@ -118,6 +140,46 @@ class VCSAdapter:
             return h.hexdigest()
         except Exception:
             return None
+
+    def _get_source_tree_fingerprint(self) -> Optional[str]:
+        root = Path(self._path)
+        if not root.exists():
+            return None
+
+        h = hashlib.sha256()
+        h.update(b"source-tree-v1\0")
+        try:
+            for current_dir, dirs, files in os.walk(root):
+                dirs[:] = sorted(
+                    dirname for dirname in dirs if dirname.lower() not in SOURCE_FINGERPRINT_SKIP_DIRS_NORM
+                )
+                current_path = Path(current_dir)
+                for filename in sorted(files):
+                    path = current_path / filename
+                    if not self._is_source_fingerprint_file(path):
+                        continue
+                    try:
+                        stat = path.stat()
+                        relative = path.relative_to(root).as_posix()
+                    except OSError:
+                        continue
+                    h.update(relative.encode("utf-8", errors="surrogateescape"))
+                    h.update(b"\0")
+                    h.update(str(stat.st_size).encode("ascii"))
+                    h.update(b"\0")
+                    h.update(str(stat.st_mtime_ns).encode("ascii"))
+                    h.update(b"\0")
+            return h.hexdigest()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_source_fingerprint_file(path: Path) -> bool:
+        return (
+            path.name.endswith(SOURCE_FINGERPRINT_BUILD_SUFFIX)
+            or path.suffix in SOURCE_FINGERPRINT_SUFFIXES
+            or path.suffix in SOURCE_FINGERPRINT_NAMES
+        )
 
     def get_branch_name(self) -> Optional[str]:
         """获取当前分支名"""

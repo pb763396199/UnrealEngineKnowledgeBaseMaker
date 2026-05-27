@@ -9,10 +9,15 @@ import pickle
 import sqlite3
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from ue5_kb.branch_manager import BranchManager, safe_pickle_load
+from ue5_kb.core.files_fts_index import search_files as _search_files_index
+from ue5_kb.query.query_audit import QueryAudit, record_query, resolve_trace_id
+from ue5_kb.query.runtime_context import preflight as _build_preflight
+from ue5_kb.query.source_slice import slice_source as _slice_source
 from ue5_kb.vcs import VCSAdapter
 
 # Skill 目录（impl.py 所在目录）
@@ -61,6 +66,93 @@ def _resolve_source_file(path_value: str) -> Path:
         return SOURCE_ROOT.joinpath(*parts)
     return p
 
+
+def _get_runtime_context() -> Dict[str, Any]:
+    """收集当前 KB 的运行时上下文和索引状态"""
+    current_source = _find_plugin_root_from_cwd() or SOURCE_ROOT
+    return _build_preflight(
+        skill_dir=SKILL_DIR,
+        kb_path=KB_PATH,
+        source_root=current_source,
+        branch_manager=_branch_mgr,
+    )
+
+
+def preflight() -> Dict[str, Any]:
+    """查询前检查 KB/source/indices 新鲜度"""
+    return _get_runtime_context()
+
+
+def query_audit(trace_id: str = None, limit: int = 20) -> Dict[str, Any]:
+    """查看最近查询审计记录（SKILL_DIR/runtime/query_audit.db）"""
+    audit = QueryAudit.for_skill(SKILL_DIR)
+    try:
+        return audit.recent(trace_id, limit)
+    finally:
+        audit.close()
+
+
+def source_slice(
+    relative_file: str,
+    line_number: int,
+    mode: str = "context",
+    context_lines: int = 8,
+    max_context_lines: int = 200,
+    max_output_chars: int = 20000,
+) -> Dict[str, Any]:
+    """安全读取 source_root 内的源码切片"""
+    if SOURCE_ROOT is None:
+        return {{"error": "source_root is not available"}}
+    try:
+        result = _slice_source(
+            source_root=SOURCE_ROOT,
+            relative_file=relative_file,
+            line_number=int(line_number),
+            mode=mode,
+            context_lines=int(context_lines),
+            max_context_lines=int(max_context_lines),
+            max_output_chars=int(max_output_chars),
+        )
+        result["_meta"] = _get_kb_meta()
+        return result
+    except Exception as e:
+        return {{"error": str(e), "file": relative_file, "line": line_number, "mode": mode}}
+
+
+def search_files(keyword: str, limit: int = 20) -> Dict[str, Any]:
+    """搜索源码文件全文索引，FTS5 不可用时降级 LIKE"""
+    result = _search_files_index(KB_PATH / "global_index" / "files_fts.db", keyword, limit)
+    result["_meta"] = _get_kb_meta()
+    return result
+
+
+def _record_query_audit(
+    command: str,
+    args: List[str],
+    result: Dict[str, Any] = None,
+    error: str = None,
+    trace_id: str = None,
+    started_at: float = None,
+) -> str:
+    try:
+        context = _get_runtime_context()
+    except Exception:
+        context = _get_kb_meta()
+    try:
+        return record_query(
+            skill_dir=SKILL_DIR,
+            trace_id=trace_id,
+            command=command,
+            args=args,
+            context=context,
+            result=result,
+            error=error,
+            started_at=started_at,
+            finished_at=time.time(),
+        )
+    except Exception:
+        return resolve_trace_id(trace_id)
+
 # KB 版本信息（插件模式）
 KB_PLUGIN_NAME = "{PLUGIN_NAME}"
 KB_PLUGIN_VERSION = "{PLUGIN_VERSION}"
@@ -78,6 +170,39 @@ _function_index_cache = None
 _symbol_reference_index_cache = None
 _enum_index_cache = None
 _kb_meta_cache = None
+
+
+def _path_under_root(path_value: str, root: Optional[Path]) -> str:
+    """Convert an indexed path to a source-root-relative POSIX path when possible."""
+    if root is None or not path_value:
+        return path_value
+    path = Path(path_value)
+    if not path.is_absolute():
+        return path_value
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except Exception:
+        return path_value
+
+
+def _refresh_runtime_paths() -> None:
+    """Refresh active KB/source paths and query caches after same-process branch updates."""
+    global KB_PATH, SOURCE_ROOT, _db_connection, _global_index_cache
+    global _class_index_cache, _function_index_cache, _symbol_reference_index_cache, _enum_index_cache, _kb_meta_cache
+    KB_PATH = _resolve_kb_path()
+    SOURCE_ROOT = _resolve_source_root()
+    if _db_connection is not None:
+        try:
+            _db_connection.close()
+        except Exception:
+            pass
+    _db_connection = None
+    _global_index_cache = None
+    _class_index_cache = None
+    _function_index_cache = None
+    _symbol_reference_index_cache = None
+    _enum_index_cache = None
+    _kb_meta_cache = None
 
 
 def _normalize_path_for_compare(path: Path) -> str:
@@ -394,6 +519,8 @@ def ensure_fresh(source: str = None, force: bool = False) -> Dict[str, Any]:
     if source_record and branch_name and branch_name != active_branch:
         switch_result = _branch_mgr.set_active(branch_name)
         active_switched = "error" not in switch_result
+        if active_switched:
+            _refresh_runtime_paths()
 
     registry_source = source_record.get("source") if source_record else None
     source_mismatch = source_record is None
@@ -403,8 +530,7 @@ def ensure_fresh(source: str = None, force: bool = False) -> Dict[str, Any]:
     freshness = _branch_mgr.check_freshness(str(selected_source))
     needs_update = force or source_mismatch or not freshness.get("fresh", False)
     if not needs_update:
-        global _kb_meta_cache
-        _kb_meta_cache = None
+        _refresh_runtime_paths()
         return {{
             "fresh": True,
             "updated": False,
@@ -421,7 +547,8 @@ def ensure_fresh(source: str = None, force: bool = False) -> Dict[str, Any]:
         description="auto ensure_fresh before query",
     )
 
-    _kb_meta_cache = None
+    if "error" not in update_result:
+        _refresh_runtime_paths()
 
     return {{
         "fresh": "error" not in update_result,
@@ -929,48 +1056,23 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
             "declaration_location": f"{func_info.get('file_path')}:{func_info.get('line_number')}"
         }
 
-    # 读取实现文件内容
-    try:
-        with open(impl_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
+    slice_result = source_slice(_path_under_root(impl_file, SOURCE_ROOT), impl_line or 1, "function")
+    if "error" in slice_result:
+        return slice_result
 
-        boundary_found = False
-
-        # 优先按函数花括号边界提取；失败时回退到旧的有限上下文。
-        if impl_line and impl_line > 0:
-            block = _extract_function_block(lines, impl_line)
-            if block:
-                start_line, end_line, context_lines = block
-                content = ''.join(context_lines)
-                line_info = f"lines {start_line}-{end_line}"
-                boundary_found = True
-            else:
-                start = max(0, impl_line - 11)
-                end = min(len(lines), impl_line + 200)
-                context_lines = lines[start:end]
-                content = ''.join(context_lines)
-                line_info = f"lines {start+1}-{end}"
-        else:
-            content = ''.join(lines)
-            if len(content) > 10000:
-                content = content[:10000] + "... (truncated)"
-            line_info = f"lines 1-{len(lines)}"
-
-        return {
-            "_meta": _get_kb_meta(),
-            "function": function_name,
-            "class": func_info.get('class_name'),
-            "module": func_info.get('module'),
-            "declaration_file": func_info.get('file_path'),
-            "declaration_line": func_info.get('line_number'),
-            "implementation_file": impl_file,
-            "implementation_line": impl_line,
-            "file_content": content,
-            "extracted_range": line_info,
-            "boundary_found": boundary_found
-        }
-    except Exception as e:
-        return {"error": f"Failed to read implementation file: {e}"}
+    return {
+        "_meta": _get_kb_meta(),
+        "function": function_name,
+        "class": func_info.get('class_name'),
+        "module": func_info.get('module'),
+        "declaration_file": func_info.get('file_path'),
+        "declaration_line": func_info.get('line_number'),
+        "implementation_file": impl_file,
+        "implementation_line": impl_line,
+        "file_content": slice_result.get("content", ""),
+        "extracted_range": f"lines {slice_result.get('line_start')}-{slice_result.get('line_end')}",
+        "boundary_found": slice_result.get("boundary_hit", False),
+    }
 
 def query_callees(
     function_name: str,
@@ -1069,16 +1171,41 @@ if __name__ == "__main__":
     import sys
     import json
 
+    def _extract_trace_args(raw_argv):
+        trace_id = None
+        cleaned = []
+        args = list(raw_argv[1:])
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--trace-id":
+                if i + 1 >= len(args):
+                    print("Error: --trace-id requires a value", file=sys.stderr)
+                    sys.exit(1)
+                trace_id = args[i + 1]
+                i += 2
+                continue
+            if arg.startswith("--trace-id="):
+                trace_id = arg.split("=", 1)[1]
+                i += 1
+                continue
+            cleaned.append(arg)
+            i += 1
+        return trace_id, cleaned
+
     def _print_usage():
-        print("Usage: py impl.py <command> [args...]", file=sys.stderr)
+        print("Usage: py impl.py [--trace-id <id>] <command> [args...]", file=sys.stderr)
         print("", file=sys.stderr)
         print("Commands:", file=sys.stderr)
+        print("  preflight                                  - 查询前检查 KB/source/indices", file=sys.stderr)
         print("  query_class_info <class_name>              - 查询类信息", file=sys.stderr)
         print("  query_class_hierarchy <class_name> [depth] - 查询类继承关系", file=sys.stderr)
         print("  query_module_dependencies <module_name>    - 查询模块依赖", file=sys.stderr)
         print("  query_module_classes <module_name> [type]  - 查询模块中的类", file=sys.stderr)
         print("  query_function_info <function_name> [hint] - 查询函数信息", file=sys.stderr)
         print("  get_function_implementation <function_name> [class_name] [hint] - 获取函数实现", file=sys.stderr)
+        print("  source_slice <relative_file> <line> [context|function] [context_lines] - 安全读取源码切片", file=sys.stderr)
+        print("  search_files <keyword> [limit]             - 搜索源码文件全文索引", file=sys.stderr)
         print("  search_functions <keyword> [limit]         - 搜索函数", file=sys.stderr)
         print("  search_classes <keyword> [limit]           - 搜索类", file=sys.stderr)
         print("  search_enums <keyword> [limit]             - 搜索枚举/UENUM", file=sys.stderr)
@@ -1086,6 +1213,7 @@ if __name__ == "__main__":
         print("  get_statistics                             - 获取统计信息", file=sys.stderr)
         print("  get_kb_info                                - 获取知识库版本信息", file=sys.stderr)
         print("  ensure_fresh [source] [--force]            - 检查并更新当前插件源码对应的 KB", file=sys.stderr)
+        print("  query_audit [trace_id] [limit]             - 查看查询审计记录", file=sys.stderr)
         print("  query_callees <function_name> [class_name] [limit] [confidence=resolved|all|ambiguous] - 查询函数调用的 callees", file=sys.stderr)
         print("  query_callers <function_name> [class_name] [limit] [confidence=resolved|all|ambiguous] - 查询调用该函数的 callers", file=sys.stderr)
         print("  query_symbol_references <symbol_name> [limit] [confidence=resolved|all|ambiguous]      - 查询符号的所有引用", file=sys.stderr)
@@ -1101,218 +1229,169 @@ if __name__ == "__main__":
         print("  gc [--dry-run]                             - 垃圾回收", file=sys.stderr)
         print("", file=sys.stderr)
         print("Examples:", file=sys.stderr)
+        print('  py impl.py preflight', file=sys.stderr)
+        print('  py impl.py --trace-id demo query_class_info AActor', file=sys.stderr)
         print('  py impl.py query_class_info AActor', file=sys.stderr)
         print('  py impl.py query_class_hierarchy AActor 5', file=sys.stderr)
+        print('  py impl.py source_slice "Source/MyModule/Private/Foo.cpp" 120 function', file=sys.stderr)
+        print('  py impl.py search_files "BeginPlay" 20', file=sys.stderr)
         print('  py impl.py search_classes "Player" 20', file=sys.stderr)
         print('  py impl.py init', file=sys.stderr)
         print('  py impl.py register DEV /path/to/source', file=sys.stderr)
         print('  py impl.py set_active DEV', file=sys.stderr)
         sys.exit(1)
 
-    if len(sys.argv) < 2:
-        _print_usage()
+    def _require(args, count, message):
+        if len(args) < count:
+            print(f"Error: {message}", file=sys.stderr)
+            _print_usage()
 
-    command = sys.argv[1]
+    def _option_value(args, option):
+        if option not in args:
+            return None
+        idx = args.index(option)
+        return args[idx + 1] if idx + 1 < len(args) else None
 
-    try:
+    def _run_command(command, args):
+        if command == "preflight":
+            return preflight()
         if command == "query_class_info":
-            if len(sys.argv) < 3:
-                print("Error: Missing class_name argument", file=sys.stderr)
-                _print_usage()
-            result = query_class_info(sys.argv[2])
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "query_class_hierarchy":
-            if len(sys.argv) < 3:
-                print("Error: Missing class_name argument", file=sys.stderr)
-                _print_usage()
-            depth = int(sys.argv[3]) if len(sys.argv) > 3 else 3
-            result = query_class_hierarchy(sys.argv[2], depth)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "query_module_dependencies":
-            if len(sys.argv) < 3:
-                print("Error: Missing module_name argument", file=sys.stderr)
-                _print_usage()
-            result = query_module_dependencies(sys.argv[2])
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "query_module_classes":
-            if len(sys.argv) < 3:
-                print("Error: Missing module_name argument", file=sys.stderr)
-                _print_usage()
-            class_type = sys.argv[3] if len(sys.argv) > 3 else None
-            result = query_module_classes(sys.argv[2], class_type)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "query_function_info":
-            if len(sys.argv) < 3:
-                print("Error: Missing function_name argument", file=sys.stderr)
-                _print_usage()
-            module_hint = sys.argv[3] if len(sys.argv) > 3 else None
-            result = query_function_info(sys.argv[2], module_hint)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "get_function_implementation":
-            if len(sys.argv) < 3:
-                print("Error: Missing function_name argument", file=sys.stderr)
-                _print_usage()
-            class_name = sys.argv[3] if len(sys.argv) > 3 else None
-            module_hint = sys.argv[4] if len(sys.argv) > 4 else None
-            result = get_function_implementation(sys.argv[2], class_name, module_hint)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "search_functions":
-            if len(sys.argv) < 3:
-                print("Error: Missing keyword argument", file=sys.stderr)
-                _print_usage()
-            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-            result = search_functions(sys.argv[2], limit)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "search_classes":
-            if len(sys.argv) < 3:
-                print("Error: Missing keyword argument", file=sys.stderr)
-                _print_usage()
-            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-            result = search_classes(sys.argv[2], limit)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "search_enums":
-            if len(sys.argv) < 3:
-                print("Error: Missing keyword argument", file=sys.stderr)
-                _print_usage()
-            limit = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-            result = search_enums(sys.argv[2], limit)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "search_modules":
-            if len(sys.argv) < 3:
-                print("Error: Missing keyword argument", file=sys.stderr)
-                _print_usage()
-            result = search_modules(sys.argv[2])
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "get_statistics":
-            result = get_statistics()
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "get_kb_info":
-            result = get_kb_info()
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "ensure_fresh":
-            force = "--force" in sys.argv
+            _require(args, 1, "Missing class_name argument")
+            return query_class_info(args[0])
+        if command == "query_class_hierarchy":
+            _require(args, 1, "Missing class_name argument")
+            depth = int(args[1]) if len(args) > 1 else 3
+            return query_class_hierarchy(args[0], depth)
+        if command == "query_module_dependencies":
+            _require(args, 1, "Missing module_name argument")
+            return query_module_dependencies(args[0])
+        if command == "query_module_classes":
+            _require(args, 1, "Missing module_name argument")
+            class_type = args[1] if len(args) > 1 else None
+            return query_module_classes(args[0], class_type)
+        if command == "query_function_info":
+            _require(args, 1, "Missing function_name argument")
+            module_hint = args[1] if len(args) > 1 else None
+            return query_function_info(args[0], module_hint)
+        if command == "get_function_implementation":
+            _require(args, 1, "Missing function_name argument")
+            class_name = args[1] if len(args) > 1 else None
+            module_hint = args[2] if len(args) > 2 else None
+            return get_function_implementation(args[0], class_name, module_hint)
+        if command == "source_slice":
+            _require(args, 2, "Missing source_slice arguments")
+            mode = args[2] if len(args) > 2 else "context"
+            context_lines = int(args[3]) if len(args) > 3 else 8
+            max_context_lines = int(args[4]) if len(args) > 4 else 200
+            max_output_chars = int(args[5]) if len(args) > 5 else 20000
+            return source_slice(args[0], int(args[1]), mode, context_lines, max_context_lines, max_output_chars)
+        if command == "search_files":
+            _require(args, 1, "Missing keyword argument")
+            limit = int(args[1]) if len(args) > 1 else 20
+            return search_files(args[0], limit)
+        if command == "search_functions":
+            _require(args, 1, "Missing keyword argument")
+            limit = int(args[1]) if len(args) > 1 else 50
+            return search_functions(args[0], limit)
+        if command == "search_classes":
+            _require(args, 1, "Missing keyword argument")
+            limit = int(args[1]) if len(args) > 1 else 50
+            return search_classes(args[0], limit)
+        if command == "search_enums":
+            _require(args, 1, "Missing keyword argument")
+            limit = int(args[1]) if len(args) > 1 else 50
+            return search_enums(args[0], limit)
+        if command == "search_modules":
+            _require(args, 1, "Missing keyword argument")
+            return search_modules(args[0])
+        if command == "get_statistics":
+            return get_statistics()
+        if command == "get_kb_info":
+            return get_kb_info()
+        if command == "ensure_fresh":
+            force = "--force" in args
             source = None
-            for arg in sys.argv[2:]:
+            for arg in args:
                 if arg != "--force":
                     source = arg
                     break
-            result = ensure_fresh(source, force)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return ensure_fresh(source, force)
+        if command == "query_callees":
+            _require(args, 1, "Missing function_name argument")
+            class_name, limit, confidence = _parse_optional_class_limit_confidence(args[1:])
+            return query_callees(args[0], class_name, limit, confidence)
+        if command == "query_callers":
+            _require(args, 1, "Missing function_name argument")
+            class_name, limit, confidence = _parse_optional_class_limit_confidence(args[1:])
+            return query_callers(args[0], class_name, limit, confidence)
+        if command == "query_symbol_references":
+            _require(args, 1, "Missing symbol_name argument")
+            limit, confidence = _parse_optional_limit_confidence(args[1:])
+            return query_symbol_references(args[0], limit, confidence)
+        if command == "query_audit":
+            trace = args[0] if args else None
+            limit = int(args[1]) if len(args) > 1 else 20
+            return query_audit(trace, limit)
+        if command == "init":
+            return _branch_mgr.init_registry(_option_value(args, "--kb_store"))
+        if command == "register":
+            _require(args, 2, "register <branch> <source> [--kb <path>]")
+            return _branch_mgr.register(args[0], args[1], _option_value(args, "--kb"), _option_value(args, "--desc") or "")
+        if command == "update":
+            _require(args, 2, "update <branch> <source> [--force]")
+            return _branch_mgr.update(args[0], args[1], "--force" in args, _option_value(args, "--desc") or "")
+        if command == "status":
+            return _branch_mgr.status()
+        if command == "set_active":
+            _require(args, 1, "set_active <branch>")
+            return _branch_mgr.set_active(args[0])
+        if command == "check_freshness":
+            _require(args, 1, "check_freshness <source>")
+            return _branch_mgr.check_freshness(args[0])
+        if command == "remove":
+            _require(args, 1, "remove <branch> [--delete-data]")
+            return _branch_mgr.remove(args[0], "--delete-data" in args)
+        if command == "gc":
+            return _branch_mgr.gc("--dry-run" in args)
+        print(f"Error: Unknown command '{command}'", file=sys.stderr)
+        _print_usage()
 
-        elif command == "query_callees":
-            if len(sys.argv) < 3:
-                print("Error: Missing function_name argument", file=sys.stderr)
-                _print_usage()
-            class_name, limit, confidence = _parse_optional_class_limit_confidence(sys.argv[3:])
-            result = query_callees(sys.argv[2], class_name, limit, confidence)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+    trace_id, cli_args = _extract_trace_args(sys.argv)
+    if len(cli_args) < 1:
+        _print_usage()
 
-        elif command == "query_callers":
-            if len(sys.argv) < 3:
-                print("Error: Missing function_name argument", file=sys.stderr)
-                _print_usage()
-            class_name, limit, confidence = _parse_optional_class_limit_confidence(sys.argv[3:])
-            result = query_callers(sys.argv[2], class_name, limit, confidence)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+    command = cli_args[0]
+    command_args = cli_args[1:]
+    started_at = time.time()
 
-        elif command == "query_symbol_references":
-            if len(sys.argv) < 3:
-                print("Error: Missing symbol_name argument", file=sys.stderr)
-                _print_usage()
-            limit, confidence = _parse_optional_limit_confidence(sys.argv[3:])
-            result = query_symbol_references(sys.argv[2], limit, confidence)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        # ================================================================
-        # 多分支管理命令
-        # ================================================================
-        elif command == "init":
-            kb_store = None
-            if "--kb_store" in sys.argv:
-                idx = sys.argv.index("--kb_store")
-                kb_store = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
-            result = _branch_mgr.init_registry(kb_store)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "register":
-            if len(sys.argv) < 4:
-                print("Error: register <branch> <source> [--kb <path>]", file=sys.stderr)
-                _print_usage()
-            branch_name = sys.argv[2]
-            source = sys.argv[3]
-            kb_path = None
-            if "--kb" in sys.argv:
-                idx = sys.argv.index("--kb")
-                kb_path = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
-            desc = ""
-            if "--desc" in sys.argv:
-                idx = sys.argv.index("--desc")
-                desc = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
-            result = _branch_mgr.register(branch_name, source, kb_path, desc)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "update":
-            if len(sys.argv) < 4:
-                print("Error: update <branch> <source> [--force]", file=sys.stderr)
-                _print_usage()
-            branch_name = sys.argv[2]
-            source = sys.argv[3]
-            force = "--force" in sys.argv
-            desc = ""
-            if "--desc" in sys.argv:
-                idx = sys.argv.index("--desc")
-                desc = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
-            result = _branch_mgr.update(branch_name, source, force, desc)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "status":
-            result = _branch_mgr.status()
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "set_active":
-            if len(sys.argv) < 3:
-                print("Error: set_active <branch>", file=sys.stderr)
-                _print_usage()
-            result = _branch_mgr.set_active(sys.argv[2])
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "check_freshness":
-            if len(sys.argv) < 3:
-                print("Error: check_freshness <source>", file=sys.stderr)
-                _print_usage()
-            result = _branch_mgr.check_freshness(sys.argv[2])
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "remove":
-            if len(sys.argv) < 3:
-                print("Error: remove <branch> [--delete-data]", file=sys.stderr)
-                _print_usage()
-            delete_data = "--delete-data" in sys.argv
-            result = _branch_mgr.remove(sys.argv[2], delete_data)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        elif command == "gc":
-            dry_run = "--dry-run" in sys.argv
-            result = _branch_mgr.gc(dry_run)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        else:
-            print(f"Error: Unknown command '{command}'", file=sys.stderr)
-            _print_usage()
+    try:
+        result = _run_command(command, command_args)
+        if command != "query_audit":
+            audit_error = result.get("error") if isinstance(result, dict) else None
+            resolved_trace_id = _record_query_audit(
+                command,
+                command_args,
+                result=result,
+                error=audit_error,
+                trace_id=trace_id,
+                started_at=started_at,
+            )
+            if isinstance(result, dict):
+                result.setdefault("_audit", {{}})["trace_id"] = resolved_trace_id
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
     except Exception as e:
-        error_result = {"error": str(e), "command": command, "args": sys.argv[2:]}
+        resolved_trace_id = resolve_trace_id(trace_id)
+        try:
+            _record_query_audit(
+                command,
+                command_args,
+                error=str(e),
+                trace_id=resolved_trace_id,
+                started_at=started_at,
+            )
+        except Exception:
+            pass
+        error_result = {{"error": str(e), "command": command, "args": command_args, "_audit": {{"trace_id": resolved_trace_id}}}}
         print(json.dumps(error_result, ensure_ascii=False, indent=2))
         sys.exit(1)

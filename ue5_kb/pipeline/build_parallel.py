@@ -224,7 +224,16 @@ class ParallelBuildStage:
         except Exception as e:
             console.print(f"[yellow]  警告: 符号引用索引构建失败: {e}[/yellow]")
 
-        # 6. 清理构建冗余和阶段中间产物，保留摘要与最终 SQLite 索引
+        # 6. 构建源码全文检索索引（与串行 Build 共用实现）
+        console.print(f"[cyan]构建源码全文检索索引...[/cyan]")
+        try:
+            from .build import BuildStage
+            files_fts = BuildStage._build_files_fts_index(self, config)
+        except Exception as e:
+            files_fts = {"error": str(e), "indexed_count": 0, "fts_enabled": False}
+            console.print(f"[yellow]  警告: 源码全文检索索引构建失败: {e}[/yellow]")
+
+        # 7. 清理构建冗余和阶段中间产物，保留摘要与最终 SQLite 索引
         try:
             from .build import BuildStage
             BuildStage._cleanup_build_artifacts(self.kb_path)
@@ -236,6 +245,7 @@ class ParallelBuildStage:
             "module_graphs_created": built_count,
             "failed_modules": failed_modules,
             "elapsed_time": stats["elapsed"],
+            "files_fts": files_fts,
         }
 
         console.print(f"\n[green]Build 阶段完成！[/green]")

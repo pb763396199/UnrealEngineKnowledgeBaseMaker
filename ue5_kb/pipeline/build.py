@@ -91,13 +91,16 @@ class BuildStage(PipelineStage):
         except Exception as e:
             print(f"  [警告] 符号引用索引构建失败: {e}")
 
-        # 6. 质量门禁检查（Phase 0：只警告，不中断）
+        # 6. 构建源码全文检索索引（FTS5 不可用时查询端自动降级 LIKE）
+        files_fts = self._build_files_fts_index(config)
+
+        # 7. 质量门禁检查（Phase 0：只警告，不中断）
         quality = self._check_quality_gates(config)
 
-        # 7. 保存统计信息
+        # 8. 保存统计信息
         stats = global_index.get_statistics()
 
-        # 8. 创建并保存 KB 清单（v2.13.0 新增）
+        # 9. 创建并保存 KB 清单（v2.13.0 新增）
         self._save_kb_manifest(kb_path, stats)
 
         result = {
@@ -106,6 +109,7 @@ class BuildStage(PipelineStage):
             'module_graphs_created': modules_built,
             'statistics': stats,
             'quality_gates': quality,
+            'files_fts': files_fts,
         }
 
         # 保存构建摘要
@@ -456,6 +460,25 @@ class BuildStage(PipelineStage):
         print(f"    类索引: {class_stats['total_classes']} 个类")
         print(f"    函数索引: {func_stats['total_functions']} 个函数")
         print(f"    枚举索引: {enum_stats['total_enums']} 个枚举")
+
+    def _build_files_fts_index(self, config: Config) -> Dict[str, Any]:
+        """构建源码文件全文检索索引，失败只告警不中断主构建。"""
+        try:
+            from ..core.files_fts_index import build_files_fts_index
+
+            db_path = Path(config.global_index_path) / "files_fts.db"
+            print(f"  构建源码全文检索索引...")
+            result = build_files_fts_index(self.base_path, db_path)
+            print(
+                "    files_fts: "
+                f"{result.get('indexed_count', 0)} 个文件, "
+                f"fts_enabled={result.get('fts_enabled')}"
+            )
+            return result
+        except Exception as e:
+            warning = {"error": str(e), "indexed_count": 0, "fts_enabled": False}
+            print(f"  [警告] 源码全文检索索引构建失败: {e}")
+            return warning
 
     def _check_quality_gates(self, config: Config) -> Dict[str, Any]:
         """

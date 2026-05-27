@@ -344,6 +344,16 @@ class BranchManager:
         """VCSAdapter.is_dirty 正常返回 bool；未配置 Mock 按 clean 处理"""
         return value if isinstance(value, bool) else False
 
+    @staticmethod
+    def _normalize_path_for_compare(path_value: Any) -> str:
+        """归一化路径用于 source_root 比较，兼容 Windows 大小写与分隔符。"""
+        if not path_value:
+            return ""
+        try:
+            return os.path.normcase(str(Path(path_value).resolve()))
+        except Exception:
+            return os.path.normcase(str(path_value))
+
     @classmethod
     def _worktree_matches(
         cls,
@@ -359,6 +369,18 @@ class BranchManager:
             == cls._normalize_fingerprint(current_fingerprint)
         )
 
+    @staticmethod
+    def _commit_matches_for_freshness(
+        registry_commit: Optional[str],
+        current_commit: Optional[str],
+    ) -> bool:
+        """Treat non-git unknown commits as equivalent for freshness checks."""
+        if registry_commit == current_commit:
+            return True
+        registry = registry_commit or ""
+        current = current_commit or ""
+        return registry.startswith("unknown") and current.startswith("unknown")
+
     @classmethod
     def _stale_reason(
         cls,
@@ -370,7 +392,7 @@ class BranchManager:
         current_fingerprint: Optional[str],
     ) -> Optional[str]:
         """返回导致 registry stale 的首个明确原因"""
-        if current_commit != registry_commit:
+        if not cls._commit_matches_for_freshness(registry_commit, current_commit):
             return "commit_changed"
         if cls._normalize_dirty(registry_dirty) != bool(current_dirty):
             return "dirty_changed"
@@ -1124,6 +1146,7 @@ class BranchManager:
             return {
                 "fresh": False,
                 "reason": "Registry 未初始化",
+                "stale_reason": "registry_missing",
                 "current_commit": current_commit[:7],
             }
 
@@ -1138,6 +1161,7 @@ class BranchManager:
                 return {
                     "fresh": False,
                     "reason": "无活跃分支",
+                    "stale_reason": "active_branch_missing",
                     "current_commit": current_commit[:7],
                 }
 
@@ -1148,24 +1172,34 @@ class BranchManager:
                 return {
                     "fresh": False,
                     "reason": f"分支 '{active[0]}' 数据缺失",
+                    "stale_reason": "branch_missing",
                     "current_commit": current_commit[:7],
                 }
 
             kb_commit = row[0]
             version = conn.execute(
-                "SELECT dirty, worktree_fingerprint FROM versions WHERE commit_id = ?",
+                "SELECT dirty, worktree_fingerprint, source_path FROM versions WHERE commit_id = ?",
                 (kb_commit,),
             ).fetchone()
             registry_dirty = version[0] if version else 0
             registry_fingerprint = version[1] if version else None
-            fresh = self._stale_reason(
+            registry_source = version[2] if version else None
+            source_mismatch = False
+            if registry_source:
+                source_mismatch = (
+                    self._normalize_path_for_compare(registry_source)
+                    != self._normalize_path_for_compare(source)
+                )
+
+            stale_reason = "source_mismatch" if source_mismatch else self._stale_reason(
                 kb_commit,
                 current_commit,
                 registry_dirty,
                 is_dirty,
                 registry_fingerprint,
                 current_fingerprint,
-            ) is None
+            )
+            fresh = stale_reason is None
 
             return {
                 "fresh": fresh,
@@ -1175,6 +1209,12 @@ class BranchManager:
                 "registry_dirty": self._normalize_dirty(registry_dirty),
                 "worktree_fingerprint": self._short_fingerprint(current_fingerprint),
                 "registry_fingerprint": self._short_fingerprint(registry_fingerprint),
+                "expected_fingerprint": self._short_fingerprint(registry_fingerprint),
+                "actual_fingerprint": self._short_fingerprint(current_fingerprint),
+                "source": source,
+                "registry_source": registry_source,
+                "source_mismatch": source_mismatch,
+                "stale_reason": stale_reason,
                 "branch": active[0],
             }
         finally:

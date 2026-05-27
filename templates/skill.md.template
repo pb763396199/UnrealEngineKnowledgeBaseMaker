@@ -37,19 +37,23 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 
 ### 查询步骤
 
-1. **先检查知识库是否过期（必须）:**
+1. **源码问答前先执行 preflight（必须）:**
+   ```bash
+   py "{SKILL_PATH}/impl.py" preflight
+   ```
+   如需批量确认所有分支是否 current，先执行：
    ```bash
    py -m ue5_kb.cli branch update-all --check --skill-path "{SKILL_PATH}"
    ```
-   如果输出中有 `stale`，先执行：
+   如果输出中 `data_trust=stale` 或 `fresh=false`，或检查结果不是 `current`，先执行：
    ```bash
    py -m ue5_kb.cli branch update-all --skill-path "{SKILL_PATH}"
    ```
-   更新完成后再次执行 `--check`，确认目标分支为 `current`。
+   更新完成后再次执行 `preflight`，确认 `fresh=true` 且关键索引存在。
 
-2. **使用 Bash 工具执行 impl.py 脚本:**
+2. **使用 Bash 工具执行 impl.py 脚本，可传 trace-id 串联审计:**
    ```bash
-   py "{SKILL_PATH}/impl.py" <command> [args...]
+   py "{SKILL_PATH}/impl.py" [--trace-id <id>] <command> [args...]
    ```
 
 3. **解析返回的 JSON 结果**
@@ -60,12 +64,15 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 
 | 命令 | 参数 | 说明 |
 |------|------|------|
+| `preflight` | - | 检查 KB/source/indices/runtime context，新鲜度不足先刷新 |
 | `query_class_info` | `<class_name>` | 查询类的详细信息 |
 | `query_class_hierarchy` | `<class_name> [depth=3]` | 查询类的继承层次 |
 | `query_module_dependencies` | `<module_name>` | 查询模块依赖关系 |
 | `query_module_classes` | `<module_name> [class_type]` | 查询模块中的所有类 |
 | `query_function_info` | `<function_name> [module_hint]` | 查询函数信息（包含声明和实现位置） |
 | `get_function_implementation` | `<function_name> [class_name] [module_hint]` | 获取函数的完整实现代码 |
+| `source_slice` | `<relative_file> <line> [context\|function] [context_lines] [max_context_lines] [max_output_chars]` | 安全读取 `source_root` 内源码切片 |
+| `search_files` | `<keyword> [limit=20]` | 搜索源码文件全文索引，FTS5 不可用时降级 LIKE |
 | `search_functions` | `<keyword> [limit=50]` | 搜索包含关键字的函数 |
 | `search_classes` | `<keyword> [limit=50]` | 搜索包含关键字的类 |
 | `search_modules` | `<keyword>` | 搜索包含关键字的模块 |
@@ -74,13 +81,17 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | `query_enum_info` | `<enum_name> [module_hint]` | 查询枚举信息（含枚举值） |
 | `search_enums` | `<keyword> [limit=50]` | 搜索枚举 |
 | `query_examples` | `<target_name> [limit=5]` | 查询代码使用示例 |
+| `query_audit` | `[trace_id] [limit=20]` | 查看 `runtime/query_audit.db` 中的查询审计记录 |
 | `get_statistics` | - | 获取知识库统计信息 |
 
 ### 查询示例
 
 ```bash
+# 预检 KB/source/indices
+py "{SKILL_PATH}/impl.py" preflight
+
 # 查询类信息
-py "{SKILL_PATH}/impl.py" query_class_info AActor
+py "{SKILL_PATH}/impl.py" --trace-id demo query_class_info AActor
 
 # 查询类继承关系（深度5层）
 py "{SKILL_PATH}/impl.py" query_class_hierarchy AActor 5
@@ -91,13 +102,22 @@ py "{SKILL_PATH}/impl.py" query_module_dependencies Core
 # 搜索类（限制20个结果）
 py "{SKILL_PATH}/impl.py" search_classes Player 20
 
+# 安全读取源码函数块
+py "{SKILL_PATH}/impl.py" source_slice Source/Runtime/Engine/Private/Actor.cpp 120 function
+
+# 搜索源码文件
+py "{SKILL_PATH}/impl.py" search_files RHICreateTexture 20
+
+# 查看同一 trace 的审计记录
+py "{SKILL_PATH}/impl.py" query_audit demo 20
+
 # 获取统计信息
 py "{SKILL_PATH}/impl.py" get_statistics
 ```
 
 ## 使用建议
 
-1. **先检查更新**：每次开始使用此技能时，先运行 `branch update-all --check`；发现 `stale` 必须先更新
+1. **先做 preflight**：每次源码问答前先运行 `preflight`；发现 `stale` 必须先更新
 2. **始终使用 CLI 查询**：不要直接使用 Glob/Grep 搜索源码，知识库查询更快更准确
 3. **优先使用精确查询**：如果知道具体的类名或模块名，使用 `query_class_info` 或 `query_module_dependencies`
 4. **使用搜索功能**：如果只知道关键字，使用 `search_modules`、`search_classes` 或 `search_functions`
@@ -112,7 +132,8 @@ py "{SKILL_PATH}/impl.py" get_statistics
 ### 查询降级流程
 
 1. **精确查询失败** → 使用模糊搜索
-2. **模糊搜索失败** → 明确告知用户"知识库中未找到该信息"
+2. **需要源码细节** → 优先用 `source_slice` 或 `search_files` 回源验证
+3. **模糊搜索失败** → 明确告知用户"知识库中未找到该信息"
 
 ### 具体降级命令
 
@@ -143,6 +164,8 @@ py "{SKILL_PATH}/impl.py" get_statistics
 
 - **严禁在查询失败时基于训练数据回答** - 这会导致过时或错误的信息
 - **必须使用工具搜索** - 模糊搜索找不到时，明确告知用户
+- **源码问答必须先 preflight** - stale 时先刷新，不能绕过 KB 直接猜
+- **大结果用 query_audit 追踪** - 默认审计只记录命令、参数摘要和结果数量，不记录源码全文
 - **返回错误信息中的提示** - 如果 error 包含 `fallback_command` 字段，必须执行
 
 ---
