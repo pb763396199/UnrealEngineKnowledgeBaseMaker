@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import bisect
 from pathlib import Path, PureWindowsPath
 from typing import Dict, List, Optional, Tuple
 
@@ -155,6 +156,255 @@ def _find_matching_close_brace_offset(text: str) -> int:
     return -1
 
 
+_CONTROL_BLOCK_KEYWORDS = {
+    "if",
+    "else",
+    "for",
+    "while",
+    "switch",
+    "catch",
+    "do",
+    "try",
+    "case",
+    "default",
+}
+
+_TYPE_BLOCK_KEYWORDS = {
+    "class",
+    "struct",
+    "namespace",
+    "enum",
+    "union",
+}
+
+_ACCESS_SPECIFIER_LABELS = {
+    "public:",
+    "protected:",
+    "private:",
+}
+
+
+def _line_starts(text: str) -> List[int]:
+    starts = [0]
+    for index, char in enumerate(text):
+        if char == "\n":
+            starts.append(index + 1)
+    return starts
+
+
+def _offset_to_line(offset: int, line_starts: List[int]) -> int:
+    return bisect.bisect_right(line_starts, offset) - 1
+
+
+def _scan_brace_blocks(text: str) -> List[Tuple[int, int]]:
+    in_string = False
+    in_char = False
+    in_line_comment = False
+    in_block_comment = False
+    stack: List[int] = []
+    blocks: List[Tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+        elif in_block_comment:
+            if char == "*" and index + 1 < len(text) and text[index + 1] == "/":
+                in_block_comment = False
+                index += 1
+        elif in_string:
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                in_string = False
+        elif in_char:
+            if char == "\\":
+                index += 1
+            elif char == "'":
+                in_char = False
+        else:
+            if char == "/" and index + 1 < len(text):
+                if text[index + 1] == "/":
+                    in_line_comment = True
+                    index += 1
+                elif text[index + 1] == "*":
+                    in_block_comment = True
+                    index += 1
+            elif char == '"':
+                in_string = True
+            elif char == "'":
+                in_char = True
+            elif char == "{":
+                stack.append(index)
+            elif char == "}" and stack:
+                blocks.append((stack.pop(), index))
+        index += 1
+    return blocks
+
+
+def _signature_start_offset(text: str, open_offset: int, line_starts: List[int]) -> int:
+    search_start = max(0, open_offset - 12000)
+    depth = 0
+    index = open_offset - 1
+    while index >= search_start:
+        char = text[index]
+        if char in ")]>":
+            depth += 1
+        elif char in "([<" and depth > 0:
+            depth -= 1
+        elif depth == 0 and char in ";{}":
+            return index + 1
+        index -= 1
+    return search_start
+
+
+def _last_identifier_before_paren(header: str) -> str:
+    paren_index = header.find("(")
+    if paren_index < 0:
+        return ""
+    index = paren_index - 1
+    while index >= 0 and header[index].isspace():
+        index -= 1
+    end = index + 1
+    while index >= 0 and (header[index].isalnum() or header[index] == "_"):
+        index -= 1
+    return header[index + 1 : end]
+
+
+def _starts_with_keyword(header: str, keyword: str) -> bool:
+    return header == keyword or header.startswith(f"{keyword} ") or header.startswith(f"{keyword}(")
+
+
+def _is_header_separator_line(stripped_line: str) -> bool:
+    return (
+        not stripped_line
+        or stripped_line in _ACCESS_SPECIFIER_LABELS
+        or stripped_line.startswith("#")
+        or stripped_line.startswith("//")
+        or stripped_line.startswith("/*")
+        or stripped_line.startswith("*")
+    )
+
+
+def _refine_function_header_start(text: str, signature_offset: int, open_offset: int) -> Tuple[int, str]:
+    header = text[signature_offset:open_offset]
+    lines = header.splitlines(keepends=True)
+    if not lines:
+        return signature_offset, header
+
+    line_offsets: List[int] = []
+    cursor = 0
+    for line in lines:
+        line_offsets.append(cursor)
+        cursor += len(line)
+
+    end_line = len(lines) - 1
+    while end_line >= 0 and not lines[end_line].strip():
+        end_line -= 1
+    if end_line < 0:
+        return signature_offset, ""
+
+    start_line = end_line
+    while start_line >= 0:
+        stripped = lines[start_line].strip()
+        if _is_header_separator_line(stripped):
+            break
+        start_line -= 1
+    start_line += 1
+    if start_line > end_line:
+        return signature_offset, ""
+
+    refined_offset = signature_offset + line_offsets[start_line]
+    refined_header = "".join(lines[start_line : end_line + 1])
+    return refined_offset, refined_header
+
+
+def _looks_like_function_header(header: str) -> bool:
+    compact = " ".join(header.strip().split())
+    if not compact or "(" not in compact or ")" not in compact:
+        return False
+    if any(char in compact for char in "{};"):
+        return False
+    if "[]" in compact or compact.startswith("["):
+        return False
+    for keyword in _CONTROL_BLOCK_KEYWORDS | _TYPE_BLOCK_KEYWORDS:
+        if _starts_with_keyword(compact, keyword):
+            return False
+    keyword = _last_identifier_before_paren(compact)
+    if keyword in _CONTROL_BLOCK_KEYWORDS:
+        return False
+    return True
+
+
+def _find_containing_function_block(
+    lines: List[str],
+    line_number: int,
+    *,
+    max_function_lines: int = 5000,
+) -> Optional[Tuple[int, int, List[str]]]:
+    return SourceFunctionBlockCache(lines).extract_function_block(
+        line_number,
+        max_function_lines=max_function_lines,
+    )
+
+
+class SourceFunctionBlockCache:
+    """Cache brace-block scanning for repeated function lookups in one file."""
+
+    def __init__(self, lines: List[str]) -> None:
+        self.lines = lines
+        self._text: Optional[str] = None
+        self._starts: Optional[List[int]] = None
+        self._blocks: Optional[List[Tuple[int, int]]] = None
+        self.scan_count = 0
+
+    def _ensure_scanned(self) -> None:
+        if self._blocks is not None:
+            return
+        self._text = "".join(self.lines)
+        self._starts = _line_starts(self._text)
+        self._blocks = _scan_brace_blocks(self._text)
+        self.scan_count += 1
+
+    def extract_function_block(
+        self,
+        line_number: int,
+        *,
+        max_function_lines: int = 5000,
+    ) -> Optional[Tuple[int, int, List[str]]]:
+        if line_number <= 0 or not self.lines:
+            return None
+
+        self._ensure_scanned()
+        text = self._text or ""
+        starts = self._starts or [0]
+        blocks = self._blocks or []
+        requested_index = min(max(0, line_number - 1), len(self.lines) - 1)
+        candidates: List[Tuple[int, int, int, int]] = []
+
+        for open_offset, close_offset in blocks:
+            open_line = _offset_to_line(open_offset, starts)
+            close_line = _offset_to_line(close_offset, starts)
+            if close_line - open_line + 1 > max_function_lines:
+                continue
+            signature_offset = _signature_start_offset(text, open_offset, starts)
+            signature_offset, header = _refine_function_header_start(text, signature_offset, open_offset)
+            signature_line = _offset_to_line(signature_offset, starts)
+            if not (signature_line <= requested_index <= close_line):
+                continue
+            if not _looks_like_function_header(header):
+                continue
+            candidates.append((signature_line, close_line, open_line, close_offset - open_offset))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item[1] - item[0], item[0]))
+        start_index, end_index, _open_line, _span = candidates[0]
+        return start_index + 1, end_index + 1, self.lines[start_index : end_index + 1]
+
+
 def extract_function_block(
     lines: List[str],
     line_number: int,
@@ -166,22 +416,14 @@ def extract_function_block(
     if line_number <= 0 or not lines:
         return None
 
-    total = len(lines)
-    start_index = min(max(0, line_number - 1), total - 1)
-    search_end = min(start_index + max_signature_scan, total)
-    search_text = "".join(lines[start_index:search_end])
-    brace_offset = _find_first_open_brace_offset(search_text)
-    if brace_offset < 0:
-        return None
-
-    scan_end = min(start_index + max_function_lines, total)
-    combined = "".join(lines[start_index:scan_end])
-    close_offset = _find_matching_close_brace_offset(combined[brace_offset:])
-    if close_offset < 0:
-        return None
-
-    end_index = start_index + combined[: brace_offset + close_offset + 1].count("\n")
-    return start_index + 1, end_index + 1, lines[start_index : end_index + 1]
+    containing = _find_containing_function_block(
+        lines,
+        line_number,
+        max_function_lines=max_function_lines,
+    )
+    if containing:
+        return containing
+    return None
 
 
 def slice_source(

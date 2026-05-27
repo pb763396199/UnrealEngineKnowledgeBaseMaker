@@ -78,3 +78,56 @@ def test_query_audit_records_failures_and_recent_steps(tmp_path):
     assert recent["found_count"] == 1
     assert recent["steps"][0]["status"] == "error"
     assert recent["steps"][0]["error"] == "parent traversal is not allowed"
+
+
+def test_query_audit_can_record_multiple_steps_for_one_trace_and_run(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    audit = QueryAudit.for_skill(skill_dir)
+    try:
+        run_id = audit.start_run(
+            trace_id="trace-multi",
+            command="compound_query",
+            args=["AActor"],
+            context={"data_trust": "fresh"},
+        )
+        audit.record_step(
+            run_id=run_id,
+            trace_id="trace-multi",
+            command="search_classes",
+            args=["Actor"],
+            context={"data_trust": "fresh"},
+            result={"results": [{"name": "AActor"}]},
+        )
+        audit.record_step(
+            run_id=run_id,
+            trace_id="trace-multi",
+            command="source_slice",
+            args=["Source/Actor.cpp", "100"],
+            context={"data_trust": "fresh"},
+            result={"file_content": "SOURCE_BODY_SHOULD_NOT_BE_STORED", "found_count": 1},
+        )
+        audit.finish_run(
+            run_id=run_id,
+            context={"data_trust": "fresh"},
+            result={"steps": [1, 2]},
+        )
+    finally:
+        audit.close()
+
+    conn = sqlite3.connect(str(skill_dir / "runtime" / "query_audit.db"))
+    steps = conn.execute(
+        "SELECT run_id, trace_id, command, result_count FROM query_steps ORDER BY id"
+    ).fetchall()
+    run = conn.execute("SELECT status, result_count FROM query_runs WHERE id=?", (run_id,)).fetchone()
+    all_text = "\n".join(
+        " ".join(str(value) for value in row if value is not None)
+        for row in conn.execute("SELECT * FROM query_steps")
+    )
+    conn.close()
+
+    assert len(steps) == 2
+    assert {step[0] for step in steps} == {run_id}
+    assert all(step[1] == "trace-multi" for step in steps)
+    assert [step[2] for step in steps] == ["search_classes", "source_slice"]
+    assert run == ("ok", 2)
+    assert "SOURCE_BODY_SHOULD_NOT_BE_STORED" not in all_text

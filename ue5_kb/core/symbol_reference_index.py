@@ -13,6 +13,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from ..query.source_slice import SourceFunctionBlockCache
+
 # C++ 关键字及常见控制语句，避免将其识别为函数调用目标
 _CPP_KEYWORDS: Set[str] = {
     "if", "else", "for", "while", "do", "switch", "case", "return",
@@ -189,6 +191,7 @@ class SymbolReferenceIndex:
         processed = 0
         skipped = 0
         rows_inserted = 0
+        body_cache = _SourceFileFunctionBodyCache(source_root=source_root)
 
         for caller in callers:
             impl_file = caller.get("impl_file_path", "") or ""
@@ -199,7 +202,7 @@ class SymbolReferenceIndex:
             caller_decl_file = caller.get("file_path", "") or ""
             caller_decl_line = caller.get("line_number", 0) or 0
 
-            body_lines, body_start = _slice_function_body(impl_file, impl_line, source_root=source_root)
+            body_lines, body_start = body_cache.slice_function_body(impl_file, impl_line)
             if body_lines is None:
                 skipped += 1
                 continue
@@ -469,44 +472,71 @@ def _slice_function_body(
     Returns:
         (body_lines, first_brace_line_1based) 或 (None, 0) 表示失败
     """
-    impl_path = Path(impl_file)
-    if impl_path.is_absolute():
-        resolved = impl_path
-    elif source_root is not None:
-        # 将 Windows 反斜杠规范化为 POSIX 路径后拼接
-        normalized = impl_file.replace("\\", "/")
-        resolved = Path(source_root) / normalized
-    else:
-        resolved = impl_path
-    try:
-        with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
-            all_lines = f.readlines()
-    except OSError:
-        return None, 0
+    return _SourceFileFunctionBodyCache(source_root=source_root).slice_function_body(impl_file, impl_line)
 
-    total = len(all_lines)
-    start_idx = max(0, impl_line - 1)  # 0-based
 
-    # 在 impl_line 往后最多 30 行内找首个 '{'
-    search_end = min(start_idx + 30, total)
-    combined = "".join(all_lines[start_idx:search_end])
+class _SourceFileFunctionBodyCache:
+    """Cache source lines and brace-block scans while building symbol references."""
 
-    brace_start_idx = _find_first_open_brace(combined, start_idx)
-    if brace_start_idx < 0:
-        return None, 0
+    def __init__(self, source_root: Optional[Any] = None) -> None:
+        self.source_root = Path(source_root) if source_root is not None else None
+        self._files: Dict[str, Dict[str, Any]] = {}
+        self.file_read_count = 0
 
-    # 从 brace_start_idx 行做 brace 计数，最多扫 5000 行
-    scan_end = min(brace_start_idx + 5000, total)
-    flat = "".join(all_lines[brace_start_idx:scan_end])
-    body_end_offset = _find_matching_close_brace(flat)
-    if body_end_offset < 0:
-        return None, 0
+    @property
+    def function_scan_count(self) -> int:
+        return sum(entry["block_cache"].scan_count for entry in self._files.values())
 
-    body_end_line = brace_start_idx + flat[:body_end_offset].count("\n")
-    body_lines = all_lines[brace_start_idx : body_end_line + 1]
-    if body_lines and "{" in body_lines[0]:
-        body_lines[0] = body_lines[0].split("{", 1)[1]
-    return body_lines, brace_start_idx + 1  # 1-based
+    def slice_function_body(self, impl_file: str, impl_line: int) -> Tuple[Optional[List[str]], int]:
+        entry = self._get_file_entry(impl_file)
+        if entry is None:
+            return None, 0
+
+        all_lines = entry["lines"]
+        block_cache = entry["block_cache"]
+        block = block_cache.extract_function_block(impl_line)
+        if not block:
+            return None, 0
+
+        function_start_line, function_end_line, function_lines = block
+        combined = "".join(function_lines)
+        brace_start_idx = _find_first_open_brace(combined, function_start_line - 1)
+        if brace_start_idx < 0:
+            return None, 0
+
+        body_lines = all_lines[brace_start_idx:function_end_line]
+        if body_lines and "{" in body_lines[0]:
+            body_lines[0] = body_lines[0].split("{", 1)[1]
+        return body_lines, brace_start_idx + 1
+
+    def _get_file_entry(self, impl_file: str) -> Optional[Dict[str, Any]]:
+        resolved = self._resolve_impl_path(impl_file)
+        cache_key = str(resolved)
+        if cache_key in self._files:
+            return self._files[cache_key]
+
+        try:
+            with open(resolved, "r", encoding="utf-8", errors="ignore") as source_file:
+                all_lines = source_file.readlines()
+        except OSError:
+            return None
+
+        entry = {
+            "lines": all_lines,
+            "block_cache": SourceFunctionBlockCache(all_lines),
+        }
+        self._files[cache_key] = entry
+        self.file_read_count += 1
+        return entry
+
+    def _resolve_impl_path(self, impl_file: str) -> Path:
+        impl_path = Path(impl_file)
+        if impl_path.is_absolute():
+            return impl_path
+        if self.source_root is not None:
+            normalized = impl_file.replace("\\", "/")
+            return self.source_root / normalized
+        return impl_path
 
 
 def _find_first_open_brace(text: str, base_line_idx: int) -> int:

@@ -66,6 +66,53 @@ def test_files_fts_match_error_falls_back_to_like(tmp_path, monkeypatch):
     assert result["found_count"] == 1
 
 
+def test_files_fts_falls_back_to_like_for_camel_substring(tmp_path):
+    source_root = tmp_path / "Plugin"
+    source = source_root / "Source" / "MyModule" / "Private"
+    source.mkdir(parents=True)
+    (source / "AtlasRegistry.cpp").write_text(
+        "class AesMarkerAtlasBuilder { void Build(); };\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "KnowledgeBase" / "global_index" / "files_fts.db"
+
+    stats = build_files_fts_index(source_root, db_path)
+    result = search_files(db_path, "MarkerAtlas", limit=10)
+
+    assert result["found_count"] == 1
+    if stats["fts_enabled"]:
+        assert result["fallback"] == "like_after_match_empty"
+    else:
+        assert result["fallback"] == "like_no_fts"
+    assert result["results"][0]["ranking_reason"] == "like_fallback"
+    assert "AesMarkerAtlasBuilder" in result["results"][0]["snippet"]
+
+
+def test_files_fts_like_fallback_escapes_special_input(tmp_path):
+    source_root = tmp_path / "Plugin"
+    source = source_root / "Source" / "MyModule" / "Private"
+    source.mkdir(parents=True)
+    (source / "Special.cpp").write_text(
+        "namespace N { void operator++(); const char* Token = \"Percent%Token Under_score\"; }\n",
+        encoding="utf-8",
+    )
+    (source / "Plain.cpp").write_text("void PlainToken() {}\n", encoding="utf-8")
+    db_path = tmp_path / "KnowledgeBase" / "global_index" / "files_fts.db"
+    build_files_fts_index(source_root, db_path, force_disable_fts=True)
+
+    percent = search_files(db_path, "%", limit=10)
+    underscore = search_files(db_path, "_", limit=10)
+    operator = search_files(db_path, "operator++", limit=10)
+    namespace = search_files(db_path, "namespace", limit=10)
+
+    assert percent["found_count"] == 1
+    assert underscore["found_count"] == 1
+    assert operator["found_count"] == 1
+    assert namespace["found_count"] == 1
+    assert all(row["path"].endswith("Special.cpp") for row in percent["results"])
+    assert all(row["path"].endswith("Special.cpp") for row in underscore["results"])
+
+
 def test_files_fts_skips_large_files(tmp_path):
     source_root = tmp_path / "Plugin"
     source = source_root / "Source" / "MyModule" / "Private"

@@ -268,6 +268,46 @@ class FunctionIndex:
 
         return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def query_implementation_candidates(
+        self,
+        name: str,
+        module_hint: Optional[str] = None,
+        class_name: Optional[str] = None,
+        signature_hint: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return distinct implementation candidates for a function name."""
+        rows = self.query_by_name(name, module_hint)
+        if class_name:
+            rows = [row for row in rows if row.get('class_name') == class_name]
+        if signature_hint:
+            rows = [row for row in rows if signature_hint in (row.get('signature') or '')]
+
+        candidates: List[Dict[str, Any]] = []
+        seen = set()
+        for row in rows:
+            impl_file = row.get('impl_file_path') or ''
+            impl_line = row.get('impl_line_number') or 0
+            decl_file = row.get('file_path') or ''
+            if not impl_file and decl_file.endswith('.cpp'):
+                impl_file = decl_file
+                impl_line = row.get('line_number') or 0
+            if not impl_file:
+                continue
+            key = (
+                impl_file,
+                impl_line,
+                row.get('class_name') or '',
+                row.get('module') or '',
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            candidate = dict(row)
+            candidate['effective_impl_file_path'] = impl_file
+            candidate['effective_impl_line_number'] = impl_line
+            candidates.append(candidate)
+        return candidates
+
     def query_by_module(self, module: str) -> List[Dict[str, Any]]:
         """
         查询模块中的所有函数

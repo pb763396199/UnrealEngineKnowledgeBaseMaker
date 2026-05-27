@@ -190,3 +190,86 @@ class TestClassMethodIndexing:
                 f"{class_name}::{func_name} 应在 function_index 中"
 
         func_idx.close()
+
+
+def test_function_index_query_implementation_candidates_reports_distinct_matches(tmp_path):
+    func_idx = FunctionIndex(str(tmp_path / "function_index.db"))
+    try:
+        func_idx.add_functions_batch([
+            {
+                "name": "Tick",
+                "module": "Engine",
+                "class_name": "AActor",
+                "return_type": "void",
+                "parameters": [],
+                "signature": "void AActor::Tick(float DeltaSeconds)",
+                "file_path": "Source/Engine/Actor.h",
+                "line_number": 10,
+                "impl_file_path": "Source/Engine/Actor.cpp",
+                "impl_line_number": 100,
+            },
+            {
+                "name": "Tick",
+                "module": "UMG",
+                "class_name": "UWidget",
+                "return_type": "void",
+                "parameters": [],
+                "signature": "void UWidget::Tick(float DeltaSeconds)",
+                "file_path": "Source/UMG/Widget.h",
+                "line_number": 20,
+                "impl_file_path": "Source/UMG/Widget.cpp",
+                "impl_line_number": 200,
+            },
+        ])
+
+        all_candidates = func_idx.query_implementation_candidates("Tick")
+        actor_candidates = func_idx.query_implementation_candidates("Tick", class_name="AActor")
+    finally:
+        func_idx.close()
+
+    assert len(all_candidates) == 2
+    assert len(actor_candidates) == 1
+    assert actor_candidates[0]["effective_impl_file_path"] == "Source/Engine/Actor.cpp"
+
+
+def test_function_index_query_implementation_candidates_dedupes_signature_drift(tmp_path):
+    func_idx = FunctionIndex(str(tmp_path / "function_index.db"))
+    try:
+        func_idx.add_functions_batch([
+            {
+                "name": "Configure",
+                "module": "Engine",
+                "class_name": "FThing",
+                "return_type": "void",
+                "parameters": [],
+                "signature": "void FThing::Configure(int32 Value)",
+                "file_path": "Source/Engine/Thing.h",
+                "line_number": 10,
+                "impl_file_path": "Source/Engine/Thing.cpp",
+                "impl_line_number": 100,
+            },
+            {
+                "name": "Configure",
+                "module": "Engine",
+                "class_name": "FThing",
+                "return_type": "void",
+                "parameters": [],
+                "signature": "void FThing::Configure(const int32 Value)",
+                "file_path": "Source/Engine/Thing.generated.h",
+                "line_number": 44,
+                "impl_file_path": "Source/Engine/Thing.cpp",
+                "impl_line_number": 100,
+            },
+        ])
+
+        candidates = func_idx.query_implementation_candidates("Configure")
+    finally:
+        func_idx.close()
+
+    assert len(candidates) == 1
+    assert candidates[0]["effective_impl_file_path"] == "Source/Engine/Thing.cpp"
+    assert candidates[0]["effective_impl_line_number"] == 100
+    assert candidates[0]["signature"] in {
+        "void FThing::Configure(int32 Value)",
+        "void FThing::Configure(const int32 Value)",
+    }

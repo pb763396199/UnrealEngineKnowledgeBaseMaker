@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ue5_kb.query.source_slice import SourceSliceError, safe_resolve_source_path, slice_source
+from ue5_kb.query.source_slice import SourceFunctionBlockCache, SourceSliceError, safe_resolve_source_path, slice_source
 
 
 CPP_CONTENT = """#include "Foo.h"
@@ -53,6 +53,117 @@ def test_source_slice_context_and_function_modes(tmp_path):
     assert "FFoo::Run" in function["content"]
     assert "FFoo::Other" not in function["content"]
     assert function["truncated"] is False
+
+
+def test_source_function_block_cache_reuses_one_file_scan_for_multiple_functions():
+    lines = CPP_CONTENT.splitlines(keepends=True)
+    cache = SourceFunctionBlockCache(lines)
+
+    first = cache.extract_function_block(3)
+    second = cache.extract_function_block(12)
+
+    assert cache.scan_count == 1
+    assert first is not None
+    assert second is not None
+    assert "FFoo::Run" in "".join(first[2])
+    assert "FFoo::Other" in "".join(second[2])
+
+
+@pytest.mark.parametrize("line_number", [3, 5, 7])
+def test_source_slice_function_mode_finds_enclosing_function_from_body_lines(tmp_path, line_number):
+    source_root = tmp_path / "Plugin"
+    cpp = source_root / "Source" / "MyModule" / "Private" / "Foo.cpp"
+    cpp.parent.mkdir(parents=True)
+    cpp.write_text(CPP_CONTENT, encoding="utf-8")
+
+    result = slice_source(
+        source_root=source_root,
+        relative_file="Source/MyModule/Private/Foo.cpp",
+        line_number=line_number,
+        mode="function",
+    )
+
+    assert result["mode"] == "function"
+    assert result["line_start"] == 3
+    assert result["line_end"] == 10
+    assert "if (Value > 0)" in result["content"]
+    assert "FFoo::Other" not in result["content"]
+
+
+def test_source_slice_function_mode_falls_back_between_functions(tmp_path):
+    source_root = tmp_path / "Plugin"
+    cpp = source_root / "Source" / "MyModule" / "Private" / "Foo.cpp"
+    cpp.parent.mkdir(parents=True)
+    cpp.write_text(CPP_CONTENT, encoding="utf-8")
+
+    result = slice_source(
+        source_root=source_root,
+        relative_file="Source/MyModule/Private/Foo.cpp",
+        line_number=11,
+        mode="function",
+        context_lines=1,
+    )
+
+    assert result["mode"] == "context"
+    assert result["boundary_hit"] is False
+    assert "FFoo::Run" not in result["content"]
+    assert "FFoo::Other" in result["content"]
+
+
+def test_source_slice_function_mode_handles_namespace_and_class_wrappers(tmp_path):
+    source_root = tmp_path / "Plugin"
+    cpp = source_root / "Source" / "MyModule" / "Private" / "Wrapped.cpp"
+    cpp.parent.mkdir(parents=True)
+    cpp.write_text(
+        "namespace N\n"
+        "{\n"
+        "class FLocal\n"
+        "{\n"
+        "public:\n"
+        "    void InlineRun()\n"
+        "    {\n"
+        "        int Value = 0;\n"
+        "        if (Value == 0)\n"
+        "        {\n"
+        "            Value++;\n"
+        "        }\n"
+        "    }\n"
+        "};\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = slice_source(
+        source_root=source_root,
+        relative_file="Source/MyModule/Private/Wrapped.cpp",
+        line_number=11,
+        mode="function",
+    )
+
+    assert result["mode"] == "function"
+    assert result["line_start"] == 6
+    assert result["line_end"] == 13
+    assert "void InlineRun" in result["content"]
+    assert "class FLocal" not in result["content"]
+
+
+def test_source_slice_function_mode_falls_back_when_no_function_block_exists(tmp_path):
+    source_root = tmp_path / "Plugin"
+    header = source_root / "Source" / "MyModule" / "Public" / "Types.h"
+    header.parent.mkdir(parents=True)
+    header.write_text("struct FThing\n{\n    int32 Value;\n};\n", encoding="utf-8")
+
+    result = slice_source(
+        source_root=source_root,
+        relative_file="Source/MyModule/Public/Types.h",
+        line_number=3,
+        mode="function",
+        context_lines=1,
+    )
+
+    assert result["mode"] == "context"
+    assert result["boundary_hit"] is False
+    assert "int32 Value" in result["content"]
 
 
 @pytest.mark.parametrize(

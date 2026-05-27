@@ -256,7 +256,7 @@ class TestIndexPathNormalization:
         monkeypatch.setattr(stage, "_build_global_index", lambda config: DummyGlobalIndex())
         monkeypatch.setattr(stage, "_build_module_graphs", lambda path: 0)
         monkeypatch.setattr(stage, "_build_fast_indices", lambda config: None)
-        monkeypatch.setattr(stage, "_save_kb_manifest", lambda path, stats: None)
+        monkeypatch.setattr(stage, "_save_kb_manifest", lambda path, stats, identity=None: None)
 
         result = stage._run_serial()
 
@@ -264,6 +264,82 @@ class TestIndexPathNormalization:
         assert result["kb_path"] == "abc123"
         assert summary["kb_path"] == "abc123"
         assert str(kb_path) not in json.dumps(summary)
+
+    def test_build_summary_does_not_promote_temp_variant_name(self, tmp_path, monkeypatch):
+        """_build_tmp_* 构建目录不应作为权威 kb_path 写入 build_summary。"""
+        from ue5_kb.pipeline.build import BuildStage
+
+        class DummyGlobalIndex:
+            def get_statistics(self):
+                return {"total_modules": 0}
+
+        base_path = tmp_path / "plugin"
+        base_path.mkdir()
+        kb_path = tmp_path / "variants" / "_build_tmp_abc1234"
+        stage = BuildStage(base_path, kb_path=kb_path)
+
+        monkeypatch.setattr(stage, "_create_config", lambda path: object())
+        monkeypatch.setattr(stage, "_build_global_index", lambda config: DummyGlobalIndex())
+        monkeypatch.setattr(stage, "_build_module_graphs", lambda path: 0)
+        monkeypatch.setattr(stage, "_build_fast_indices", lambda config: None)
+        monkeypatch.setattr(stage, "_save_kb_manifest", lambda path, stats, identity=None: None)
+
+        result = stage._run_serial()
+        summary = json.loads((kb_path / "data" / "build" / "build_summary.json").read_text(encoding="utf-8"))
+
+        assert result["kb_path"] == "pending_variant"
+        assert summary["kb_path"] == "pending_variant"
+        assert "_build_tmp_" not in json.dumps(summary)
+
+    def test_parallel_build_writes_summary_and_manifest_without_temp_variant_name(self, tmp_path, monkeypatch):
+        """并行构建也应写 build_summary/.kb_manifest.json，且不暴露 _build_tmp_*。"""
+        from ue5_kb.pipeline.build import BuildStage
+        from ue5_kb.pipeline.build_parallel import ParallelBuildStage
+
+        class DummyGlobalIndex:
+            def get_statistics(self):
+                return {"total_modules": 0}
+
+        base_path = tmp_path / "plugin"
+        base_path.mkdir()
+        kb_path = tmp_path / "variants" / "_build_tmp_parallel123"
+        (kb_path / "data" / "analyze").mkdir(parents=True)
+        (kb_path / "global_index").mkdir(parents=True)
+
+        stage = ParallelBuildStage(base_path, num_workers=2, kb_path=kb_path)
+        monkeypatch.setattr(stage, "_build_global_index", lambda config: DummyGlobalIndex())
+        monkeypatch.setattr(stage, "_build_fast_indices", lambda config: None)
+        monkeypatch.setattr(
+            BuildStage,
+            "_build_files_fts_index",
+            lambda self, config: {
+                "db_path": str(kb_path / "global_index" / "files_fts.db"),
+                "indexed_count": 0,
+                "fts_enabled": False,
+            },
+        )
+        monkeypatch.setattr(
+            BuildStage,
+            "_check_quality_gates",
+            lambda self, config: {"quality_passed": True},
+        )
+
+        result = stage.run()
+        summary = json.loads((kb_path / "data" / "build" / "build_summary.json").read_text(encoding="utf-8"))
+        manifest = json.loads((kb_path / ".kb_manifest.json").read_text(encoding="utf-8"))
+
+        assert result["kb_path"] == "pending_variant"
+        assert summary["kb_path"] == "pending_variant"
+        assert summary["global_index_path"] == "global_index"
+        assert summary["index_statistics"] == {"total_modules": 0}
+        assert summary["files_fts"]["db_path"] == "global_index/files_fts.db"
+        assert summary["source"] == "plugin"
+        assert "commit" in summary
+        assert "dirty" in summary
+        assert "fingerprint" in summary
+        assert "_build_tmp_" not in json.dumps(summary)
+        assert manifest["source"] == "plugin"
+        assert manifest["index_statistics"] == {"total_modules": 0}
 
     def test_extract_manifest_accepts_relative_source_path(self, tmp_path):
         """ExtractStage 应能用相对 absolute_path 还原源路径，manifest 文件路径保持 POSIX"""
@@ -348,6 +424,30 @@ class TestIndexPathNormalization:
 
         assert metadata["engine_path"] == "plugin"
         assert str(base_path) not in json.dumps(metadata)
+
+    def test_plugin_kb_manifest_promotes_plugin_metadata_without_absolute_source(self, tmp_path):
+        """插件构建 manifest 应记录 plugin/build/source/index 元数据且不泄漏绝对源码路径。"""
+        from ue5_kb.pipeline.build import BuildStage
+
+        base_path = tmp_path / "MyPlugin"
+        source = base_path / "Source" / "MyModule" / "Private"
+        source.mkdir(parents=True)
+        (base_path / "MyPlugin.uplugin").write_text("{}", encoding="utf-8")
+        (source / "Foo.cpp").write_text("void Foo() {}\n", encoding="utf-8")
+        kb_path = tmp_path / "kb"
+        (kb_path / "global_index").mkdir(parents=True)
+
+        stage = BuildStage(base_path, kb_path=kb_path)
+        stage._save_kb_manifest(kb_path, {"total_modules": 3})
+
+        manifest = json.loads((kb_path / ".kb_manifest.json").read_text(encoding="utf-8"))
+        assert manifest["build_mode"] == "plugin"
+        assert manifest["plugin_name"] == "MyPlugin"
+        assert manifest["source"] == "MyPlugin"
+        assert manifest["commit"].startswith("unknown")
+        assert manifest["dirty"] is False
+        assert manifest["index_statistics"] == {"total_modules": 3}
+        assert str(base_path) not in json.dumps(manifest)
 
 
 # ---------------------------------------------------------------------------

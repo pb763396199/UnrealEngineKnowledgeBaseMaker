@@ -206,11 +206,12 @@ class ParallelBuildStage:
                         worker_total[worker_id]
                     )
 
-        stats = tracker.stop()
+        tracker_stats = tracker.stop()
 
         # 3. 串行构建全局索引和 SQLite
         console.print(f"\n[cyan]构建全局索引...[/cyan]")
         global_index = self._build_global_index(config)
+        index_stats = global_index.get_statistics()
 
         # 4. 串行构建快速索引
         console.print(f"[cyan]构建快速索引...[/cyan]")
@@ -233,24 +234,24 @@ class ParallelBuildStage:
             files_fts = {"error": str(e), "indexed_count": 0, "fts_enabled": False}
             console.print(f"[yellow]  警告: 源码全文检索索引构建失败: {e}[/yellow]")
 
-        # 7. 清理构建冗余和阶段中间产物，保留摘要与最终 SQLite 索引
-        try:
-            from .build import BuildStage
-            BuildStage._cleanup_build_artifacts(self.kb_path)
-        except Exception as e:
-            console.print(f"[yellow]  警告: 构建产物清理失败: {e}[/yellow]")
+        # 7. 质量门禁检查（与串行 Build 共用实现）
+        from .build import BuildStage
+        finalizer = BuildStage(self.base_path, kb_path=self.kb_path)
+        quality = finalizer._check_quality_gates(config)
 
         result = {
-            "kb_path": self.kb_path.name,
+            "global_index_created": True,
             "module_graphs_created": built_count,
             "failed_modules": failed_modules,
-            "elapsed_time": stats["elapsed"],
+            "elapsed_time": tracker_stats["elapsed"],
+            "quality_gates": quality,
             "files_fts": files_fts,
         }
+        result = finalizer._finalize_build(self.kb_path, index_stats, result)
 
         console.print(f"\n[green]Build 阶段完成！[/green]")
         console.print(f"  模块图谱: {built_count} 个")
-        console.print(f"  耗时: {stats['elapsed']:.2f}s")
+        console.print(f"  耗时: {tracker_stats['elapsed']:.2f}s")
 
         return result
 

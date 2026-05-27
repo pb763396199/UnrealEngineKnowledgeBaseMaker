@@ -8,7 +8,7 @@ import subprocess
 import hashlib
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, List, Optional
 
 
 SOURCE_FINGERPRINT_SUFFIXES = (".h", ".hpp", ".cpp", ".inl", ".ush", ".usf")
@@ -30,6 +30,14 @@ SOURCE_FINGERPRINT_SKIP_DIRS = {
     "Generated",
 }
 SOURCE_FINGERPRINT_SKIP_DIRS_NORM = {name.lower() for name in SOURCE_FINGERPRINT_SKIP_DIRS}
+
+
+def _decode_z_paths(raw: bytes) -> List[str]:
+    return [
+        part.decode("utf-8", errors="surrogateescape")
+        for part in raw.split(b"\0")
+        if part
+    ]
 
 
 class VCSAdapter:
@@ -74,14 +82,8 @@ class VCSAdapter:
         if self._type == "none":
             return False
         try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=self._path,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            return bool(result.stdout.strip()) if result.returncode == 0 else False
+            tracked, untracked = self._git_source_dirty_paths()
+            return bool(tracked or untracked)
         except Exception:
             return False
 
@@ -90,45 +92,34 @@ class VCSAdapter:
         if self._type == "none":
             return self._get_source_tree_fingerprint()
         try:
-            status = subprocess.run(
-                ["git", "status", "--porcelain=v1", "-uall"],
-                cwd=self._path,
-                capture_output=True,
-                timeout=10,
-            )
-            if status.returncode != 0 or not status.stdout.strip():
-                return None
-
-            diff = subprocess.run(
-                ["git", "diff", "--binary", "HEAD", "--no-ext-diff"],
-                cwd=self._path,
-                capture_output=True,
-                timeout=30,
-            )
-            if diff.returncode != 0:
-                return None
-
-            untracked = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-                cwd=self._path,
-                capture_output=True,
-                timeout=10,
-            )
-            if untracked.returncode != 0:
+            tracked_paths, untracked_paths = self._git_source_dirty_paths()
+            if not tracked_paths and not untracked_paths:
                 return None
 
             h = hashlib.sha256()
-            h.update(b"status\0")
-            h.update(status.stdout)
-            h.update(b"\ndiff\0")
-            h.update(diff.stdout)
+            h.update(b"source-status-v1\0")
+            for rel in tracked_paths:
+                h.update(rel.encode("utf-8", errors="surrogateescape"))
+                h.update(b"\0")
+
+            if tracked_paths:
+                diff = subprocess.run(
+                    ["git", "diff", "--binary", "--no-ext-diff", "HEAD", "--", *tracked_paths],
+                    cwd=self._path,
+                    capture_output=True,
+                    timeout=30,
+                )
+                if diff.returncode != 0:
+                    return None
+                h.update(b"\ndiff\0")
+                h.update(diff.stdout)
+
             h.update(b"\nuntracked\0")
-            for raw_rel in sorted(p for p in untracked.stdout.split(b"\0") if p):
-                rel = raw_rel.decode("utf-8", errors="surrogateescape")
+            for rel in untracked_paths:
                 path = Path(self._path) / rel
                 if not path.is_file():
                     continue
-                h.update(raw_rel)
+                h.update(rel.encode("utf-8", errors="surrogateescape"))
                 h.update(b"\0")
                 with open(path, "rb") as f:
                     while True:
@@ -180,6 +171,42 @@ class VCSAdapter:
             or path.suffix in SOURCE_FINGERPRINT_SUFFIXES
             or path.suffix in SOURCE_FINGERPRINT_NAMES
         )
+
+    @classmethod
+    def _is_source_fingerprint_relative_path(cls, rel_path: str) -> bool:
+        parts = [part for part in rel_path.replace("\\", "/").split("/") if part]
+        if not parts:
+            return False
+        if any(part.lower() in SOURCE_FINGERPRINT_SKIP_DIRS_NORM for part in parts[:-1]):
+            return False
+        return cls._is_source_fingerprint_file(Path(parts[-1]))
+
+    def _git_source_dirty_paths(self) -> tuple[List[str], List[str]]:
+        tracked = subprocess.run(
+            ["git", "diff", "--name-only", "-z", "--no-ext-diff", "HEAD"],
+            cwd=self._path,
+            capture_output=True,
+            timeout=10,
+        )
+        if tracked.returncode != 0:
+            return [], []
+
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=self._path,
+            capture_output=True,
+            timeout=10,
+        )
+        if untracked.returncode != 0:
+            return [], []
+
+        tracked_paths = self._filter_source_paths(_decode_z_paths(tracked.stdout))
+        untracked_paths = self._filter_source_paths(_decode_z_paths(untracked.stdout))
+        return tracked_paths, untracked_paths
+
+    @classmethod
+    def _filter_source_paths(cls, paths: Iterable[str]) -> List[str]:
+        return sorted({path for path in paths if cls._is_source_fingerprint_relative_path(path)})
 
     def get_branch_name(self) -> Optional[str]:
         """获取当前分支名"""

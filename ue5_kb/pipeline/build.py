@@ -100,23 +100,14 @@ class BuildStage(PipelineStage):
         # 8. 保存统计信息
         stats = global_index.get_statistics()
 
-        # 9. 创建并保存 KB 清单（v2.13.0 新增）
-        self._save_kb_manifest(kb_path, stats)
-
         result = {
-            'kb_path': kb_path.name,
             'global_index_created': True,
             'module_graphs_created': modules_built,
-            'statistics': stats,
             'quality_gates': quality,
             'files_fts': files_fts,
         }
 
-        # 保存构建摘要
-        self.save_result(result, "build_summary.json")
-
-        # 清理构建冗余和中间产物，保留摘要与最终 SQLite 索引
-        self._cleanup_build_artifacts(kb_path)
+        result = self._finalize_build(kb_path, stats, result)
 
         print(f"[Build] 完成！")
         print(f"  知识库路径: {kb_path}")
@@ -124,6 +115,84 @@ class BuildStage(PipelineStage):
         print(f"  模块图谱: {modules_built} 个")
 
         return result
+
+    @staticmethod
+    def _kb_path_label(kb_path: Path) -> str:
+        name = Path(kb_path).name
+        if name.startswith("_build_tmp_"):
+            return "pending_variant"
+        return name
+
+    def _collect_build_identity(self) -> Dict[str, Any]:
+        """Collect source/VCS identity shared by build summary and manifest."""
+        source_label = self.base_path.name
+        try:
+            from ..vcs import VCSAdapter
+            vcs = VCSAdapter.detect(str(self.base_path))
+            commit_id = vcs.get_head_id()
+            dirty = vcs.is_dirty()
+            fingerprint = vcs.get_worktree_fingerprint()
+        except Exception:
+            commit_id = None
+            dirty = None
+            fingerprint = None
+
+        return {
+            'source': source_label,
+            'commit': commit_id,
+            'dirty': dirty,
+            'fingerprint': fingerprint,
+        }
+
+    def _finalize_build(
+        self,
+        kb_path: Path,
+        stats: Dict[str, Any],
+        result: Dict[str, Any],
+        *,
+        cleanup: bool = True,
+    ) -> Dict[str, Any]:
+        """Save manifest and build_summary.json with shared serial/parallel semantics."""
+        kb_path = Path(kb_path)
+        identity = self._collect_build_identity()
+        finalized = {
+            'kb_path': self._kb_path_label(kb_path),
+            'global_index_path': 'global_index',
+            'statistics': stats,
+            'index_statistics': stats,
+            'source': identity.get('source'),
+            'commit': identity.get('commit'),
+            'dirty': identity.get('dirty'),
+            'fingerprint': identity.get('fingerprint'),
+        }
+        finalized.update(self._sanitize_build_summary_paths(result, kb_path))
+
+        self._save_kb_manifest(kb_path, stats, identity=identity)
+        self.save_result(finalized, "build_summary.json")
+
+        if cleanup:
+            self._cleanup_build_artifacts(kb_path)
+
+        return finalized
+
+    @staticmethod
+    def _sanitize_build_summary_paths(value: Any, kb_path: Path) -> Any:
+        """Convert absolute paths under kb_path to stable KB-relative labels."""
+        if isinstance(value, dict):
+            return {
+                key: BuildStage._sanitize_build_summary_paths(item, kb_path)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [BuildStage._sanitize_build_summary_paths(item, kb_path) for item in value]
+        if isinstance(value, str):
+            try:
+                path_value = Path(value)
+                if path_value.is_absolute():
+                    return path_value.resolve().relative_to(kb_path.resolve()).as_posix()
+            except (OSError, ValueError):
+                return value
+        return value
 
     def _create_config(self, kb_path: Path) -> Config:
         """
@@ -864,7 +933,12 @@ class BuildStage(PipelineStage):
 
         return graph
 
-    def _save_kb_manifest(self, kb_path: Path, stats: Dict[str, Any]) -> None:
+    def _save_kb_manifest(
+        self,
+        kb_path: Path,
+        stats: Dict[str, Any],
+        identity: Dict[str, Any] = None,
+    ) -> None:
         """
         保存 KB 清单文件（v2.13.0 新增）
 
@@ -881,6 +955,7 @@ class BuildStage(PipelineStage):
         # 检测引擎/插件版本
         engine_version = self._detect_version()
         plugin_name = self._get_plugin_name()
+        is_plugin = self._is_plugin_source()
 
         # 获取工具版本
         from ..core.config import Config
@@ -888,7 +963,12 @@ class BuildStage(PipelineStage):
         tool_version = config.get('project.version', '2.14.0')
 
         # 确定构建模式
-        build_mode = 'plugin' if plugin_name else 'engine'
+        build_mode = 'plugin' if is_plugin else 'engine'
+        identity = identity or self._collect_build_identity()
+        source_label = identity.get('source') or self.base_path.name
+        commit_id = identity.get('commit')
+        dirty = identity.get('dirty')
+        fingerprint = identity.get('fingerprint')
 
         # 获取模块信息（从全局索引）
         modules_data = {}
@@ -910,7 +990,6 @@ class BuildStage(PipelineStage):
 
         # 创建 KB 清单
         now = datetime.now().isoformat()
-        source_label = self.base_path.name
         manifest = KBManifest(
             kb_version=tool_version,
             engine_version=engine_version,
@@ -922,7 +1001,12 @@ class BuildStage(PipelineStage):
             tool_version=tool_version,
             files=files_data,
             modules=modules_data,
-            statistics=stats
+            statistics=stats,
+            source=source_label,
+            commit=commit_id,
+            dirty=dirty,
+            worktree_fingerprint=fingerprint,
+            index_statistics=stats,
         )
 
         # 保存清单
@@ -935,12 +1019,21 @@ class BuildStage(PipelineStage):
             'engine_version': engine_version,
             'engine_path': source_label,
             'plugin_name': plugin_name or '',
+            'build_mode': build_mode,
+            'source': source_label,
+            'commit': commit_id or '',
+            'dirty': '' if dirty is None else str(bool(dirty)),
+            'worktree_fingerprint': fingerprint or '',
+            'index_statistics': json.dumps(stats, ensure_ascii=False),
             'created_at': now,
             'last_updated': now
         })
 
         print(f"    KB 版本: {tool_version}")
         print(f"    引擎/插件版本: {engine_version}")
+
+    def _is_plugin_source(self) -> bool:
+        return bool(list(self.base_path.glob("*.uplugin")))
 
     def _detect_version(self) -> str:
         """检测引擎或插件版本"""
@@ -989,7 +1082,7 @@ class BuildStage(PipelineStage):
             try:
                 with open(uplugin_files[0], 'r', encoding='utf-8') as f:
                     plugin_data = json.load(f)
-                    return plugin_data.get('Name', '')
+                    return plugin_data.get('Name', '') or uplugin_files[0].stem
             except Exception:
-                pass
+                return uplugin_files[0].stem
         return None

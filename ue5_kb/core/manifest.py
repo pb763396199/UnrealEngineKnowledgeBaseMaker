@@ -95,6 +95,11 @@ class KBManifest:
     files: Dict[str, dict] = field(default_factory=dict)  # module_name -> {build_cs, sources}
     modules: Dict[str, dict] = field(default_factory=dict)  # module_name -> metadata
     statistics: Dict[str, int] = field(default_factory=dict)
+    source: Optional[str] = None
+    commit: Optional[str] = None
+    dirty: Optional[bool] = None
+    worktree_fingerprint: Optional[str] = None
+    index_statistics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -108,7 +113,12 @@ class KBManifest:
             "tool_version": self.tool_version,
             "files": self.files,
             "modules": self.modules,
-            "statistics": self.statistics
+            "statistics": self.statistics,
+            "source": self.source,
+            "commit": self.commit,
+            "dirty": self.dirty,
+            "worktree_fingerprint": self.worktree_fingerprint,
+            "index_statistics": self.index_statistics,
         }
 
     @classmethod
@@ -124,7 +134,12 @@ class KBManifest:
             tool_version=data["tool_version"],
             files=data.get("files", {}),
             modules=data.get("modules", {}),
-            statistics=data.get("statistics", {})
+            statistics=data.get("statistics", {}),
+            source=data.get("source"),
+            commit=data.get("commit"),
+            dirty=data.get("dirty"),
+            worktree_fingerprint=data.get("worktree_fingerprint"),
+            index_statistics=data.get("index_statistics", {})
         )
 
     def save(self, kb_path: Path) -> None:

@@ -34,10 +34,32 @@ def test_engine_and_plugin_impl_templates_include_runtime_commands():
         assert "def search_files" in content
         assert "def query_audit" in content
         assert "--trace-id" in content
+        assert "--allow-stale" in content
+        assert "--no-audit" in content
+        assert "UE5KB_NO_AUDIT" in content
         assert "query_audit.db" in content
         assert "ue5_kb.query.runtime_context" in content
         assert "ue5_kb.query.source_slice" in content
         assert "ue5_kb.core.files_fts_index" in content
+        assert "_UNRESOLVED_KB_PATH" in content
+        assert "kb_resolution_failed" in content
+        assert "_stale_gate_result" in content
+        assert "ambiguous_function_implementation" in content
+        assert "signature_hint" in content
+
+
+def test_engine_template_does_not_advertise_read_only_without_write_commands():
+    content = _read("templates/impl.py.template")
+    assert "--read-only" not in content
+    assert "UE5KB_READ_ONLY" not in content
+    assert "preflight/update" not in content
+    assert "regenerate/rebuild the engine KB" in content
+
+
+def test_plugin_template_keeps_read_only_for_write_command_blocking():
+    content = _read("templates/impl.plugin.py.template")
+    assert "--read-only" in content
+    assert "UE5KB_READ_ONLY" in content
 
 
 def test_plugin_template_refreshes_runtime_paths_after_ensure_fresh():
@@ -52,6 +74,22 @@ def test_impl_templates_do_not_let_audit_failure_break_queries():
     for template in ("templates/impl.py.template", "templates/impl.plugin.py.template"):
         content = _read(template)
         assert "except Exception:\n        return resolve_trace_id(trace_id)" in content
+
+
+def test_plugin_template_read_only_blocks_write_commands_but_allows_maintenance_status():
+    content = _read("templates/impl.plugin.py.template")
+    assert "_write_command" in content
+    assert "Command '{command}' is disabled in read-only mode" in content
+    assert '"ensure_fresh", "init", "register", "update"' in content
+    assert '"preflight", "query_audit", "status", "check_freshness", "get_kb_info"' in content
+
+
+def test_impl_templates_fail_closed_when_registry_resolution_fails():
+    for template in ("templates/impl.py.template", "templates/impl.plugin.py.template"):
+        content = _read(template)
+        assert "falling back to default" not in content
+        assert "registry 存在但异常时不回退旧 KB" in content
+        assert "return _UNRESOLVED_KB_PATH" in content
 
 
 def test_rendered_impl_templates_compile_after_brace_replacement():

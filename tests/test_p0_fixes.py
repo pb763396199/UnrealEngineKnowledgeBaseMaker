@@ -659,6 +659,36 @@ class TestSymbolReferenceIndexSourceRoot:
             occ = row["occurrence_file"]
             assert not Path(occ).is_absolute(), f"occurrence_file 应为相对路径，实际: {occ!r}"
 
+    def test_function_body_cache_reuses_same_impl_file_scan(self, tmp_path):
+        """同一个 impl_file 的多个函数体切片不应重复读取或扫描整文件。"""
+        from ue5_kb.core.symbol_reference_index import _SourceFileFunctionBodyCache
+
+        source_root = tmp_path / "plugin_src"
+        cpp_dir = source_root / "Source"
+        cpp_dir.mkdir(parents=True)
+        (cpp_dir / "Foo.cpp").write_text(
+            "void Foo::First()\n"
+            "{\n"
+            "    Second();\n"
+            "}\n"
+            "\n"
+            "void Foo::Second()\n"
+            "{\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        cache = _SourceFileFunctionBodyCache(source_root=source_root)
+        first_body, first_start = cache.slice_function_body("Source/Foo.cpp", 1)
+        second_body, second_start = cache.slice_function_body("Source/Foo.cpp", 6)
+
+        assert first_body is not None
+        assert second_body is not None
+        assert first_start == 2
+        assert second_start == 7
+        assert cache.file_read_count == 1
+        assert cache.function_scan_count == 1
+
     def test_build_without_source_root_skips_missing_file(self, tmp_path):
         """不传 source_root，cwd 下无对应文件时，caller 应被跳过（rows_inserted=0）"""
         import os

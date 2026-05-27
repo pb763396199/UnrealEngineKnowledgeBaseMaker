@@ -1,4 +1,5 @@
 import sqlite3
+import subprocess
 import unittest.mock as mock
 from pathlib import Path
 
@@ -32,6 +33,27 @@ def _mock_vcs(commit: str, dirty: bool, fingerprint: str):
     vcs.is_dirty.return_value = dirty
     vcs.get_worktree_fingerprint.return_value = fingerprint
     return vcs
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def _make_git_source_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "git_plugin"
+    source = repo / "Source" / "MyModule" / "Private"
+    docs = repo / "docs"
+    source.mkdir(parents=True)
+    docs.mkdir()
+    (source / "Foo.cpp").write_text("void RealSource() {}\n", encoding="utf-8")
+    (repo / "Source" / "MyModule" / "MyModule.Build.cs").write_text("public class MyModule {}\n", encoding="utf-8")
+    (docs / "note.md").write_text("note\n", encoding="utf-8")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+    return repo
 
 
 def test_check_freshness_reports_commit_changed_stale_reason(tmp_path):
@@ -179,3 +201,48 @@ def test_check_freshness_ignores_history_changes_for_non_git(tmp_path):
     assert result["stale_reason"] is None
     assert result["expected_fingerprint"] == original_fingerprint[:12]
     assert result["actual_fingerprint"] == original_fingerprint[:12]
+
+
+def test_git_source_fingerprint_ignores_non_source_changes(tmp_path):
+    from ue5_kb.vcs import VCSAdapter
+
+    repo = _make_git_source_repo(tmp_path)
+    vcs = VCSAdapter.detect(str(repo))
+
+    assert vcs.get_worktree_fingerprint() is None
+    (repo / "docs" / "note.md").write_text("changed docs\n", encoding="utf-8")
+    history = repo / ".history" / "Source" / "MyModule" / "Private"
+    history.mkdir(parents=True)
+    (history / "Foo_20260527120000.cpp").write_text("void HistoryOnly() {}\n", encoding="utf-8")
+
+    assert vcs.is_dirty() is False
+    assert vcs.get_worktree_fingerprint() is None
+
+
+def test_git_source_fingerprint_changes_for_tracked_source_diff(tmp_path):
+    from ue5_kb.vcs import VCSAdapter
+
+    repo = _make_git_source_repo(tmp_path)
+    vcs = VCSAdapter.detect(str(repo))
+
+    (repo / "Source" / "MyModule" / "Private" / "Foo.cpp").write_text(
+        "void RealSource() {}\nvoid ChangedSource() {}\n",
+        encoding="utf-8",
+    )
+
+    assert vcs.is_dirty() is True
+    assert vcs.get_worktree_fingerprint()
+
+
+def test_git_source_fingerprint_changes_for_untracked_source(tmp_path):
+    from ue5_kb.vcs import VCSAdapter
+
+    repo = _make_git_source_repo(tmp_path)
+    vcs = VCSAdapter.detect(str(repo))
+    (repo / "Source" / "MyModule" / "Private" / "NewFile.cpp").write_text(
+        "void NewSource() {}\n",
+        encoding="utf-8",
+    )
+
+    assert vcs.is_dirty() is True
+    assert vcs.get_worktree_fingerprint()

@@ -23,22 +23,34 @@ from ue5_kb.vcs import VCSAdapter
 # Skill 目录（impl.py 所在目录）
 SKILL_DIR = Path(__file__).parent
 
-# 知识库路径 — 优先从多分支注册表解析，回退到硬编码路径
+# 知识库路径 — 无 registry 时兼容硬编码路径；registry 异常时 fail-closed
 _DEFAULT_KB_PATH = Path(r"{KB_PATH}")
 _branch_mgr = BranchManager(SKILL_DIR)
+_KB_RESOLUTION_ERROR = None
+_UNRESOLVED_KB_PATH = SKILL_DIR / "runtime" / "unresolved_kb"
 
 
 def _resolve_kb_path(variant: str = None) -> Path:
-    """解析活跃 KB 路径，失败时回退到默认路径"""
+    """解析活跃 KB 路径；registry 存在但异常时不回退旧 KB"""
+    global _KB_RESOLUTION_ERROR
     try:
+        _KB_RESOLUTION_ERROR = None
         return _branch_mgr.resolve_kb_path(variant)
-    except FileNotFoundError:
-        # Registry 未初始化，正常回退
-        return _DEFAULT_KB_PATH
+    except FileNotFoundError as e:
+        if not _branch_mgr.registry_db.exists():
+            _KB_RESOLUTION_ERROR = None
+            return _DEFAULT_KB_PATH
+        _KB_RESOLUTION_ERROR = f"resolve_kb_path failed: {type(e).__name__}: {e}"
+        print(f"[KB] ERROR: {_KB_RESOLUTION_ERROR}", file=sys.stderr)
+        return _UNRESOLVED_KB_PATH
     except Exception as e:
-        import sys
-        print(f"[KB] WARNING: resolve_kb_path failed ({type(e).__name__}: {e}), falling back to default", file=sys.stderr)
-        return _DEFAULT_KB_PATH
+        _KB_RESOLUTION_ERROR = f"resolve_kb_path failed: {type(e).__name__}: {e}"
+        print(f"[KB] ERROR: {_KB_RESOLUTION_ERROR}", file=sys.stderr)
+        return _UNRESOLVED_KB_PATH
+
+
+def _registry_resolution_error() -> Optional[str]:
+    return _KB_RESOLUTION_ERROR
 
 
 KB_PATH = _resolve_kb_path()
@@ -70,12 +82,18 @@ def _resolve_source_file(path_value: str) -> Path:
 def _get_runtime_context() -> Dict[str, Any]:
     """收集当前 KB 的运行时上下文和索引状态"""
     current_source = _find_plugin_root_from_cwd() or SOURCE_ROOT
-    return _build_preflight(
+    context = _build_preflight(
         skill_dir=SKILL_DIR,
         kb_path=KB_PATH,
         source_root=current_source,
         branch_manager=_branch_mgr,
     )
+    if _registry_resolution_error():
+        context["data_trust"] = "stale"
+        context["fresh"] = False
+        context["stale_reason"] = "kb_resolution_failed"
+        context["registry_error"] = _registry_resolution_error()
+    return context
 
 
 def preflight() -> Dict[str, Any]:
@@ -275,6 +293,12 @@ def _get_kb_meta() -> Dict[str, Any]:
         return _kb_meta_cache
 
     meta = {{"branch": None, "commit": None, "built_at": None, "data_trust": "unknown"}}
+    if _registry_resolution_error():
+        meta["data_trust"] = "stale"
+        meta["stale_reason"] = "kb_resolution_failed"
+        meta["registry_error"] = _registry_resolution_error()
+        _kb_meta_cache = meta
+        return meta
     try:
         active_record = _get_active_branch_record()
         if active_record:
@@ -1005,7 +1029,77 @@ def _find_matching_close_brace_offset(text: str) -> int:
     return -1
 
 
-def get_function_implementation(function_name: str, class_name: str = None, module_hint: str = None) -> Dict[str, Any]:
+def _function_impl_location(func_info: Dict[str, Any]) -> tuple:
+    impl_file = func_info.get('impl_file_path') or ''
+    impl_line = func_info.get('impl_line_number', 0) or 0
+    if not impl_file:
+        decl_file = func_info.get('file_path', '') or ''
+        if decl_file.endswith('.cpp'):
+            impl_file = decl_file
+            impl_line = func_info.get('line_number', 0) or 0
+    return impl_file, impl_line
+
+
+def _summarize_function_candidate(func_info: Dict[str, Any]) -> Dict[str, Any]:
+    impl_file, impl_line = _function_impl_location(func_info)
+    return {
+        "class": func_info.get('class_name'),
+        "module": func_info.get('module'),
+        "signature": func_info.get('signature'),
+        "declaration_file": func_info.get('file_path'),
+        "declaration_line": func_info.get('line_number'),
+        "implementation_file": impl_file,
+        "implementation_line": impl_line,
+    }
+
+
+def _select_function_implementation_candidate(
+    results: List[Dict[str, Any]],
+    *,
+    class_name: str = None,
+    signature_hint: str = None,
+) -> Dict[str, Any]:
+    if class_name:
+        results = [r for r in results if r.get('class_name') == class_name]
+    if signature_hint:
+        results = [r for r in results if signature_hint in (r.get('signature') or '')]
+
+    candidates = []
+    seen = set()
+    for result in results:
+        impl_file, impl_line = _function_impl_location(result)
+        if not impl_file:
+            continue
+        key = (
+            impl_file,
+            impl_line,
+            result.get('class_name') or '',
+            result.get('module') or '',
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(result)
+
+    if not candidates:
+        return {"error": "implementation_not_found"}
+    if len(candidates) > 1:
+        return {
+            "error": "ambiguous_function_implementation",
+            "ambiguous": True,
+            "candidate_count": len(candidates),
+            "candidates": [_summarize_function_candidate(item) for item in candidates[:20]],
+            "hint": "Pass class_name/module_hint/signature_hint to disambiguate",
+        }
+    return {"candidate": candidates[0]}
+
+
+def get_function_implementation(
+    function_name: str,
+    class_name: str = None,
+    module_hint: str = None,
+    signature_hint: str = None,
+) -> Dict[str, Any]:
     """
     获取函数的实现代码
 
@@ -1026,27 +1120,26 @@ def get_function_implementation(function_name: str, class_name: str = None, modu
 
     # 查询函数信息
     results = func_idx.query_by_name(function_name, module_hint)
-    if class_name:
-        results = [r for r in results if r.get('class_name') == class_name]
-
     if not results:
         return {"error": f"Function {function_name} not found"}
 
-    # 优先选择有 impl_file_path 的结果
-    func_info = results[0]
-    for r in results:
-        if r.get('impl_file_path'):
-            func_info = r
-            break
-    impl_file = func_info.get('impl_file_path')
-    impl_line = func_info.get('impl_line_number', 0)
+    selection = _select_function_implementation_candidate(
+        results,
+        class_name=class_name,
+        signature_hint=signature_hint,
+    )
+    if selection.get("ambiguous"):
+        selection["function"] = function_name
+        selection["_meta"] = _get_kb_meta()
+        return selection
+    if "candidate" not in selection:
+        return {
+            "error": f"Implementation file not found for {function_name}",
+            "candidates": [_summarize_function_candidate(item) for item in results[:20]],
+        }
 
-    # 回退：如果 impl_file 为空但声明文件本身是 .cpp，则声明即实现
-    if not impl_file:
-        decl_file = func_info.get('file_path', '')
-        if decl_file.endswith('.cpp'):
-            impl_file = decl_file
-            impl_line = func_info.get('line_number', 0)
+    func_info = selection["candidate"]
+    impl_file, impl_line = _function_impl_location(func_info)
 
     impl_path = _resolve_source_file(impl_file) if impl_file else None
 
@@ -1171,8 +1264,14 @@ if __name__ == "__main__":
     import sys
     import json
 
-    def _extract_trace_args(raw_argv):
+    def _env_flag(name):
+        return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
+
+    def _extract_runtime_args(raw_argv):
         trace_id = None
+        allow_stale = False
+        no_audit = False
+        read_only = False
         cleaned = []
         args = list(raw_argv[1:])
         i = 0
@@ -1189,12 +1288,44 @@ if __name__ == "__main__":
                 trace_id = arg.split("=", 1)[1]
                 i += 1
                 continue
+            if arg == "--allow-stale":
+                allow_stale = True
+                i += 1
+                continue
+            if arg == "--no-audit":
+                no_audit = True
+                i += 1
+                continue
+            if arg == "--read-only":
+                read_only = True
+                i += 1
+                continue
             cleaned.append(arg)
             i += 1
-        return trace_id, cleaned
+        return trace_id, allow_stale, no_audit, read_only, cleaned
+
+    def _command_requires_fresh(command):
+        return command not in {
+            "preflight", "query_audit", "status", "check_freshness", "get_kb_info",
+            "ensure_fresh", "init", "register", "update", "set_active", "remove", "gc",
+        }
+
+    def _write_command(command):
+        return command in {"ensure_fresh", "init", "register", "update", "set_active", "remove", "gc"}
+
+    def _stale_gate_result(command):
+        context = _get_runtime_context()
+        if context.get("data_trust") == "stale":
+            return {
+                "error": "KB data_trust is stale; run preflight/ensure_fresh or pass --allow-stale",
+                "command": command,
+                "data_trust": "stale",
+                "preflight": context,
+            }
+        return None
 
     def _print_usage():
-        print("Usage: py impl.py [--trace-id <id>] <command> [args...]", file=sys.stderr)
+        print("Usage: py impl.py [--trace-id <id>] [--allow-stale] [--no-audit] [--read-only] <command> [args...]", file=sys.stderr)
         print("", file=sys.stderr)
         print("Commands:", file=sys.stderr)
         print("  preflight                                  - 查询前检查 KB/source/indices", file=sys.stderr)
@@ -1203,7 +1334,7 @@ if __name__ == "__main__":
         print("  query_module_dependencies <module_name>    - 查询模块依赖", file=sys.stderr)
         print("  query_module_classes <module_name> [type]  - 查询模块中的类", file=sys.stderr)
         print("  query_function_info <function_name> [hint] - 查询函数信息", file=sys.stderr)
-        print("  get_function_implementation <function_name> [class_name] [hint] - 获取函数实现", file=sys.stderr)
+        print("  get_function_implementation <function_name> [class_name] [hint] [signature_hint] - 获取函数实现", file=sys.stderr)
         print("  source_slice <relative_file> <line> [context|function] [context_lines] - 安全读取源码切片", file=sys.stderr)
         print("  search_files <keyword> [limit]             - 搜索源码文件全文索引", file=sys.stderr)
         print("  search_functions <keyword> [limit]         - 搜索函数", file=sys.stderr)
@@ -1252,7 +1383,17 @@ if __name__ == "__main__":
         idx = args.index(option)
         return args[idx + 1] if idx + 1 < len(args) else None
 
-    def _run_command(command, args):
+    def _run_command(command, args, allow_stale=False, read_only=False):
+        if read_only and _write_command(command):
+            return {
+                "error": f"Command '{command}' is disabled in read-only mode",
+                "command": command,
+                "read_only": True,
+            }
+        if not allow_stale and _command_requires_fresh(command):
+            blocked = _stale_gate_result(command)
+            if blocked:
+                return blocked
         if command == "preflight":
             return preflight()
         if command == "query_class_info":
@@ -1277,7 +1418,8 @@ if __name__ == "__main__":
             _require(args, 1, "Missing function_name argument")
             class_name = args[1] if len(args) > 1 else None
             module_hint = args[2] if len(args) > 2 else None
-            return get_function_implementation(args[0], class_name, module_hint)
+            signature_hint = args[3] if len(args) > 3 else None
+            return get_function_implementation(args[0], class_name, module_hint, signature_hint)
         if command == "source_slice":
             _require(args, 2, "Missing source_slice arguments")
             mode = args[2] if len(args) > 2 else "context"
@@ -1356,7 +1498,10 @@ if __name__ == "__main__":
         print(f"Error: Unknown command '{command}'", file=sys.stderr)
         _print_usage()
 
-    trace_id, cli_args = _extract_trace_args(sys.argv)
+    trace_id, allow_stale, no_audit, read_only, cli_args = _extract_runtime_args(sys.argv)
+    allow_stale = allow_stale or _env_flag("UE5KB_ALLOW_STALE")
+    no_audit = no_audit or _env_flag("UE5KB_NO_AUDIT")
+    read_only = read_only or _env_flag("UE5KB_READ_ONLY")
     if len(cli_args) < 1:
         _print_usage()
 
@@ -1365,8 +1510,8 @@ if __name__ == "__main__":
     started_at = time.time()
 
     try:
-        result = _run_command(command, command_args)
-        if command != "query_audit":
+        result = _run_command(command, command_args, allow_stale=allow_stale, read_only=read_only)
+        if command != "query_audit" and not no_audit:
             audit_error = result.get("error") if isinstance(result, dict) else None
             resolved_trace_id = _record_query_audit(
                 command,
@@ -1382,16 +1527,17 @@ if __name__ == "__main__":
 
     except Exception as e:
         resolved_trace_id = resolve_trace_id(trace_id)
-        try:
-            _record_query_audit(
-                command,
-                command_args,
-                error=str(e),
-                trace_id=resolved_trace_id,
-                started_at=started_at,
-            )
-        except Exception:
-            pass
+        if not no_audit:
+            try:
+                _record_query_audit(
+                    command,
+                    command_args,
+                    error=str(e),
+                    trace_id=resolved_trace_id,
+                    started_at=started_at,
+                )
+            except Exception:
+                pass
         error_result = {{"error": str(e), "command": command, "args": command_args, "_audit": {{"trace_id": resolved_trace_id}}}}
         print(json.dumps(error_result, ensure_ascii=False, indent=2))
         sys.exit(1)

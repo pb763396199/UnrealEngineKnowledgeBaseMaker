@@ -241,6 +241,14 @@ def _make_snippet(content: str, keyword: str, max_chars: int = 240) -> str:
     return snippet
 
 
+def _escape_like(keyword: str) -> str:
+    return (
+        keyword.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
 class FilesFtsIndex:
     """Query helper that tries MATCH first and falls back to LIKE."""
 
@@ -265,6 +273,14 @@ class FilesFtsIndex:
         if self._fts_enabled:
             try:
                 results = self._search_fts(keyword, limit)
+                if not results:
+                    results = self._search_like(keyword, limit)
+                    return {
+                        "keyword": keyword,
+                        "found_count": len(results),
+                        "results": results,
+                        "fallback": "like_after_match_empty",
+                    }
                 return {"keyword": keyword, "found_count": len(results), "results": results, "fallback": None}
             except sqlite3.OperationalError as exc:
                 results = self._search_like(keyword, limit)
@@ -282,7 +298,8 @@ class FilesFtsIndex:
         cursor = self.conn.execute(
             """
             SELECT f.path, f.module, f.extension,
-                   snippet(files_fts, 3, '[', ']', '...', 12) AS snippet
+                     snippet(files_fts, 3, '[', ']', '...', 12) AS snippet,
+                     rank AS rank
             FROM files_fts
             JOIN files f ON f.id = files_fts.rowid
             WHERE files_fts MATCH ?
@@ -291,15 +308,20 @@ class FilesFtsIndex:
             """,
             (_make_fts_query(keyword), limit),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        rows = []
+        for row in cursor.fetchall():
+            item = dict(row)
+            item["ranking_reason"] = "fts_rank"
+            rows.append(item)
+        return rows
 
     def _search_like(self, keyword: str, limit: int) -> List[Dict[str, object]]:
-        pattern = f"%{keyword}%"
+        pattern = f"%{_escape_like(keyword)}%"
         cursor = self.conn.execute(
             """
             SELECT path, module, extension, content
             FROM files
-            WHERE path LIKE ? OR content LIKE ?
+            WHERE path LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'
             ORDER BY path ASC
             LIMIT ?
             """,
@@ -310,6 +332,8 @@ class FilesFtsIndex:
             item = dict(row)
             content = item.pop("content", "")
             item["snippet"] = _make_snippet(content, keyword)
+            item["rank"] = None
+            item["ranking_reason"] = "like_fallback"
             rows.append(item)
         return rows
 

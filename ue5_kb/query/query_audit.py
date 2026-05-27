@@ -150,6 +150,43 @@ class QueryAudit:
         started_at: Optional[float] = None,
         finished_at: Optional[float] = None,
     ) -> int:
+        run_id = self.start_run(
+            trace_id=trace_id,
+            command=command,
+            args=args,
+            context=context,
+            started_at=started_at,
+        )
+        self.record_step(
+            trace_id=trace_id,
+            command=command,
+            args=args,
+            context=context,
+            result=result,
+            error=error,
+            run_id=run_id,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        self.finish_run(
+            run_id=run_id,
+            context=context,
+            result=result,
+            error=error,
+            finished_at=finished_at,
+        )
+        return run_id
+
+    def _record_fields(
+        self,
+        *,
+        args: Iterable[Any],
+        context: Optional[Dict[str, Any]],
+        result: Any = None,
+        error: Optional[str] = None,
+        started_at: Optional[float] = None,
+        finished_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
         started = started_at if started_at is not None else time.time()
         finished = finished_at if finished_at is not None else time.time()
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(finished))
@@ -167,6 +204,40 @@ class QueryAudit:
         fingerprint = context.get("fingerprint") or context.get("worktree_fingerprint")
         dirty_value = int(bool(dirty)) if dirty is not None else None
 
+        return {
+            "args_summary": args_summary,
+            "started_at": started,
+            "finished_at": finished,
+            "timestamp": timestamp,
+            "duration_ms": duration_ms,
+            "status": status,
+            "data_trust": data_trust,
+            "branch": branch,
+            "source": source,
+            "commit_id": commit_id,
+            "dirty": dirty_value,
+            "fingerprint": fingerprint,
+            "result_count": result_count,
+            "error": _truncate_error(error),
+            "fallback": fallback,
+        }
+
+    def start_run(
+        self,
+        *,
+        trace_id: str,
+        command: str,
+        args: Iterable[Any],
+        context: Optional[Dict[str, Any]] = None,
+        started_at: Optional[float] = None,
+    ) -> int:
+        fields = self._record_fields(
+            args=args,
+            context=context,
+            started_at=started_at,
+            finished_at=started_at,
+        )
+
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -179,24 +250,58 @@ class QueryAudit:
             (
                 trace_id,
                 command,
-                args_summary,
-                started,
-                finished,
-                timestamp,
-                duration_ms,
-                status,
-                data_trust,
-                branch,
-                source,
-                commit_id,
-                dirty_value,
-                fingerprint,
-                result_count,
-                _truncate_error(error),
-                fallback,
+                fields["args_summary"],
+                fields["started_at"],
+                fields["finished_at"],
+                fields["timestamp"],
+                fields["duration_ms"],
+                "running",
+                fields["data_trust"],
+                fields["branch"],
+                fields["source"],
+                fields["commit_id"],
+                fields["dirty"],
+                fields["fingerprint"],
+                None,
+                None,
+                None,
             ),
         )
         run_id = int(cursor.lastrowid)
+        self.conn.commit()
+        return run_id
+
+    def record_step(
+        self,
+        *,
+        trace_id: str,
+        command: str,
+        args: Iterable[Any],
+        context: Optional[Dict[str, Any]],
+        result: Any = None,
+        error: Optional[str] = None,
+        run_id: Optional[int] = None,
+        started_at: Optional[float] = None,
+        finished_at: Optional[float] = None,
+    ) -> int:
+        created_run = run_id is None
+        if run_id is None:
+            run_id = self.start_run(
+                trace_id=trace_id,
+                command=command,
+                args=args,
+                context=context,
+                started_at=started_at,
+            )
+        fields = self._record_fields(
+            args=args,
+            context=context,
+            result=result,
+            error=error,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        cursor = self.conn.cursor()
         cursor.execute(
             """
             INSERT INTO query_steps (
@@ -209,25 +314,84 @@ class QueryAudit:
                 run_id,
                 trace_id,
                 command,
-                args_summary,
-                started,
-                finished,
-                timestamp,
-                duration_ms,
-                status,
-                data_trust,
-                branch,
-                source,
-                commit_id,
-                dirty_value,
-                fingerprint,
-                result_count,
-                _truncate_error(error),
-                fallback,
+                fields["args_summary"],
+                fields["started_at"],
+                fields["finished_at"],
+                fields["timestamp"],
+                fields["duration_ms"],
+                fields["status"],
+                fields["data_trust"],
+                fields["branch"],
+                fields["source"],
+                fields["commit_id"],
+                fields["dirty"],
+                fields["fingerprint"],
+                fields["result_count"],
+                fields["error"],
+                fields["fallback"],
+            ),
+        )
+        step_id = int(cursor.lastrowid)
+        self.conn.commit()
+        if created_run:
+            self.finish_run(
+                run_id=run_id,
+                context=context,
+                result=result,
+                error=error,
+                finished_at=finished_at,
+            )
+        return step_id
+
+    def finish_run(
+        self,
+        *,
+        run_id: int,
+        context: Optional[Dict[str, Any]] = None,
+        result: Any = None,
+        error: Optional[str] = None,
+        finished_at: Optional[float] = None,
+    ) -> None:
+        row = self.conn.execute(
+            "SELECT args_summary, started_at FROM query_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return
+        started = float(row["started_at"])
+        fields = self._record_fields(
+            args=json.loads(row["args_summary"] or "[]"),
+            context=context,
+            result=result,
+            error=error,
+            started_at=started,
+            finished_at=finished_at,
+        )
+        self.conn.execute(
+            """
+            UPDATE query_runs
+            SET finished_at=?, timestamp=?, duration_ms=?, status=?, data_trust=?, branch=?,
+                source=?, commit_id=?, dirty=?, fingerprint=?, result_count=?, error=?, fallback=?
+            WHERE id=?
+            """,
+            (
+                fields["finished_at"],
+                fields["timestamp"],
+                fields["duration_ms"],
+                fields["status"],
+                fields["data_trust"],
+                fields["branch"],
+                fields["source"],
+                fields["commit_id"],
+                fields["dirty"],
+                fields["fingerprint"],
+                fields["result_count"],
+                fields["error"],
+                fields["fallback"],
+                run_id,
             ),
         )
         self.conn.commit()
-        return run_id
 
     def recent(self, trace_id: Optional[str] = None, limit: int = 20) -> Dict[str, Any]:
         limit = max(1, min(int(limit), 200))
