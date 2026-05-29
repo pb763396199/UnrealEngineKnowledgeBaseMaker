@@ -43,20 +43,27 @@ def _decode_z_paths(raw: bytes) -> List[str]:
 class VCSAdapter:
     """版本控制系统适配器"""
 
-    def __init__(self, repo_path: str, vcs_type: str = "git"):
+    def __init__(self, repo_path: str, vcs_type: str = "git", scope: str = "."):
         self._path = repo_path
         self._type = vcs_type
+        # scope: repo-relative posix 路径，限制 git 命令只扫描该子树；"." 表示整个仓库
+        self._scope = scope
 
     @staticmethod
     def detect(path: str) -> "VCSAdapter":
-        """自动检测 VCS 类型并返回适配器"""
+        """自动检测 VCS 类型并返回适配器，同时记录 source scope"""
         p = Path(path)
         # 向上查找 .git 目录
         for parent in [p] + list(p.parents):
             if (parent / ".git").exists():
-                return VCSAdapter(str(parent), "git")
+                try:
+                    rel = p.relative_to(parent)
+                    scope = rel.as_posix() if rel != Path(".") else "."
+                except ValueError:
+                    scope = "."
+                return VCSAdapter(str(parent), "git", scope)
         # 未检测到 VCS，返回 null adapter
-        return VCSAdapter(str(p), "none")
+        return VCSAdapter(str(p), "none", ".")
 
     def get_type(self) -> str:
         return self._type
@@ -182,8 +189,11 @@ class VCSAdapter:
         return cls._is_source_fingerprint_file(Path(parts[-1]))
 
     def _git_source_dirty_paths(self) -> tuple[List[str], List[str]]:
+        # 当 scope 为子目录时，追加 -- <scope> pathspec 避免全仓库扫描
+        scope_args = ["--", self._scope] if self._scope != "." else []
+
         tracked = subprocess.run(
-            ["git", "diff", "--name-only", "-z", "--no-ext-diff", "HEAD"],
+            ["git", "diff", "--name-only", "-z", "--no-ext-diff", "HEAD"] + scope_args,
             cwd=self._path,
             capture_output=True,
             timeout=10,
@@ -192,7 +202,7 @@ class VCSAdapter:
             return [], []
 
         untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"] + scope_args,
             cwd=self._path,
             capture_output=True,
             timeout=10,

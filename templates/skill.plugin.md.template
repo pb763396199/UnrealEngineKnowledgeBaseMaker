@@ -1,15 +1,25 @@
 ---
 name: {PLUGIN_NAME}-kb
-description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息。当用户询问 {PLUGIN_NAME} 插件源码问题时，使用此技能并通过 impl.py CLI 查询知识库，不要直接使用Glob/Grep搜索源码。
+description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息。当任务涉及 {PLUGIN_NAME} 插件源码的编译错误、代码修改、审查、定位、调试、API/类型/函数确认时，必须先执行 KB gate（preflight → ensure_fresh if stale → impl.py 查询），不要先用 Glob/Grep/read_file 直接搜源码；仅当 KB 明确 miss 后才可降级到源码搜索。
 ---
 
 # {PLUGIN_NAME} 插件知识库查询
 
 ## 何时使用此技能
 
-当用户询问关于 **{PLUGIN_NAME} 插件** 源码的问题时，使用此技能。
+以下任务场景都必须先执行 KB gate，**再**使用 Glob/Grep/read_file 搜索源码：
 
-**重要**: 始终使用下面的 CLI 命令查询知识库，不要直接使用 Glob/Grep 搜索源码。
+| 场景 | 说明 |
+|------|------|
+| 编译错误/类型错误 | 确认类型声明、函数签名、头文件所在模块 |
+| 代码修改/新增 | 确认要修改的函数签名、继承关系、模块依赖 |
+| 代码审查 | 确认 API 用法是否正确、依赖是否缺失 |
+| 调试/定位 | 确认调用链、函数实现位置、符号引用 |
+| API/类/函数确认 | 任何需要查找 {PLUGIN_NAME} 源码内符号的操作 |
+
+**KB gate 顺序（强制）**：`preflight` → stale 则 `ensure_fresh` → `impl.py` 查询 → KB miss 时才降级到 Glob/Grep/read_file。
+
+**重要**: 始终使用下面的 CLI 命令查询知识库，不要先用 Glob/Grep/read_file 搜源码。KB 未找到目标时，明确标注"KB miss"后再降级。
 
 
 ### 模块相关查询
@@ -122,11 +132,13 @@ py "{SKILL_PATH}/impl.py" get_statistics
 
 ## 使用建议
 
-1. **先做 preflight**：每次源码问答前先运行 `preflight`；发现 `stale` 必须先更新
-2. **始终使用 CLI 查询**：不要直接使用 Glob/Grep 搜索源码，知识库查询更快更准确
-3. **优先使用精确查询**：如果知道具体的类名或模块名，使用 `query_class_info` 或 `query_module_dependencies`
-4. **使用搜索功能**：如果只知道关键字，使用 `search_modules`、`search_classes`、`search_functions` 或 `search_files`
-5. **处理错误结果**：如果返回的 JSON 包含 `error` 字段，说明查询失败
+1. **KB gate 优先（编译/修改/审查/调试均适用）**：不论是回答问题还是执行编译修复、代码修改、审查、调试，都必须先走 KB gate，不要先 Glob/Grep/read_file 扫源码
+2. **先做 preflight**：每次任务开始前先运行 `preflight`；发现 `stale` 必须先更新再查询
+3. **始终使用 CLI 查询**：不要直接使用 Glob/Grep 搜索源码，知识库查询更快更准确
+4. **优先使用精确查询**：如果知道具体的类名或模块名，使用 `query_class_info` 或 `query_module_dependencies`
+5. **使用搜索功能**：如果只知道关键字，使用 `search_modules`、`search_classes`、`search_functions` 或 `search_files`
+6. **KB miss 时才降级**：KB 未找到目标时，明确标注"KB miss"，再降级到 Glob/Grep/read_file 源码搜索
+7. **处理错误结果**：如果返回的 JSON 包含 `error` 字段，说明查询失败
 
 ---
 

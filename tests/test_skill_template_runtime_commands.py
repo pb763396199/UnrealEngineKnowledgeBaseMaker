@@ -109,6 +109,44 @@ def test_engine_and_plugin_skill_templates_require_preflight_and_new_commands():
         assert "--trace-id" in content
 
 
+def test_skill_templates_description_covers_compile_debug_edit_review():
+    """description 字段必须覆盖 compile/debug/edit/review 场景，不能只写"询问源码问题"。"""
+    for template in ("templates/skill.md.template", "templates/skill.plugin.md.template"):
+        content = _read(template)
+        desc_line = next(
+            (ln for ln in content.splitlines() if ln.startswith("description:")), None
+        )
+        assert desc_line is not None, f"{template}: 缺少 description 字段"
+        assert "编译" in desc_line, f"{template}: description 未覆盖编译场景"
+        assert "修改" in desc_line or "审查" in desc_line, f"{template}: description 未覆盖代码修改/审查场景"
+        assert "调试" in desc_line, f"{template}: description 未覆盖调试场景"
+        assert "KB gate" in desc_line, f"{template}: description 未写 KB gate 要求"
+
+
+def test_skill_templates_when_to_use_covers_compile_and_edit_scenarios():
+    """'何时使用此技能'节必须包含编译/修改/审查/调试四个场景关键词。"""
+    for template in ("templates/skill.md.template", "templates/skill.plugin.md.template"):
+        content = _read(template)
+        assert "编译错误" in content, f"{template}: 缺少'编译错误'触发场景"
+        assert "代码修改" in content, f"{template}: 缺少'代码修改'触发场景"
+        assert "代码审查" in content or "审查" in content, f"{template}: 缺少'审查'触发场景"
+        assert "调试" in content, f"{template}: 缺少'调试'触发场景"
+
+
+def test_skill_templates_enforce_kb_gate_before_grep_read_file():
+    """模板必须明确要求 KB gate 在 Glob/Grep/read_file 之前，且 miss 后才可降级。"""
+    for template in ("templates/skill.md.template", "templates/skill.plugin.md.template"):
+        content = _read(template)
+        # 必须写 "不要先用 Glob/Grep/read_file" 或等价约束
+        assert "Glob/Grep/read_file" in content, f"{template}: 未明确禁止先用 Glob/Grep/read_file"
+        # 必须写 KB miss 降级条件
+        assert "KB miss" in content or "明确标注" in content, (
+            f"{template}: 未说明 KB miss 后才可降级"
+        )
+        # 必须写 KB gate 顺序
+        assert "KB gate" in content, f"{template}: 缺少 KB gate 强制顺序说明"
+
+
 def test_rendered_plugin_skill_template_does_not_escape_error_json_example():
     content = _read("templates/skill.plugin.md.template")
     variables = {
