@@ -451,10 +451,48 @@ C:\Users\pb763\.agents\skills\ue5kb-5.3\
 
 ```powershell
 py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" preflight
-py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" query_module_info Core
+py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" query_module_dependencies Core
 py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" query_class_info AActor
 py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" search_modules Runtime
 ```
+
+### Skill 命令速查
+
+| 分类 | 命令 | 常用程度 | 大白话作用 |
+| --- | --- | --- | --- |
+| 查询前检查 | `preflight` | 高 | 先确认 KB、源码路径和索引可信；不通过就不要继续回答源码问题。 |
+| 查询前检查 | `ensure_fresh` | 高（插件 Skill） | 插件源码变了就刷新当前插件 KB。 |
+| 基础查询 | `query_class_info` | 高 | 查类在哪、继承谁、有哪些成员。 |
+| 基础查询 | `query_function_info` | 高 | 查函数声明、实现位置和所属类。 |
+| 基础查询 | `get_function_implementation` | 高 | 直接读取函数实现。 |
+| 基础查询 | `source_slice` | 高 | 按文件和行号读取小块源码证据。 |
+| 搜索 | `search_classes` / `search_functions` | 高 | 不知道准确名字时先搜候选。 |
+| 搜索 | `search_files` | 中 | 结构化查询 miss 后，再做全文索引搜索。 |
+| 静态关系 | `resolve_seed` | 高 | 先判断用户给的是类、函数、结构体还是模糊命中。 |
+| 静态关系 | `query_callees` / `query_callers` | 高 | 顺着函数往下查，或反查谁触发它。 |
+| 静态关系 | `query_symbol_references` | 高 | 查符号在哪些地方被引用。 |
+| 静态关系 | `symbol_reference_report` | 高 | 一次性看 callers、callees、references 概况。 |
+| 静态关系 | `symbol_evidence_bundle` | 高 | 打包声明、实现、引用证据，适合写回答前收集证据。 |
+| 静态关系 | `query_flow` | 高 | 在静态调用/引用图里按方向、深度展开。 |
+| 静态探索 | `query_static_closure` | 高 | 作为复杂业务查询的导航器，暴露下一步命令和截断/缺口；不是完整业务真理证明。 |
+| 静态探索 | `trace_business_flow` | 实验 | 只做首轮证据聚合和流程图，固定 `REVIEW_ONLY`；不能作为“一查到底”验收。 |
+| 静态探索 | `trace_flow_path` | 中 | 查两个符号之间是否存在静态路径。 |
+| 审计 | `query_audit` | 中 | 回看本轮跑过哪些 Skill 命令。 |
+| 审计 | `query_audit_report` | 高 | 统计调用次数、失败率、宽泛搜索和效率。 |
+| 维护 | `get_statistics` / `get_kb_info` | 中 | 看 KB 规模、版本、来源和路径。 |
+| 分支维护 | `init` / `register` / `update` / `status` / `set_active` / `check_freshness` / `remove` / `gc` | 低到中 | 管理多分支/多变体 KB；普通问答不优先用。 |
+
+### 推荐查询路径
+
+| 用户问题 | 推荐命令顺序 |
+| --- | --- |
+| 查一个类 | `preflight` -> `resolve_seed` -> `query_class_info` -> `symbol_evidence_bundle` |
+| 查一个函数 | `preflight` -> `query_function_info` -> `get_function_implementation` -> `query_callees/query_callers` |
+| 查复杂业务链 | `preflight` -> `resolve_seed` -> `query_static_closure` -> `query_flow` -> `symbol_evidence_bundle` -> `source_slice` |
+| 不确定名字 | `search_classes/search_functions/search_modules` -> 回到结构化查询 |
+| 做实战复盘 | 查询时带 `--trace-id` -> `query_audit_report` |
+
+注意：复杂业务答案必须回到 `source_slice` 或 `get_function_implementation` 的源码证据。`trace_business_flow` 只是证据聚合器，不是完整业务闭环证明。
 
 ## 版本要求
 

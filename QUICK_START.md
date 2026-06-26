@@ -174,6 +174,49 @@ py "<skill>\impl.py" symbol_evidence_bundle AActor 20 all
 
 **Token 节省**: 先用摘要命令，再用 `source_slice` 精确读取上下文，避免一次性返回整文件或大结果。
 
+### 新 Agent 上手速查
+
+先记住一条规则：**不要把用户问题原文丢给 `impl.py`。先判断问题类型，再选择确定性命令。**
+
+| 场景 | 先用什么 | 继续怎么查 | 常用程度 |
+| --- | --- | --- | --- |
+| 不确定用户说的是类还是函数 | `resolve_seed <name>` | 根据结果转 `query_class_info` 或 `query_function_info` | 高 |
+| 查类 | `query_class_info <class>` | 再用 `symbol_evidence_bundle` 和 `source_slice` 看证据 | 高 |
+| 查函数 | `query_function_info <function>` | 再用 `get_function_implementation`、`query_callees`、`query_callers` | 高 |
+| 查谁用了某个符号 | `query_symbol_references <symbol>` | 需要概览时用 `symbol_reference_report` | 高 |
+| 查业务链 | `query_static_closure <seed>` | 按 `next_static_command_objects` 继续跑 `query_flow`、`symbol_evidence_bundle`、`source_slice` | 高 |
+| 只知道关键字 | `search_classes` / `search_functions` / `search_modules` | 找到准确名字后回到结构化查询 | 中 |
+| 画静态关系图 | `query_flow <seed> ...` | 必要时用 `trace_flow_path <from> <to>` 验证连接 | 中 |
+| 统计本轮查了几次 | `query_audit_report <trace-id>` | 看失败率、宽泛搜索和效率 | 高 |
+| 首轮证据聚合 | `trace_business_flow <seed>` | 只能看证据和流程图，不能当闭环结论 | 实验 |
+
+### 常见问题查询路径
+
+```powershell
+# 查一个类
+py "<skill>\impl.py" preflight
+py "<skill>\impl.py" resolve_seed MyActor 20
+py "<skill>\impl.py" query_class_info MyActor
+py "<skill>\impl.py" symbol_evidence_bundle MyActor 20 resolved
+
+# 查一个函数的上下游
+py "<skill>\impl.py" query_function_info BeginPlay AActor
+py "<skill>\impl.py" get_function_implementation BeginPlay AActor
+py "<skill>\impl.py" query_callees BeginPlay AActor 50 resolved
+py "<skill>\impl.py" query_callers BeginPlay AActor 50 resolved
+
+# 查复杂业务链，注意这不是自动证明完整业务
+py "<skill>\impl.py" query_static_closure FeatureLayer 3 80 resolved
+py "<skill>\impl.py" query_flow FeatureLayer both call,type_reference 3 80 resolved
+py "<skill>\impl.py" symbol_evidence_bundle FeatureLayer 20 resolved
+
+# 复盘本轮效率
+py "<skill>\impl.py" --trace-id my-case query_class_info MyActor
+py "<skill>\impl.py" query_audit_report my-case 200 40
+```
+
+`trace_business_flow` 是实验性命令。它会返回 `REVIEW_ONLY`，不能作为“完整业务逻辑已经查到底”的证明。
+
 ### 监控 Token 使用
 
 ```python

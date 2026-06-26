@@ -2620,7 +2620,7 @@ if __name__ == "__main__":
         print("  symbol_reference_report <symbol_name> [limit] [resolution_state=all] - 静态符号引用报表", file=sys.stderr)
         print("  symbol_evidence_bundle <symbol_name> [limit] [resolution_state=all] - 静态证据包", file=sys.stderr)
         print("  code_flow_index [limit] [resolution_state=all] - 静态引用图边视图", file=sys.stderr)
-        print("  query_static_closure <seed> [depth] [limit] [resolution_state=all] - 静态业务对象闭环查询", file=sys.stderr)
+        print("  query_static_closure <seed> [depth] [limit] [resolution_state=all] - 有界静态探索导航", file=sys.stderr)
         print("  query_flow <seed> [direction] [edge_types] [depth] [limit] [resolution_state=all] - 静态图遍历", file=sys.stderr)
         print("  trace_business_flow <seed> [depth] [limit] [resolution_state=resolved] [evidence_limit] - 实验性静态证据聚合器，不能作为完整业务闭环证明", file=sys.stderr)
         print("  trace_flow_path <from> <to> [depth] [limit] [resolution_state=resolved] - 静态路径查询", file=sys.stderr)

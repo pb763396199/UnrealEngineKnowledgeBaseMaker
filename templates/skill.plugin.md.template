@@ -91,10 +91,34 @@ description: {PLUGIN_NAME} 插件知识库 - 查询模块、类、函数信息�
 | `symbol_reference_report` | `<symbol_name> [limit=50] [resolution_state=all]` | 静态符号引用报表 |
 | `symbol_evidence_bundle` | `<symbol_name> [limit=20] [resolution_state=all]` | 固定 schema 静态证据包 |
 | `code_flow_index` | `[limit=100] [resolution_state=all]` | 静态引用图边视图，不复制 KB |
-| `query_static_closure` | `<seed> [depth=3] [limit=80] [resolution_state=all]` | 静态业务对象闭环查询，返回 `closure_validation` 和可执行 `next_static_command_objects` |
+| `query_static_closure` | `<seed> [depth=3] [limit=80] [resolution_state=all]` | 有界静态探索导航，返回 `closure_validation`、缺口和可执行 `next_static_command_objects` |
 | `query_flow` | `<seed> [direction] [edge_types] [depth] [limit] [resolution_state]` | 静态图遍历 |
 | `trace_business_flow` | `<seed> [depth=4] [limit=160] [resolution_state=resolved] [evidence_limit=12]` | 实验性静态证据聚合器，返回内部调用统计、证据切片、frontier 和 Mermaid 流程图；不能作为完整业务闭环证明 |
 | `trace_flow_path` | `<from> <to> [depth] [limit] [resolution_state]` | 静态路径查询 |
+
+### 命令分组速查
+
+| 分组 | 优先命令 | 常用程度 | 什么时候用 |
+|---|---|---|---|
+| 查询前检查 | `preflight`, `ensure_fresh` | 高 | 每次源码问答、修改、审查、调试前先确认 KB 可信；stale 时先刷新 |
+| 基础结构 | `resolve_seed`, `query_class_info`, `query_function_info` | 高 | 先确认名字、类型、声明和实现位置 |
+| 源码证据 | `get_function_implementation`, `source_slice` | 高 | 最终回答必须回到这些源码证据 |
+| 模糊搜索 | `search_classes`, `search_functions`, `search_modules`, `search_files` | 中 | 精确名字未知或 KB 明确 miss 后使用 |
+| 静态关系 | `query_callees`, `query_callers`, `query_symbol_references`, `symbol_reference_report`, `symbol_evidence_bundle` | 高 | 查调用、引用、上下游和证据包 |
+| 业务探索 | `query_static_closure`, `query_flow`, `trace_flow_path` | 高/中 | 复杂链路用它们导航，再回源验证 |
+| 实验聚合 | `trace_business_flow` | 实验 | 首轮证据聚合和画图；不能作为完整业务闭环证明 |
+| 审计复盘 | `query_audit`, `query_audit_report` | 中/高 | 统计本轮调用次数、失败率和宽泛搜索 |
+| 版本统计 | `get_statistics`, `get_kb_info` | 中 | 确认 KB 规模、版本和来源 |
+
+### 常见任务路径
+
+| 任务 | 推荐路径 |
+|---|---|
+| 查一个类 | `preflight` → `resolve_seed` → `query_class_info` → `symbol_evidence_bundle` |
+| 查一个函数 | `preflight` → `query_function_info` → `get_function_implementation` → `query_callees/query_callers` |
+| 查复杂业务链 | `preflight` → `resolve_seed` → `query_static_closure` → 按 `next_static_command_objects` 继续 `query_flow/symbol_evidence_bundle/source_slice` |
+| 不确定名字 | `search_classes/search_functions/search_modules` → 找到准确符号后回到结构化查询 |
+| 效率复盘 | 查询时加 `--trace-id` → `query_audit_report` |
 
 ### 查询示例
 
@@ -162,10 +186,11 @@ py "{SKILL_PATH}/impl.py" get_statistics
 5. **使用搜索功能**：如果只知道关键字，使用 `search_modules`、`search_classes`、`search_functions` 或 `search_files`
 6. **KB miss 时才降级**：KB 未找到目标时，明确标注"KB miss"，再降级到 Glob/Grep/read_file 源码搜索
 7. **处理错误结果**：如果返回的 JSON 包含 `error` 字段，说明查询失败
-8. **不要把 partial/truncated 当作闭环完成**：`query_static_closure` 只有 `closure_validation.status == "PASS"` 才能证明闭环；当前 derived/static 结果通常应作为辅助定位而不是最终完备证明
+8. **不要把 partial/truncated 当作完成**：`query_static_closure` 的 `closure_validation.status == "PASS"` 只表示当前索引、预算和规则范围内探索完成；不能证明完整业务真理
 9. **保持 static-only**：查询命令不得调用 LLM、RAG、embedding 或 vector search；`source_slice`、`search_files` 只能作为证据回源，不能伪装成语义边
 10. **复杂业务不要声称一条命令闭环**：`trace_business_flow` 只能做首轮静态证据聚合；它的 `automation_score.status` 和 `closure_validation.status` 不会返回 `PASS`，不得作为“完整业务逻辑/一查到底”的验收门
 11. **不要混淆两种闭包**：`trace_business_flow.coverage.closed` 固定为 `false`，表示它不是业务闭环证明；`formal_semantic_closure == false` 时，不能宣传成全局形式化语义闭包证明
+12. **复杂业务回答必须引用源码证据**：即使 `query_static_closure` 给出下一步建议，也要用 `source_slice` 或 `get_function_implementation` 验证关键入口、分支、注册、回调和终点
 
 ---
 

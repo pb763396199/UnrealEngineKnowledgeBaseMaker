@@ -1,4 +1,4 @@
-# 静态闭环查询改造计划
+# 有界静态探索查询改造计划
 
 这份计划只解决一个问题：
 
@@ -84,7 +84,7 @@
 
 它必须是确定性的配置或规则文件。AI 可以离线帮忙提出候选，但运行时查询不能调用 AI，也不能让 AI 决定规则是否成立。
 
-### 3. 静态闭环状态
+### 3. 有界静态探索状态
 
 查询结果只能落到这些状态之一：
 
@@ -97,7 +97,7 @@
 | `truncated` | 深度、节点数、边数、时间或内存预算截断了 |
 | `unsupported` | 当前语言、结构或规则不支持 |
 
-`closed` 只能说“有界静态闭环完成”，不能说“完整业务逻辑已被证明”。
+`closed` 只能说“有界静态探索完成”，不能说“完整业务逻辑已被证明”。
 
 ## AI 的位置
 
@@ -181,7 +181,7 @@
 
 ### 2. 查询阶段只读静态关系库
 
-新增核心命令：
+核心导航命令：
 
 ```text
 query_static_closure <seed>
@@ -190,10 +190,10 @@ query_static_closure <seed>
 它和现有 `query_flow` 的关系必须明确：
 
 - `query_flow` 保持兼容入口，继续服务旧调用方。
-- 新闭环能力以 `query_static_closure` 为规范入口。
-- 如果 `query_flow` 需要提供闭环语义，必须调用同一个闭环查询内核，不能复制一套遍历逻辑。
+- 有界静态探索以 `query_static_closure` 为导航入口。
+- 如果 `query_flow` 需要提供探索状态，必须调用同一个静态关系内核，不能复制一套遍历逻辑。
 - 旧 `query_flow` 输出必须标记其边来源和闭环能力，例如 `legacy_edge_source=true` 或 `closure_status_unavailable=true`。
-- Skill 文档必须说明：需要“一查到底”时使用 `query_static_closure`；`query_flow` 是兼容/局部流向查询。
+- Skill 文档必须说明：复杂业务先用 `query_static_closure` 导航，再按下一步命令继续 `query_flow`、证据包和源码切片；任何命令都不能单独证明“完整业务真理”。
 
 它负责：
 
@@ -232,7 +232,7 @@ rules/project_conventions/
 
 ### 4. 审计和复现
 
-每次闭环查询必须记录：
+每次有界静态探索必须记录：
 
 - seed
 - 使用的规则包
@@ -240,7 +240,7 @@ rules/project_conventions/
 - 构建快照
 - 源码摘要
 - 查询预算
-- 闭环状态
+- 探索状态
 - 未展开 frontier 数量
 - 缺失索引数量
 - 截断原因
@@ -281,9 +281,9 @@ rules/project_conventions/
 - [ ] 把闭环关系库加入 runtime preflight 必需索引集合。
 - [ ] 在构建阶段写入调用、继承、字段读写、数据流、注册、回调、配置绑定、资源引用。
 - [ ] 构建 `semantic_edges.db` 时使用临时库校验后原子替换。
-- [ ] 实现 `query_static_closure <seed>`。
+- [ ] 实现 `query_static_closure <seed>` 作为有界静态探索导航器。
 - [ ] 明确 `query_static_closure` 与 `query_flow` 的兼容关系；若复用闭环语义，二者必须调用同一个内核。
-- [ ] 输出 `closed / partial / blocked / ambiguous / truncated / unsupported`。
+- [ ] 输出 `closed / partial / blocked / ambiguous / truncated / unsupported`，并明确 `closed` 只代表预算和索引范围内的静态探索完成。
 - [ ] 把 `index_gap` 和真正 blocker 分开。
 - [ ] 增加项目约定规则目录和 schema。
 - [ ] 把原来的 `profile` 术语迁移为 `project_conventions` 或中文“项目约定规则”。
@@ -315,8 +315,8 @@ rules/project_conventions/
 1. 找 X 的真实入口。
 2. 沿静态关系展开所有相关调用、状态、分支、注册、回调、资源、边界。
 3. 明确每条链路为什么继续或为什么停止。
-4. 如果闭环，输出有界静态闭环报告。
+4. 如果静态探索闭合，输出有界静态探索报告。
 5. 如果没闭环，明确告诉用户缺什么，而不是假装完整。
 ```
 
-这才是“一查到底”的价值。
+这才是“一查到底”真正应该表达的价值：把已发现的静态关系沿到底，并如实暴露缺口，而不是用一条命令证明完整业务真理。
