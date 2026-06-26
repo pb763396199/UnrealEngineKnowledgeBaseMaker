@@ -62,12 +62,12 @@ discover → extract → analyze → build → generate
 5. **`ue5_kb/pipeline/build.py`** - 构建阶段
    - 转换 JSON → SQLite + Pickle
    - 构建全局索引和模块图谱
-   - 输出：`KnowledgeBase/global_index/`, `module_graphs/`
+   - 输出：canonical skill variant 下的 `global_index/`, `module_graphs/`
 
 6. **`ue5_kb/pipeline/generate.py`** - 生成阶段
    - 从模板生成 Skill 文件
    - 自动检测引擎版本
-   - 输出：`~/.claude/skills/{skill-name}/`
+   - 输出：`~/.agents/skills/{skill-name}/`，其他 provider 通过 adapter/link 暴露
 
 #### 1.2 状态管理系统
 
@@ -182,64 +182,40 @@ ue5kb pipeline run --engine-path "D:\UE5"
 
 ### 实施内容
 
-#### 2.1 完善 LayeredQueryInterface
+#### 2.1 静态命令渐进披露
 
-**`ue5_kb/query/layered_query.py`** - 补全实现
+**生成的 `impl.py` runtime** - 当前默认查询入口
 
-**补全的占位符函数**:
+**核心命令**:
 
-1. **`_load_class_info(class_name)`** - 真实实现
-   - 遍历 `module_graphs/*.pkl` 查找类
-   - 提取父类、方法、属性
-   - 返回结构化类信息
+1. **`query_class_info <class_name>`**
+   - 从 SQLite class index 查询类结构
+   - 返回父类、方法/属性计数、模块和文件行号
 
-2. **`_load_source_code(class_name)`** - 真实实现
-   - 从类信息获取文件路径
-   - 读取源文件内容
-   - 错误处理（文件不存在等）
+2. **`source_slice <file> <line> ...`**
+   - 按已定位的文件行号读取源码切片
+   - 输出有界上下文，避免一次性返回整文件
 
-**分层查询模式**:
+**静态命令模式**:
 
-```python
-# 摘要层（~150 tokens）
-result = layered_query.query_class('AActor', detail_level='summary')
-# 返回: name, module, parent, method_count, key_methods (前5个), ref_id
-
-# 详情层（~800 tokens）
-result = layered_query.query_class('AActor', detail_level='details')
-# 返回: 完整方法列表, properties, file_path, line_number
-
-#源码层（~2000+ tokens）
-result = layered_query.query_class(ref_id, detail_level='source')
-# 返回: 完整源代码
+```powershell
+py "<skill>/impl.py" preflight
+py "<skill>/impl.py" query_class_info AActor
+py "<skill>/impl.py" source_slice Engine/Source/Runtime/Engine/Classes/GameFramework/Actor.h 234 context 8 40 12000
 ```
 
 #### 2.2 模板已集成
 
 **`templates/impl.py.template`** - 已包含 Context Optimization
 
-模板中已经包含了：
+模板中已经包含显式静态命令：
 
-1. **导入 Context Optimization 模块**:
-   ```python
-   from ue5_kb.query.layered_query import LayeredQueryInterface
-   from ue5_kb.query.result_cache import get_result_cache
-   from ue5_kb.query.token_budget import get_token_budget
-   ```
-
-2. **初始化实例**:
-   ```python
-   _layered_query = LayeredQueryInterface(str(KB_PATH))
-   _result_cache = get_result_cache()
-   _token_budget = get_token_budget()
-   ```
-
-3. **分层查询函数**:
-   - `query_class_layered(class_name, detail_level)`
-   - `query_function_layered(function_name, detail_level)`
-   - `get_full_results(ref_id)` - Observation Masking 支持
-   - `get_token_statistics()` - Token 预算统计
-   - `get_cache_statistics()` - 缓存统计
+1. `preflight`
+2. `query_class_info`
+3. `query_function_info`
+4. `resolve_seed`
+5. `symbol_evidence_bundle`
+6. `source_slice`
 
 ### Token 优化效果
 
@@ -251,20 +227,12 @@ result = layered_query.query_class(ref_id, detail_level='source')
 
 **推荐使用模式**:
 
-```python
-# 1. 先用 summary 查询概览
-summary = query_class_layered('AActor', 'summary')
-# Token: ~150
+```powershell
+# 1. 先取结构化概览
+py "<skill>/impl.py" query_class_info AActor
 
-# 2. 根据 ref_id 获取详情（按需）
-if interested:
-    details = query_class_layered(summary['ref_id'], 'details')
-    # Token: ~800
-
-# 3. 需要源码时再获取（最后手段）
-if need_source:
-    source = query_class_layered(details['source_ref'], 'source')
-    # Token: ~2000+
+# 2. 按概览返回的 file/line 获取源码片段
+py "<skill>/impl.py" source_slice Engine/Source/Runtime/Engine/Classes/GameFramework/Actor.h 234 context 8 40 12000
 ```
 
 ---
@@ -396,9 +364,6 @@ ue5kb pipeline partition-status --engine-path "D:\UE5"
 $ python -c "from ue5_kb.pipeline import PipelineCoordinator; print('OK')"
 OK
 
-$ python -c "from ue5_kb.query.layered_query import LayeredQueryInterface; print('OK')"
-OK
-
 $ python -c "from ue5_kb.builders.partitioned_builder import PartitionedBuilder; print('OK')"
 OK
 ```
@@ -427,7 +392,7 @@ $ ue5kb pipeline partition-status --help
 | 5个 Pipeline 阶段 | ✅ | 全部实现 |
 | 状态管理 | ✅ | 实现完成 |
 | Pipeline 协调器 | ✅ | 实现完成 |
-| LayeredQuery 补全 | ✅ | 占位符已实现 |
+| 静态命令查询 | ✅ | Skill runtime 已实现 |
 | 分区构建器 | ✅ | 实现完成 |
 | CLI 集成 | ✅ | 命令注册成功 |
 
@@ -449,9 +414,9 @@ ue5kb pipeline partition-status  # 分区状态查询
 
 **Context Optimization 版本**:
 ```python
-query_class_layered(class_name, detail_level)
-query_function_layered(function_name, detail_level)
-get_full_results(ref_id)
+query_class_info(class_name)
+query_function_info(function_name)
+source_slice(file, line, mode, context_lines, max_context_lines, max_output_chars)
 get_token_statistics()
 get_cache_statistics()
 ```
@@ -487,7 +452,7 @@ ue5_kb/
 ├── builders/
 │   └── partitioned_builder.py  # 新增：分区构建器
 └── query/
-    └── layered_query.py      # 修改：补全实现
+    └── token_budget.py       # Token 预算辅助
 ```
 
 ### 修改文件
@@ -519,7 +484,7 @@ Engine/
 │       ├── editor.json
 │       └── ...
 ├── .pipeline_state            # 新增：Pipeline 状态文件
-└── KnowledgeBase/             # 保持不变
+└── .agents/skills/<skill>/variants/<commit>/   # canonical KB output
     ├── global_index/
     └── module_graphs/
 ```
@@ -662,19 +627,15 @@ ue5kb pipeline run --engine-path "D:\UE5"
 
 所有旧的查询函数在 Skill 中仍然可用：
 
-```python
-# 旧方法（保留）
-query_class_info('AActor')
-query_function_info('BeginPlay')
-
-# 新方法（推荐，Token 优化）
-query_class_layered('AActor', 'summary')
-query_function_layered('BeginPlay', 'summary')
+```powershell
+py "<skill>/impl.py" query_class_info AActor
+py "<skill>/impl.py" query_function_info BeginPlay
+py "<skill>/impl.py" source_slice Engine/Source/Runtime/Engine/Classes/GameFramework/Actor.h 234 context 8 40 12000
 ```
 
 **用户可以选择**：
-- 使用旧方法 = 向后兼容
-- 使用新方法 = Token 优化
+- 使用摘要命令 = 快速定位结构化证据
+- 使用 `source_slice` = 按需获取源码上下文
 
 ---
 
@@ -706,7 +667,7 @@ query_function_layered('BeginPlay', 'summary')
 
 - **Pipeline Architecture** - 分阶段、幂等、可缓存（实施 ✅）
 - **File System as State Machine** - 文件存在 = 阶段完成（实施 ✅）
-- **Observation Masking** - 屏蔽大型输出，使用引用（实施 ✅）
+- **有界源码切片** - 使用显式 `source_slice` 后续命令（实施 ✅）
 - **Context Partitioning** - Sub-agent 隔离 context（实施 ✅）
 - **Architectural Reduction** - 精简工具（未实施，待评估）
 
@@ -735,7 +696,7 @@ query_function_layered('BeginPlay', 'summary')
 - CLI 集成完成
 
 ✅ **第二阶段: Context Optimization 集成**
-- LayeredQueryInterface 完整实现
+- 静态命令 runtime 完整实现
 - Token 使用减少 70-85%
 - 模板已集成优化函数
 

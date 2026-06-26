@@ -10,6 +10,8 @@ import sqlite3
 import json
 import sys
 import time
+import hashlib
+import re
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -108,6 +110,15 @@ def query_audit(trace_id: str = None, limit: int = 20) -> Dict[str, Any]:
         audit.close()
 
 
+def query_audit_report(trace_id: str = None, limit: int = 200, broad_threshold: int = 40) -> Dict[str, Any]:
+    """从 query_audit.db 生成确定性静态统计报告，不读取源码正文。"""
+    audit = QueryAudit.for_skill(SKILL_DIR)
+    try:
+        return audit.report(trace_id, limit, broad_threshold)
+    finally:
+        audit.close()
+
+
 def source_slice(
     relative_file: str,
     line_number: int,
@@ -184,6 +195,7 @@ _db_connection = None
 _class_index_cache = None
 _function_index_cache = None
 _enum_index_cache = None
+_symbol_reference_index_cache = None
 _kb_meta_cache = None
 
 
@@ -332,6 +344,20 @@ def _get_enum_index():
         except Exception:
             pass
     return _enum_index_cache
+
+
+def _get_symbol_reference_index():
+    """获取符号引用索引（call/reference graph）"""
+    global _symbol_reference_index_cache
+    if _symbol_reference_index_cache is None:
+        try:
+            from ue5_kb.core.symbol_reference_index import SymbolReferenceIndex
+            db_path = KB_PATH / "global_index" / "symbol_reference_index.db"
+            if db_path.exists():
+                _symbol_reference_index_cache = SymbolReferenceIndex(str(db_path))
+        except Exception:
+            pass
+    return _symbol_reference_index_cache
 
 
 # ============================================================================
@@ -520,31 +546,89 @@ def query_module_classes(module_name: str, class_type: str = None) -> Dict[str, 
     }}
 
 
+def _split_qualified_function_name(function_name: str) -> tuple:
+    """Parse Class::Function with deterministic string rules."""
+    raw = (function_name or "").strip()
+    if "::" not in raw:
+        return None, raw
+    qualifier, short_name = raw.rsplit("::", 1)
+    qualifier = qualifier.strip() or None
+    short_name = short_name.strip() or raw
+    return qualifier, short_name
+
+
+def _normalize_function_result(row: Dict[str, Any], requested_name: str, short_name: str) -> Dict[str, Any]:
+    return {{
+        "function": short_name,
+        "requested_function": requested_name,
+        "module": row.get('module', ''),
+        "return_type": row.get('return_type', ''),
+        "parameters": row.get('parameters', []),
+        "is_ufunction": bool(row.get('is_ufunction', False)),
+        "is_blueprint_callable": bool(row.get('is_blueprint_callable', False)),
+        "file": row.get('file_path', '') or row.get('file', ''),
+        "line": row.get('line_number', 0) or row.get('line', 0),
+        "impl_file": row.get('impl_file_path', '') or row.get('impl_file', ''),
+        "impl_line": row.get('impl_line_number', 0) or row.get('impl_line', 0),
+        "class": row.get('class_name', '') or row.get('class', ''),
+        "signature": row.get('signature', ''),
+    }}
+
+
+def _function_resolution_state(results: List[Dict[str, Any]], qualifier: str = None) -> str:
+    if not results:
+        return "unresolved"
+    if qualifier and any((r.get("class") or "") != qualifier for r in results):
+        return "ambiguous"
+    return "resolved" if len(results) == 1 else "ambiguous"
+
+
+def _dedupe_function_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped = []
+    seen = set()
+    for row in results:
+        if row.get("impl_file"):
+            key = (
+                row.get("module", ""),
+                row.get("class", ""),
+                row.get("function", ""),
+                row.get("impl_file", ""),
+                row.get("impl_line", 0),
+            )
+        else:
+            key = (
+                row.get("module", ""),
+                row.get("class", ""),
+                row.get("function", ""),
+                row.get("file", ""),
+                row.get("line", 0),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
 def query_function_info(function_name: str, module_hint: str = None) -> Dict[str, Any]:
-    """查询函数信息（v2.14.0: 使用 SQLite 索引，无模块数量限制）"""
+    """查询函数信息（静态解析，支持 Class::Function 限定名）"""
+    qualifier, short_name = _split_qualified_function_name(function_name)
     # v2.14.0: 优先使用函数索引（覆盖全部模块）
     func_idx = _get_function_index()
     if func_idx:
-        raw = func_idx.query_by_name(function_name, module_hint)
+        raw = func_idx.query_by_name(short_name, module_hint)
+        if qualifier:
+            raw = [r for r in raw if (r.get('class_name') or '') == qualifier]
         if raw:
-            results = []
-            for r in raw:
-                results.append({{
-                    "function": function_name,
-                    "module": r.get('module', ''),
-                    "return_type": r.get('return_type', ''),
-                    "parameters": r.get('parameters', []),
-                    "is_ufunction": bool(r.get('is_ufunction', False)),
-                    "is_blueprint_callable": bool(r.get('is_blueprint_callable', False)),
-                    "file": r.get('file_path', ''),
-                    "line": r.get('line_number', 0),
-                    "impl_file": r.get('impl_file_path', ''),
-                    "impl_line": r.get('impl_line_number', 0),
-                    "class": r.get('class_name', '')
-                }})
+            results = [_normalize_function_result(r, function_name, short_name) for r in raw]
+            results = _dedupe_function_results(results)
             return {{
                 "_meta": _get_kb_meta(),
-                "function_name": function_name,
+                "function_name": short_name,
+                "requested_function_name": function_name,
+                "qualifier": qualifier,
+                "resolution_state": _function_resolution_state(results, qualifier),
+                "candidate_count": len(results),
                 "found_count": len(results),
                 "results": results[:20]
             }}
@@ -566,33 +650,35 @@ def query_function_info(function_name: str, module_hint: str = None) -> Dict[str
             if node_data.get('type') != 'function':
                 continue
 
-            if node_data.get('name') == function_name:
-                results.append({{
-                    "function": function_name,
-                    "module": mod,
-                    "return_type": node_data.get('return_type', ''),
-                    "parameters": node_data.get('parameters', []),
-                    "is_ufunction": node_data.get('is_ufunction', False),
-                    "is_blueprint_callable": node_data.get('is_blueprint_callable', False),
-                    "file": node_data.get('file', ''),
-                    "line": node_data.get('line', 0),
-                    "impl_file": node_data.get('impl_file', ''),
-                    "impl_line": node_data.get('impl_line', 0),
-                    "class": node_data.get('class_name', '')
-                }})
+            if node_data.get('name') == short_name:
+                row = _normalize_function_result(node_data, function_name, short_name)
+                row["module"] = mod
+                if qualifier and row.get("class") != qualifier:
+                    continue
+                results.append(row)
 
     if not results:
         # 提取关键字用于模糊搜索
         keyword = function_name[:8] if len(function_name) > 8 else function_name
         return {{
             "error": f"未找到函数: {{function_name}}",
+            "function_name": short_name,
+            "requested_function_name": function_name,
+            "qualifier": qualifier,
+            "resolution_state": "unresolved",
+            "candidate_count": 0,
             "fallback_command": f"search_functions {{keyword}}",
             "hint": "函数名可能已变更或拼写不同，建议使用模糊搜索"
         }}
 
+    results = _dedupe_function_results(results)
     return {{
         "_meta": _get_kb_meta(),
-        "function_name": function_name,
+        "function_name": short_name,
+        "requested_function_name": function_name,
+        "qualifier": qualifier,
+        "resolution_state": _function_resolution_state(results, qualifier),
+        "candidate_count": len(results),
         "found_count": len(results),
         "results": results[:20]
     }}
@@ -878,7 +964,7 @@ def get_function_implementation(
     获取函数的实现代码
 
     首先查询函数索引找到实现文件位置，然后读取 cpp 文件内容返回。
-    这是解决 LLM 需要查看函数实现的核心功能。
+    这是 Agent 需要静态查看函数实现时的核心功能。
 
     Args:
         function_name: 函数名称
@@ -942,6 +1028,1277 @@ def get_function_implementation(
     }
 
 
+def query_callees(
+    function_name: str,
+    class_name: str = None,
+    limit: int = 50,
+    confidence: str = "resolved",
+) -> Dict[str, Any]:
+    """查询某函数调用的所有目标（callees）"""
+    sri = _get_symbol_reference_index()
+    if not sri:
+        return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
+    rows = sri.query_callees(function_name, class_name, limit, confidence)
+    return {{
+        "_meta": _get_kb_meta(),
+        "function_name": function_name,
+        "class_name": class_name,
+        "confidence": confidence,
+        "resolution_state": confidence,
+        "found_count": len(rows),
+        "results": rows,
+    }}
+
+
+def query_callers(
+    function_name: str,
+    class_name: str = None,
+    limit: int = 50,
+    confidence: str = "resolved",
+) -> Dict[str, Any]:
+    """查询调用某函数的所有 callers"""
+    sri = _get_symbol_reference_index()
+    if not sri:
+        return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
+    rows = sri.query_callers(function_name, class_name, limit, confidence)
+    return {{
+        "_meta": _get_kb_meta(),
+        "function_name": function_name,
+        "class_name": class_name,
+        "confidence": confidence,
+        "resolution_state": confidence,
+        "found_count": len(rows),
+        "results": rows,
+    }}
+
+
+def query_symbol_references(
+    symbol_name: str,
+    limit: int = 50,
+    confidence: str = "resolved",
+) -> Dict[str, Any]:
+    """查询所有引用某 symbol 的记录（call 或 type_reference）"""
+    sri = _get_symbol_reference_index()
+    if not sri:
+        return {{"found_count": 0, "results": [], "error": "symbol_reference_index.db not found"}}
+    qualifier, short_symbol = _split_qualified_function_name(symbol_name)
+    if qualifier:
+        confidence_filter = "" if confidence == "all" else " AND confidence=?"
+        params = [short_symbol, qualifier]
+        if confidence != "all":
+            params.append(confidence)
+        params.append(limit)
+        cursor = sri.conn.execute(
+            "SELECT * FROM symbol_references "
+            "WHERE target_symbol=? AND target_class=? "
+            f"{confidence_filter} "
+            "ORDER BY relation_type, caller_name LIMIT ?",
+            params,
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+    else:
+        rows = sri.query_symbol_references(short_symbol, limit, confidence)
+    return {{
+        "_meta": _get_kb_meta(),
+        "symbol_name": symbol_name,
+        "confidence": confidence,
+        "resolution_state": confidence,
+        "found_count": len(rows),
+        "results": rows,
+    }}
+
+
+def _reference_resolution_state(row: Dict[str, Any]) -> str:
+    return row.get("resolution_state") or row.get("confidence") or "unresolved"
+
+
+def _normalize_reference_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(row)
+    normalized["resolution_state"] = _reference_resolution_state(normalized)
+    return normalized
+
+
+def _edge_from_reference_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    row = _normalize_reference_row(row)
+    source = row.get("caller_name", "")
+    if row.get("caller_class"):
+        source = f"{{row.get('caller_class')}}::{{source}}"
+    target = row.get("target_symbol", "")
+    if row.get("target_class") and row.get("target_class") != target:
+        target = f"{{row.get('target_class')}}::{{target}}"
+    return {{
+        "edge_id": row.get("id"),
+        "source": source,
+        "target": target,
+        "edge_type": row.get("relation_type") or "reference",
+        "resolution_state": row.get("resolution_state"),
+        "source_file": row.get("occurrence_file") or row.get("caller_file") or "",
+        "source_line": row.get("occurrence_line") or row.get("caller_line") or 0,
+        "rule_id": f"symbol_reference_index.{{row.get('relation_type') or 'reference'}}",
+        "expression": row.get("expression", ""),
+        "candidate_count": row.get("candidate_count", 0),
+    }}
+
+
+def _strip_common_type_prefix(symbol: str) -> str:
+    if len(symbol or "") > 1 and symbol[0] in "AFISTU" and symbol[1].isupper():
+        return symbol[1:]
+    return symbol or ""
+
+
+def _node_matches(query: str, node: str) -> bool:
+    if query == node:
+        return True
+    if _strip_common_type_prefix(query or "") == _strip_common_type_prefix(node or ""):
+        return True
+    return bool(query and node and node.endswith(f"::{{query}}"))
+
+
+def _short_symbol(node: str) -> str:
+    return node.rsplit("::", 1)[-1] if node else node
+
+
+def _split_qualified_symbol(symbol_name: str) -> tuple:
+    qualifier, short_name = _split_qualified_function_name(symbol_name)
+    return short_name, qualifier
+
+
+def _query_reference_rows(
+    symbol_name: str = None,
+    limit: int = 50,
+    resolution_state: str = "all",
+    relation_types: List[str] = None,
+) -> List[Dict[str, Any]]:
+    sri = _get_symbol_reference_index()
+    if not sri:
+        return []
+    params = []
+    where = []
+    if symbol_name:
+        short_symbol, qualifier = _split_qualified_symbol(symbol_name)
+        if qualifier:
+            where.append("((target_symbol=? AND target_class=?) OR (caller_name=? AND caller_class=?))")
+            params.extend([short_symbol, qualifier, short_symbol, qualifier])
+        else:
+            where.append("(target_symbol=? OR caller_name=?)")
+            params.extend([short_symbol, short_symbol])
+    if resolution_state != "all":
+        where.append("confidence=?")
+        params.append(resolution_state)
+    if relation_types:
+        placeholders = ",".join("?" for _ in relation_types)
+        where.append(f"relation_type IN ({{placeholders}})")
+        params.extend(relation_types)
+    where_sql = " AND ".join(where) if where else "1=1"
+    params.append(limit)
+    cursor = sri.conn.execute(
+        "SELECT * FROM symbol_references "
+        f"WHERE {{where_sql}} "
+        "ORDER BY occurrence_file, occurrence_line, relation_type, caller_name, target_symbol "
+        "LIMIT ?",
+        params,
+    )
+    return [_normalize_reference_row(dict(r)) for r in cursor.fetchall()]
+
+
+def _normalize_seed_class(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "kind": "struct" if row.get("is_struct") else ("class" if not row.get("is_interface") else "interface"),
+        "symbol": row.get("name", ""),
+        "module": row.get("module", ""),
+        "file": row.get("file_path", "") or row.get("file", ""),
+        "line": row.get("line_number", 0) or row.get("line", 0),
+        "is_uclass": bool(row.get("is_uclass")),
+        "is_struct": bool(row.get("is_struct")),
+        "is_interface": bool(row.get("is_interface")),
+        "parent_classes": row.get("parent_classes", []),
+    }
+
+
+def _normalize_seed_function(row: Dict[str, Any]) -> Dict[str, Any]:
+    symbol = row.get("name", "")
+    if row.get("class_name"):
+        symbol = f"{row.get('class_name')}::{symbol}"
+    return {
+        "kind": "function",
+        "symbol": symbol,
+        "name": row.get("name", ""),
+        "class": row.get("class_name", ""),
+        "module": row.get("module", ""),
+        "file": row.get("file_path", ""),
+        "line": row.get("line_number", 0),
+        "impl_file": row.get("impl_file_path", ""),
+        "impl_line": row.get("impl_line_number", 0),
+        "signature": row.get("signature", ""),
+    }
+
+
+def resolve_seed(seed: str, limit: int = 20) -> Dict[str, Any]:
+    """确定性解析查询 seed 类型；不做自然语言意图判断。"""
+    seed = (seed or "").strip()
+    qualifier, short_name = _split_qualified_function_name(seed)
+    class_idx = _get_class_index()
+    func_idx = _get_function_index()
+    exact_classes = class_idx.query_by_name(seed) if class_idx and seed else []
+    exact_functions = func_idx.query_by_name(short_name) if func_idx and short_name else []
+    if qualifier:
+        exact_functions = [r for r in exact_functions if (r.get("class_name") or "") == qualifier]
+
+    candidates = []
+    candidates.extend(_normalize_seed_class(r) for r in exact_classes[:limit])
+    candidates.extend(_normalize_seed_function(r) for r in exact_functions[:limit])
+
+    substring_classes = []
+    substring_functions = []
+    if not candidates and seed:
+        substring_classes = class_idx.search_by_keyword(seed, limit) if class_idx else []
+        substring_functions = func_idx.search_by_keyword(seed, limit) if func_idx else []
+        candidates.extend(_normalize_seed_class(r) for r in substring_classes[:limit])
+        candidates.extend(_normalize_seed_function(r) for r in substring_functions[:limit])
+
+    exact_kind_count = len(exact_classes) + len(exact_functions)
+    if exact_kind_count == 1:
+        state = candidates[0]["kind"]
+    elif exact_kind_count > 1:
+        state = "ambiguous"
+    elif candidates:
+        state = "substring_only"
+    else:
+        state = "miss"
+
+    return {
+        "_meta": _get_kb_meta(),
+        "seed": seed,
+        "resolution_state": state,
+        "candidate_count": len(candidates),
+        "exact_class_count": len(exact_classes),
+        "exact_function_count": len(exact_functions),
+        "substring_class_count": len(substring_classes),
+        "substring_function_count": len(substring_functions),
+        "candidates": candidates[:limit],
+    }
+
+
+def _zero_reason_for_flow(
+    seed: str,
+    seed_resolution: Dict[str, Any],
+    relation_types: List[str],
+    resolution_state: str,
+    index_available: bool,
+) -> str:
+    if not index_available:
+        return "missing_symbol_reference_index"
+    if seed_resolution.get("resolution_state") == "miss":
+        return "seed_not_found"
+    if seed_resolution.get("resolution_state") == "substring_only":
+        return "seed_resolved_by_substring_only"
+    candidate_kinds = {c.get("kind") for c in seed_resolution.get("candidates", [])}
+    if candidate_kinds and "function" not in candidate_kinds and set(relation_types).issubset({"call", "type_reference"}):
+        return "seed_is_type_but_current_graph_has_no_type_node_edges"
+    if resolution_state != "all":
+        return "no_edges_after_resolution_state_filter"
+    return "no_matching_edges"
+
+
+def _source_evidence_from_reference(row: Dict[str, Any], context_lines: int = 2) -> Dict[str, Any]:
+    file_path = row.get("occurrence_file") or row.get("caller_file") or row.get("target_file") or ""
+    line = row.get("occurrence_line") or row.get("caller_line") or row.get("target_line") or 0
+    evidence = {{
+        "file": file_path,
+        "line": line,
+        "expression": row.get("expression", ""),
+        "relation_type": row.get("relation_type", ""),
+        "resolution_state": _reference_resolution_state(row),
+    }}
+    if file_path and line:
+        slice_result = source_slice(file_path, int(line), "context", context_lines, 40, 6000)
+        if "error" not in slice_result:
+            evidence["source_slice"] = {{
+                "line_start": slice_result.get("line_start"),
+                "line_end": slice_result.get("line_end"),
+                "content": slice_result.get("content", ""),
+            }}
+        else:
+            evidence["source_slice_error"] = slice_result.get("error")
+    payload = json.dumps(evidence, ensure_ascii=True, sort_keys=True)
+    evidence["evidence_hash"] = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return evidence
+
+
+def symbol_reference_report(
+    symbol_name: str,
+    limit: int = 50,
+    resolution_state: str = "all",
+) -> Dict[str, Any]:
+    """返回符号引用静态报表，不做业务解释。"""
+    sri = _get_symbol_reference_index()
+    if not sri:
+        return {
+            "found_count": 0,
+            "error": "symbol_reference_index.db not found",
+            "zero_reason": "missing_symbol_reference_index",
+            "results": [],
+        }
+    seed_resolution = resolve_seed(symbol_name, limit)
+    short_symbol, qualifier = _split_qualified_symbol(symbol_name)
+    callers = [_normalize_reference_row(r) for r in sri.query_callers(short_symbol, qualifier, limit, resolution_state)]
+    callees = [_normalize_reference_row(r) for r in sri.query_callees(short_symbol, qualifier, limit, resolution_state)]
+    references = _query_reference_rows(symbol_name, limit, resolution_state)
+    zero_reason = None
+    if not callers and not callees and not references:
+        zero_reason = _zero_reason_for_flow(symbol_name, seed_resolution, ["call", "type_reference"], resolution_state, True)
+    return {{
+        "_meta": _get_kb_meta(),
+        "symbol_name": symbol_name,
+        "seed_resolution": seed_resolution,
+        "resolution_state_filter": resolution_state,
+        "counts": {{
+            "callers": len(callers),
+            "callees": len(callees),
+            "references": len(references),
+        }},
+        "zero_reason": zero_reason,
+        "callers": callers,
+        "callees": callees,
+        "references": references,
+    }}
+
+
+def symbol_evidence_bundle(
+    symbol_name: str,
+    limit: int = 20,
+    resolution_state: str = "all",
+) -> Dict[str, Any]:
+    """返回固定 schema 的静态证据集合。"""
+    seed_resolution = resolve_seed(symbol_name, limit)
+    candidate_kinds = {c.get("kind") for c in seed_resolution.get("candidates", [])}
+    function_info = query_function_info(symbol_name) if "function" in candidate_kinds else {"results": [], "candidate_count": 0}
+    references = _query_reference_rows(symbol_name, limit, resolution_state)
+    evidence = [_source_evidence_from_reference(row) for row in references]
+    warnings = []
+    if seed_resolution.get("resolution_state") in ("miss", "substring_only"):
+        warnings.append(f"seed_resolution={seed_resolution.get('resolution_state')}")
+    if "error" in function_info:
+        warnings.append(function_info.get("error"))
+    type_candidates = [c for c in seed_resolution.get("candidates", []) if c.get("kind") in ("class", "struct", "interface")]
+    return {{
+        "_meta": _get_kb_meta(),
+        "symbol_name": symbol_name,
+        "seed_resolution": seed_resolution,
+        "resolution_state_filter": resolution_state,
+        "symbol_candidates": function_info.get("results", []) if "function" in candidate_kinds else type_candidates,
+        "candidate_count": seed_resolution.get("candidate_count", function_info.get("candidate_count", function_info.get("found_count", 0))),
+        "declaration_spans": [
+            {{"file": r.get("file", ""), "line": r.get("line", 0), "class": r.get("class", ""), "module": r.get("module", "")}}
+            for r in function_info.get("results", [])
+        ] + [
+            {{"file": r.get("file", ""), "line": r.get("line", 0), "class": r.get("symbol", ""), "module": r.get("module", "")}}
+            for r in type_candidates
+        ],
+        "implementation_spans": [
+            {{"file": r.get("impl_file", ""), "line": r.get("impl_line", 0), "class": r.get("class", ""), "module": r.get("module", "")}}
+            for r in function_info.get("results", []) if r.get("impl_file")
+        ],
+        "type_spans": type_candidates,
+        "reference_spans": [
+            {{"file": r.get("occurrence_file", ""), "line": r.get("occurrence_line", 0), "relation_type": r.get("relation_type", ""), "resolution_state": r.get("resolution_state", "")}}
+            for r in references
+        ],
+        "source_slices": evidence,
+        "evidence_hashes": [e.get("evidence_hash") for e in evidence],
+        "warnings": warnings,
+    }}
+
+
+def code_flow_index(limit: int = 100, resolution_state: str = "all") -> Dict[str, Any]:
+    """返回现有静态引用索引的边视图，不创建重复数据库。"""
+    rows = _query_reference_rows(None, limit, resolution_state)
+    edges = [_edge_from_reference_row(row) for row in rows]
+    nodes = sorted({n for e in edges for n in (e.get("source"), e.get("target")) if n})
+    return {{
+        "_meta": _get_kb_meta(),
+        "index": "symbol_reference_index.db",
+        "materialized": False,
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": nodes,
+        "edges": edges,
+    }}
+
+
+_STATIC_CLOSURE_CATEGORIES = [
+    "entry",
+    "creates",
+    "owns",
+    "registers",
+    "depends_on",
+    "branches_on",
+    "loads",
+    "sinks_to",
+    "lifecycle",
+    "calls",
+    "references_type",
+]
+
+
+def _reference_query_limit(limit: int) -> int:
+    return min(max(limit * 4, 200), 5000)
+
+
+def _semantic_edge_type(row: Dict[str, Any]) -> str:
+    """Classify a static reference row with deterministic lexical rules."""
+    relation = row.get("relation_type") or "reference"
+    target = (row.get("target_symbol") or "").lower()
+    target_class = (row.get("target_class") or "").lower()
+    expression = (row.get("expression") or "").lower()
+    combined = " ".join([target, target_class, expression])
+
+    if "if " in expression or expression.startswith("if(") or "switch" in expression or "? " in expression:
+        return "branches_on"
+    if any(token in combined for token in ("budget", "subsystem", "sink", "resourcehandle")):
+        return "sinks_to"
+    if target.startswith(("load", "tryload", "asyncload")) or any(token in expression for token in ("load(", "loadasset", "tryload", "asyncload")):
+        return "loads"
+    if any(token in combined for token in ("dependency", "depends", "dependent")):
+        return "depends_on"
+    if any(token in combined for token in ("register", "addproducer", "addlayer", "adddatalayer", "bind", "subscribe")):
+        return "registers"
+    if any(token in combined for token in ("beginplay", "endplay", "tick", "update", "refresh", "unload", "cancel", "destroy")):
+        return "lifecycle"
+    if relation == "type_reference":
+        if any(token in expression for token in ("makeshared<", "makeunique<", "newobject<", "createdefaultsubobject<", "spawnactor<", "constructobject<")):
+            return "creates"
+        if any(token in expression for token in ("tsharedref<", "tsharedptr<", "tunique_ptr<", "uproperty", " = ", "*", "&")):
+            return "owns"
+        return "references_type"
+    if relation == "call":
+        if target.startswith(("create", "make", "spawn", "construct")):
+            return "creates"
+        return "calls"
+    return relation
+
+
+def _semantic_edge_from_reference_row(row: Dict[str, Any], depth: int) -> Dict[str, Any]:
+    edge = _edge_from_reference_row(row)
+    semantic_type = _semantic_edge_type(row)
+    edge.update({{
+        "semantic_edge_type": semantic_type,
+        "raw_relation_type": edge.get("edge_type"),
+        "depth": depth,
+        "index": "symbol_reference_index.db",
+        "materialized": False,
+        "evidence_hash": hashlib.sha256(
+            json.dumps(
+                {{
+                    "source": edge.get("source", ""),
+                    "target": edge.get("target", ""),
+                    "semantic_edge_type": semantic_type,
+                    "file": edge.get("source_file", ""),
+                    "line": edge.get("source_line", 0),
+                    "expression": edge.get("expression", ""),
+                }},
+                ensure_ascii=True,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest(),
+    }})
+    return edge
+
+
+def _dedupe_static_edges(edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped = []
+    seen = set()
+    for edge in edges:
+        key = (
+            edge.get("source", ""),
+            edge.get("target", ""),
+            edge.get("semantic_edge_type", ""),
+            edge.get("source_file", ""),
+            edge.get("source_line", 0),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(edge)
+    return deduped
+
+
+def _closure_seed_nodes(seed: str, seed_resolution: Dict[str, Any], limit: int) -> tuple:
+    candidates = seed_resolution.get("candidates", [])[:limit]
+    if seed_resolution.get("resolution_state") not in ("substring_only", "ambiguous"):
+        exact_nodes = [c.get("symbol") for c in candidates if c.get("symbol")]
+        return exact_nodes or [seed], "exact_or_direct"
+
+    normalized_seed = _strip_common_type_prefix(seed)
+    type_candidates = [
+        c.get("symbol")
+        for c in candidates
+        if c.get("kind") in ("class", "struct", "interface")
+        and c.get("symbol")
+        and (
+            c.get("symbol") == seed
+            or c.get("symbol", "").endswith(seed)
+            or _strip_common_type_prefix(c.get("symbol", "")) == normalized_seed
+        )
+    ]
+    type_candidates = sorted(set(type_candidates))
+    if len(type_candidates) == 1:
+        return type_candidates, "unique_type_candidate"
+    if len(type_candidates) > 1:
+        return type_candidates, "ambiguous_type_candidates"
+    return [], "ambiguous_or_missing_candidate"
+
+
+def _closure_coverage(seed: str, edges: List[Dict[str, Any]]) -> Dict[str, Any]:
+    counts = {{category: 0 for category in _STATIC_CLOSURE_CATEGORIES}}
+    for edge in edges:
+        category = edge.get("semantic_edge_type") or "calls"
+        counts[category] = counts.get(category, 0) + 1
+        if _node_matches(seed, edge.get("target", "")):
+            counts["entry"] = counts.get("entry", 0) + 1
+    missing = [category for category in _STATIC_CLOSURE_CATEGORIES if counts.get(category, 0) == 0]
+    return {{
+        "categories": counts,
+        "missing_categories": missing,
+        "closed": False,
+        "closed_reason": "derived_static_rules_are_evidence_not_a_materialized_semantic_closure",
+        "static_only": True,
+    }}
+
+
+def _closure_status(
+    selected_edges: List[Dict[str, Any]],
+    seed_resolution: Dict[str, Any],
+    seed_binding: str,
+    hit_limit: bool,
+) -> str:
+    if seed_binding.startswith("ambiguous") or seed_resolution.get("resolution_state") == "ambiguous":
+        return "ambiguous"
+    if seed_resolution.get("resolution_state") == "miss":
+        return "blocked"
+    if hit_limit:
+        return "truncated"
+    if not selected_edges:
+        return "partial"
+    return "partial"
+
+
+def _closure_validation(
+    status: str,
+    coverage: Dict[str, Any],
+    hit_limit: bool,
+    materialized: bool,
+) -> Dict[str, Any]:
+    """Machine-readable static-only closure gate.
+
+    This intentionally stays conservative until a materialized semantic closure
+    exists. Source slices and broad text search may support evidence review, but
+    they must never make the closure pass.
+    """
+    reasons = []
+    if status != "closed":
+        reasons.append(f"closure_status is {{status}}")
+    if hit_limit:
+        reasons.append("closure traversal hit the configured limit")
+    if not materialized:
+        reasons.append("semantic closure is derived, not materialized")
+    if not coverage.get("closed"):
+        reasons.append(coverage.get("closed_reason") or "coverage is not closed")
+    return {{
+        "status": "PASS" if not reasons else "FAIL",
+        "static_only": True,
+        "llm_used": False,
+        "rag_used": False,
+        "vector_used": False,
+        "source_slice_is_semantic_edge": False,
+        "files_fts_is_semantic_edge": False,
+        "reasons": reasons,
+    }}
+
+
+def _next_static_commands(
+    seed: str,
+    effective_seed_nodes: List[str],
+    depth: int,
+    limit: int,
+    resolution_state: str,
+) -> List[Dict[str, Any]]:
+    command_seed = effective_seed_nodes[0] if len(effective_seed_nodes) == 1 else seed
+    return [
+        {{
+            "command": "symbol_evidence_bundle",
+            "args": [command_seed, "20", resolution_state],
+            "argv": f"symbol_evidence_bundle {{command_seed}} 20 {{resolution_state}}",
+        }},
+        {{
+            "command": "query_flow",
+            "args": [command_seed, "both", "call,type_reference", str(depth), str(limit), resolution_state],
+            "argv": f"query_flow {{command_seed}} both call,type_reference {{depth}} {{limit}} {{resolution_state}}",
+        }},
+    ]
+
+
+def query_static_closure(
+    seed: str,
+    depth: int = 3,
+    limit: int = 80,
+    resolution_state: str = "all",
+) -> Dict[str, Any]:
+    """Build a deterministic static closure around a business object seed."""
+    seed_resolution = resolve_seed(seed, limit)
+    index_available = _get_symbol_reference_index() is not None
+    relation_types = ["call", "type_reference"]
+    effective_seed_nodes, seed_binding = _closure_seed_nodes(seed, seed_resolution, limit)
+    frontier = set(effective_seed_nodes)
+    seen_nodes = set(effective_seed_nodes) | {seed}
+    selected_edges = []
+    selected_edge_keys = set()
+    hit_limit = False
+
+    for current_depth in range(max(depth, 0)):
+        if not frontier:
+            break
+        layer_rows = []
+        for node in sorted(frontier):
+            rows = _query_reference_rows(_short_symbol(node), _reference_query_limit(limit), resolution_state, relation_types)
+            layer_rows.extend(rows)
+
+        next_frontier = set()
+        for row in layer_rows:
+            edge = _semantic_edge_from_reference_row(row, current_depth + 1)
+            source = edge.get("source")
+            target = edge.get("target")
+            touches_frontier = any(
+                _node_matches(node, source) or _node_matches(node, target)
+                for node in frontier
+            )
+            if not touches_frontier:
+                continue
+            edge_key = (
+                edge.get("source", ""),
+                edge.get("target", ""),
+                edge.get("semantic_edge_type", ""),
+                edge.get("source_file", ""),
+                edge.get("source_line", 0),
+            )
+            if edge_key in selected_edge_keys:
+                continue
+            selected_edge_keys.add(edge_key)
+            selected_edges.append(edge)
+            if source:
+                next_frontier.add(source)
+            if target:
+                next_frontier.add(target)
+            if len(selected_edges) >= limit:
+                hit_limit = True
+                break
+
+        selected_edges = _dedupe_static_edges(selected_edges)
+        next_frontier = next_frontier - seen_nodes
+        seen_nodes.update(next_frontier)
+        frontier = next_frontier
+        if not frontier or len(selected_edges) >= limit:
+            break
+
+    nodes = sorted({n for e in selected_edges for n in (e.get("source"), e.get("target")) if n} | {seed} | set(effective_seed_nodes))
+    coverage = _closure_coverage(seed, selected_edges)
+    status = _closure_status(selected_edges, seed_resolution, seed_binding, hit_limit)
+    materialized = False
+    next_commands = _next_static_commands(seed, effective_seed_nodes, depth, limit, resolution_state)
+    return {{
+        "_meta": _get_kb_meta(),
+        "schema": "static-closure/v1",
+        "seed": seed,
+        "effective_seed_nodes": effective_seed_nodes,
+        "seed_binding": seed_binding,
+        "seed_resolution": seed_resolution,
+        "closure_status": status,
+        "legacy_edge_source": True,
+        "closure_status_unavailable": False,
+        "depth": depth,
+        "limit": limit,
+        "resolution_state_filter": resolution_state,
+        "edge_source": "symbol_reference_index.db",
+        "semantic_edge_source": "derived_static_rules",
+        "materialized": materialized,
+        "node_count": len(nodes),
+        "edge_count": len(selected_edges),
+        "zero_reason": None if selected_edges else ("ambiguous_seed" if status == "ambiguous" else _zero_reason_for_flow(seed, seed_resolution, relation_types, resolution_state, index_available)),
+        "nodes": nodes,
+        "semantic_edges": selected_edges[:limit],
+        "coverage": coverage,
+        "closure_validation": _closure_validation(status, coverage, hit_limit, materialized),
+        "next_static_commands": [cmd["argv"] for cmd in next_commands],
+        "next_static_command_objects": next_commands,
+    }}
+
+
+def query_flow(
+    seed: str,
+    direction: str = "both",
+    edge_types: str = "call,type_reference",
+    depth: int = 1,
+    limit: int = 50,
+    resolution_state: str = "resolved",
+) -> Dict[str, Any]:
+    """在静态引用图上做确定性 BFS。"""
+    relation_types = [t.strip() for t in edge_types.split(",") if t.strip()]
+    seed_resolution = resolve_seed(seed, limit)
+    index_available = _get_symbol_reference_index() is not None
+    seen_nodes = {seed}
+    frontier = {seed}
+    selected_edges = []
+    selected_edge_keys = set()
+    for _ in range(max(depth, 0)):
+        all_edges = []
+        for seed_node in sorted(frontier):
+            rows = _query_reference_rows(_short_symbol(seed_node), _reference_query_limit(limit), resolution_state, relation_types)
+            all_edges.extend(_edge_from_reference_row(row) for row in rows)
+        next_frontier = set()
+        for edge in all_edges:
+            source = edge.get("source")
+            target = edge.get("target")
+            forward = direction in ("out", "both") and any(_node_matches(seed_node, source) for seed_node in frontier)
+            backward = direction in ("in", "both") and any(_node_matches(seed_node, target) for seed_node in frontier)
+            if not forward and not backward:
+                continue
+            edge_key = (
+                edge.get("source", ""),
+                edge.get("target", ""),
+                edge.get("edge_type", ""),
+                edge.get("source_file", ""),
+                edge.get("source_line", 0),
+            )
+            if edge_key in selected_edge_keys:
+                continue
+            selected_edge_keys.add(edge_key)
+            selected_edges.append(edge)
+            next_frontier.add(target if forward else source)
+            if len(selected_edges) >= limit:
+                break
+        new_nodes = next_frontier - seen_nodes
+        seen_nodes.update(new_nodes)
+        frontier = new_nodes
+        if not frontier or len(selected_edges) >= limit:
+            break
+    nodes = sorted({n for e in selected_edges for n in (e.get("source"), e.get("target")) if n} | {seed})
+    return {{
+        "_meta": _get_kb_meta(),
+        "seed": seed,
+        "seed_resolution": seed_resolution,
+        "direction": direction,
+        "edge_types": relation_types,
+        "depth": depth,
+        "resolution_state_filter": resolution_state,
+        "node_count": len(nodes),
+        "edge_count": len(selected_edges),
+        "zero_reason": None if selected_edges else _zero_reason_for_flow(seed, seed_resolution, relation_types, resolution_state, index_available),
+        "matched_seed_nodes": [c.get("symbol") for c in seed_resolution.get("candidates", [])],
+        "searched_edge_types": relation_types,
+        "nodes": nodes,
+        "edges": selected_edges,
+    }}
+
+
+_BUSINESS_TRACE_SIGNAL_TOKENS = [
+    "create",
+    "make",
+    "spawn",
+    "register",
+    "add",
+    "bind",
+    "producer",
+    "manager",
+    "payload",
+    "layer",
+    "data",
+    "convert",
+    "build",
+    "prefab",
+    "mask",
+    "settings",
+    "subsystem",
+    "cache",
+    "stream",
+    "load",
+    "finalize",
+]
+
+
+def _business_edge_signal_score(edge: Dict[str, Any]) -> int:
+    combined = " ".join([
+        str(edge.get("source", "")),
+        str(edge.get("target", "")),
+        str(edge.get("expression", "")),
+        str(edge.get("semantic_edge_type", "")),
+    ]).lower()
+    score = 0
+    for token in _BUSINESS_TRACE_SIGNAL_TOKENS:
+        if token in combined:
+            score += 2
+    semantic = edge.get("semantic_edge_type", "")
+    if semantic in ("creates", "registers", "loads", "sinks_to", "branches_on", "lifecycle"):
+        score += 8
+    if edge.get("edge_type") == "call" or edge.get("raw_relation_type") == "call":
+        score += 3
+    if edge.get("source_file") and edge.get("source_line"):
+        score += 2
+    return score
+
+
+def _semanticize_flow_edge(edge: Dict[str, Any]) -> Dict[str, Any]:
+    if edge.get("semantic_edge_type"):
+        return edge
+    row_like = {{
+        "relation_type": edge.get("edge_type"),
+        "target_symbol": edge.get("target"),
+        "target_class": "",
+        "expression": edge.get("expression", ""),
+    }}
+    enriched = dict(edge)
+    enriched["semantic_edge_type"] = _semantic_edge_type(row_like)
+    enriched["raw_relation_type"] = edge.get("edge_type")
+    enriched["materialized"] = False
+    return enriched
+
+
+def _business_domain_terms(seed: str, effective_seed: str) -> List[str]:
+    raw = " ".join([seed or "", effective_seed or ""])
+    pieces = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", raw)
+    stop = {"f", "u", "a", "aes", "layer", "payload", "manager", "producer", "builder", "marker", "earth"}
+    terms = []
+    for piece in pieces:
+        term = piece.lower()
+        if len(term) < 3 or term in stop:
+            continue
+        terms.append(term)
+    stripped = _strip_common_type_prefix(effective_seed or seed or "").lower()
+    if stripped and stripped not in stop:
+        for suffix in ("layer", "payloadmanager", "manager", "producer", "builder"):
+            stripped = stripped.replace(suffix, "")
+        if len(stripped) >= 3:
+            terms.append(stripped)
+    return sorted(set(terms))
+
+
+def _edge_matches_business_domain(edge: Dict[str, Any], domain_terms: List[str]) -> bool:
+    if not domain_terms:
+        return True
+    combined = " ".join([
+        str(edge.get("source", "")),
+        str(edge.get("target", "")),
+        str(edge.get("source_file", "")),
+        str(edge.get("expression", "")),
+    ]).lower()
+    return any(term in combined for term in domain_terms)
+
+
+def _domain_focus_edges(edges: List[Dict[str, Any]], domain_terms: List[str], seed: str, effective_seed: str) -> List[Dict[str, Any]]:
+    focused = [edge for edge in edges if _edge_matches_business_domain(edge, domain_terms)]
+    seed_terms = [term.lower() for term in (seed, effective_seed) if term]
+    seed_edges = [
+        edge for edge in edges
+        if any(term in str(edge.get("source", "")).lower() or term in str(edge.get("target", "")).lower() for term in seed_terms)
+    ]
+    return _dedupe_business_trace_edges(seed_edges + focused)
+
+
+def _evidence_category_markers(evidence_slices: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    markers = {{"loads": [], "lifecycle": [], "depends_on": [], "entry": []}}
+    token_map = {{
+        "loads": ["load", "tryload", "asyncload", "loadasset", "loadprefab", "assetlibrary"],
+        "lifecycle": ["beginplay", "endplay", "tick", "refresh", "update", "destroy", "unload", "finalize", "registerpayloadentryproducers"],
+        "depends_on": ["dependency", "dependent", "streamingmanager", "cachemanager", "changeset", "datalayerprovider"],
+        "entry": ["create", "registerpayloadentryproducers", "addmarkerproducer", "addmarkerdatalayer"],
+    }}
+    for item in evidence_slices:
+        source_slice = item.get("source_slice") or {{}}
+        content = str(source_slice.get("content", ""))
+        lower = content.lower()
+        for category, tokens in token_map.items():
+            if any(token in lower for token in tokens):
+                markers[category].append({{
+                    "file": item.get("file"),
+                    "line": item.get("line"),
+                    "source": item.get("source"),
+                    "target": item.get("target"),
+                    "matched_tokens": [token for token in tokens if token in lower],
+                }})
+    return markers
+
+
+def _dedupe_business_trace_edges(edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped = []
+    seen = set()
+    for edge in edges:
+        key = (
+            edge.get("source", ""),
+            edge.get("target", ""),
+            edge.get("edge_type", edge.get("raw_relation_type", "")),
+            edge.get("source_file", ""),
+            edge.get("source_line", 0),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(edge)
+    return deduped
+
+
+def _mermaid_node_id(label: str, index: int) -> str:
+    digest = hashlib.sha1(label.encode("utf-8", errors="ignore")).hexdigest()[:8]
+    return f"N{{index}}_{{digest}}"
+
+
+def _mermaid_label(label: str) -> str:
+    safe = str(label or "").replace('"', "'").replace("\n", " ")
+    return safe[:80]
+
+
+def _business_trace_mermaid(edges: List[Dict[str, Any]], limit: int = 24) -> str:
+    node_ids = {{}}
+    lines = ["flowchart TD"]
+    edge_lines = []
+    for edge in edges[:limit]:
+        source = edge.get("source") or "unknown_source"
+        target = edge.get("target") or "unknown_target"
+        if source not in node_ids:
+            node_ids[source] = _mermaid_node_id(source, len(node_ids) + 1)
+            lines.append(f'  {{node_ids[source]}}["{{_mermaid_label(source)}}"]')
+        if target not in node_ids:
+            node_ids[target] = _mermaid_node_id(target, len(node_ids) + 1)
+            lines.append(f'  {{node_ids[target]}}["{{_mermaid_label(target)}}"]')
+        edge_label = edge.get("semantic_edge_type") or edge.get("edge_type") or "ref"
+        edge_lines.append(f'  {{node_ids[source]}} -->|"{{_mermaid_label(edge_label)}}"| {{node_ids[target]}}')
+    return "\n".join(lines + edge_lines)
+
+
+def _business_trace_score(
+    seed_resolution: Dict[str, Any],
+    flow: Dict[str, Any],
+    coverage: Dict[str, Any],
+    evidence_slices: List[Dict[str, Any]],
+    hit_limit: bool,
+) -> Dict[str, Any]:
+    categories = coverage.get("categories", {{}})
+    observable_categories = [category for category, count in categories.items() if count > 0]
+    score = 0
+    reasons = []
+    if seed_resolution.get("resolution_state") != "miss":
+        score += 12
+    else:
+        reasons.append("seed_not_found")
+    if seed_resolution.get("candidate_count", 0) <= 4:
+        score += 8
+    else:
+        reasons.append("seed_has_many_candidates")
+    if flow.get("edge_count", 0) > 0:
+        score += 20
+    else:
+        reasons.append("no_static_flow_edges")
+    if len(evidence_slices) >= 3:
+        score += 20
+    else:
+        reasons.append("not_enough_source_evidence_slices")
+    score += min(27, len(observable_categories) * 3)
+    if not hit_limit:
+        score += 10
+    else:
+        reasons.append("traversal_hit_limit")
+    if flow.get("zero_reason") is None:
+        score += 5
+    else:
+        reasons.append(str(flow.get("zero_reason")))
+    score = min(score, 100)
+    return {{
+        "score": score,
+        "status": "REVIEW_ONLY",
+        "score_kind": "static_evidence_density",
+        "score_is_acceptance_gate": False,
+        "static_only": True,
+        "llm_used": False,
+        "rag_used": False,
+        "vector_used": False,
+        "observed_categories": observable_categories,
+        "reasons": reasons,
+    }}
+
+
+def _business_closure_validation(
+    score: Dict[str, Any],
+    coverage: Dict[str, Any],
+    evidence_slices: List[Dict[str, Any]],
+    hit_limit: bool,
+    upstream_truncated: bool = False,
+) -> Dict[str, Any]:
+    reasons = []
+    if not evidence_slices:
+        reasons.append("no_source_evidence_slices")
+    if hit_limit:
+        reasons.append("domain_focused_traversal_hit_limit")
+    if upstream_truncated:
+        reasons.append("underlying_static_traversal_hit_limit")
+    domain_edge_count = coverage.get("domain_focused_edge_count", 0)
+    if domain_edge_count <= 0:
+        reasons.append("no_domain_focused_edges")
+    return {{
+        "status": "FAIL" if reasons else "REVIEW_ONLY",
+        "static_only": True,
+        "llm_used": False,
+        "rag_used": False,
+        "vector_used": False,
+        "materialized": True,
+        "materialized_scope": "trace_business_flow_result",
+        "is_complete_business_proof": False,
+        "must_not_be_used_as_acceptance_gate": True,
+        "source_slice_is_semantic_edge": False,
+        "files_fts_is_semantic_edge": False,
+        "evidence_category_markers_are_semantic_edges": False,
+        "domain_focused_edge_count": domain_edge_count,
+        "evidence_slice_count": len(evidence_slices),
+        "upstream_truncated": upstream_truncated,
+        "reasons": reasons,
+    }}
+
+
+def trace_business_flow(
+    seed: str,
+    depth: int = 4,
+    limit: int = 160,
+    resolution_state: str = "resolved",
+    evidence_limit: int = 12,
+) -> Dict[str, Any]:
+    """One-command static business-flow trace with deterministic evidence.
+
+    This command orchestrates existing static analyzers only. It does not call
+    LLMs, RAG, embeddings, vector search, or broad text search.
+    """
+    closure = query_static_closure(seed, depth, limit, resolution_state)
+    effective_nodes = closure.get("effective_seed_nodes", [])
+    command_seed = effective_nodes[0] if len(effective_nodes) == 1 else seed
+    bundle = symbol_evidence_bundle(command_seed, min(max(evidence_limit, 1) * 2, 40), resolution_state)
+    flow = query_flow(command_seed, "both", "call,type_reference", depth, limit, resolution_state)
+    semantic_edges = [_semanticize_flow_edge(edge) for edge in flow.get("edges", [])]
+    combined_edges = _dedupe_business_trace_edges(closure.get("semantic_edges", []) + semantic_edges)
+    domain_terms = _business_domain_terms(seed, command_seed)
+    focused_edges = _domain_focus_edges(combined_edges, domain_terms, seed, command_seed)
+    scoring_edges = focused_edges or combined_edges
+    ranked_edges = sorted(
+        scoring_edges,
+        key=lambda edge: (-_business_edge_signal_score(edge), str(edge.get("source_file", "")), int(edge.get("source_line") or 0)),
+    )
+    evidence_slices = []
+    seen_slices = set()
+    for edge in ranked_edges:
+        file_path = edge.get("source_file")
+        line = edge.get("source_line")
+        if not file_path or not line:
+            continue
+        key = (file_path, int(line))
+        if key in seen_slices:
+            continue
+        seen_slices.add(key)
+        slice_result = source_slice(file_path, int(line), "function", 8, 160, 12000)
+        evidence_slices.append({{
+            "file": file_path,
+            "line": int(line),
+            "source": edge.get("source"),
+            "target": edge.get("target"),
+            "semantic_edge_type": edge.get("semantic_edge_type"),
+            "expression": edge.get("expression", ""),
+            "source_slice": slice_result if "error" not in slice_result else None,
+            "source_slice_error": slice_result.get("error") if isinstance(slice_result, dict) else None,
+        }})
+        if len(evidence_slices) >= evidence_limit:
+            break
+    categories = {{category: 0 for category in _STATIC_CLOSURE_CATEGORIES}}
+    for edge in scoring_edges:
+        category = edge.get("semantic_edge_type") or "calls"
+        categories[category] = categories.get(category, 0) + 1
+    if categories.get("creates", 0) > 0 or categories.get("registers", 0) > 0:
+        categories["entry"] = max(categories.get("entry", 0), 1)
+    evidence_markers = _evidence_category_markers(evidence_slices)
+    evidence_categories = {category: len(items) for category, items in evidence_markers.items()}
+    for category, count in evidence_categories.items():
+        if count > 0:
+            categories[category] = max(categories.get(category, 0), count)
+    missing_categories = [category for category in _STATIC_CLOSURE_CATEGORIES if categories.get(category, 0) == 0]
+    coverage = {{
+        "categories": categories,
+        "missing_categories": missing_categories,
+        "closed": False,
+        "closed_kind": "evidence_snapshot_not_business_closure",
+        "closed_reason": "trace_business_flow_is_a_static_evidence_collector_not_a_complete_business_logic_proof",
+        "formal_semantic_closure": False,
+        "formal_semantic_closure_reason": "trace_business_flow_materializes_review_evidence_only",
+        "is_acceptance_gate": False,
+        "static_only": True,
+        "domain_terms": domain_terms,
+        "domain_focused_edge_count": len(focused_edges),
+        "evidence_categories": evidence_categories,
+        "evidence_category_markers_are_semantic_edges": False,
+    }}
+    upstream_truncated = flow.get("edge_count", 0) >= limit or closure.get("closure_status") == "truncated"
+    hit_limit = len(scoring_edges) >= limit
+    score = _business_trace_score(closure.get("seed_resolution", {{}}), flow, coverage, evidence_slices, hit_limit)
+    business_validation = _business_closure_validation(score, coverage, evidence_slices, hit_limit, upstream_truncated)
+    internal_steps = [
+        {{"step": 1, "command": "resolve_seed", "args": [seed, str(limit)], "evidence": "seed_resolution from query_static_closure"}},
+        {{"step": 2, "command": "query_static_closure", "args": [seed, str(depth), str(limit), resolution_state], "evidence": "effective seed, conservative closure gate, next static commands"}},
+        {{"step": 3, "command": "symbol_evidence_bundle", "args": [command_seed, str(min(max(evidence_limit, 1) * 2, 40)), resolution_state], "evidence": "declarations, implementation spans, direct references"}},
+        {{"step": 4, "command": "query_flow", "args": [command_seed, "both", "call,type_reference", str(depth), str(limit), resolution_state], "evidence": "deterministic static call/type-reference graph"}},
+        {{"step": 5, "command": "source_slice", "args": ["<ranked edge file>", "<ranked edge line>", "function"], "repeat": len(evidence_slices), "evidence": "ranked source functions for highest-signal edges"}},
+        {{"step": 6, "command": "coverage_assessment", "args": [], "evidence": "score, missing categories, frontier"}},
+    ]
+    frontier = [
+        {{
+            "symbol": node,
+            "signal": sum(_business_edge_signal_score(edge) for edge in scoring_edges if edge.get("source") == node or edge.get("target") == node),
+        }}
+        for node in sorted({n for edge in scoring_edges for n in (edge.get("source"), edge.get("target")) if n})
+    ]
+    frontier = sorted(frontier, key=lambda item: (-item["signal"], item["symbol"]))[:max(evidence_limit, 12)]
+    return {{
+        "_meta": _get_kb_meta(),
+        "schema": "business-flow-trace/v1",
+        "seed": seed,
+        "effective_seed": command_seed,
+        "static_only": True,
+        "llm_used": False,
+        "rag_used": False,
+        "vector_used": False,
+        "script_call_equivalent_count": 5 + len(evidence_slices),
+        "internal_steps": internal_steps,
+        "seed_resolution": closure.get("seed_resolution"),
+        "closure_validation": business_validation,
+        "underlying_static_closure_validation": closure.get("closure_validation"),
+        "flow_summary": {{
+            "node_count": flow.get("node_count", 0),
+            "edge_count": flow.get("edge_count", 0),
+            "domain_focused_edge_count": len(focused_edges),
+            "zero_reason": flow.get("zero_reason"),
+            "searched_edge_types": flow.get("searched_edge_types", []),
+            "resolution_state_filter": flow.get("resolution_state_filter"),
+        }},
+        "coverage": coverage,
+        "evidence_category_markers": evidence_markers,
+        "automation_score": score,
+        "ranked_edges": ranked_edges[:limit],
+        "evidence_slices": evidence_slices,
+        "frontier": frontier,
+        "mermaid": _business_trace_mermaid(ranked_edges),
+        "source_commands_replaced": [
+            "preflight",
+            "resolve_seed",
+            "query_static_closure",
+            "symbol_evidence_bundle",
+            "query_flow",
+            "source_slice xN",
+        ],
+    }}
+
+
+def trace_flow_path(
+    source_symbol: str,
+    target_symbol: str,
+    depth: int = 4,
+    limit: int = 200,
+    resolution_state: str = "resolved",
+) -> Dict[str, Any]:
+    """在静态引用图上查找 source 到 target 的第一条确定性路径。"""
+    queue = [(source_symbol, [])]
+    visited = {source_symbol}
+    checked = 0
+    while queue:
+        node, path = queue.pop(0)
+        if len(path) >= depth:
+            continue
+        rows = _query_reference_rows(_short_symbol(node), limit, resolution_state, ["call", "type_reference"])
+        edges = [_edge_from_reference_row(row) for row in rows]
+        for edge in edges:
+            checked += 1
+            if checked > limit:
+                break
+            next_node = edge.get("target")
+            next_path = path + [edge]
+            if _node_matches(target_symbol, next_node):
+                return {{
+                    "_meta": _get_kb_meta(),
+                    "source": source_symbol,
+                    "target": target_symbol,
+                    "found": True,
+                    "depth": len(next_path),
+                    "resolution_state_filter": resolution_state,
+                    "path": next_path,
+                }}
+            if next_node and next_node not in visited:
+                visited.add(next_node)
+                queue.append((next_node, next_path))
+        if checked > limit:
+            break
+    return {{
+        "_meta": _get_kb_meta(),
+        "source": source_symbol,
+        "target": target_symbol,
+        "found": False,
+        "depth_limit": depth,
+        "resolution_state_filter": resolution_state,
+        "path": [],
+    }}
+
+
+def _parse_optional_class_limit_confidence(args: List[str]) -> tuple:
+    """解析 [class_name] [limit] [confidence]，兼容旧参数顺序"""
+    class_name = None
+    limit = 50
+    confidence = "resolved"
+    for arg in args:
+        if arg.isdigit():
+            limit = int(arg)
+        elif arg in ("resolved", "all", "ambiguous", "unresolved"):
+            confidence = arg
+        elif class_name is None:
+            class_name = arg
+        else:
+            confidence = arg
+    return class_name, limit, confidence
+
+
+def _parse_optional_limit_confidence(args: List[str]) -> tuple:
+    """解析 [limit] [confidence]，兼容旧参数顺序"""
+    limit = 50
+    confidence = "resolved"
+    for arg in args:
+        if arg.isdigit():
+            limit = int(arg)
+        else:
+            confidence = arg
+    return limit, confidence
+
+
+def _parse_source_slice_cli_args(args: List[str]) -> tuple:
+    if len(args) < 2:
+        raise ValueError("Missing source_slice arguments")
+    mode = "context"
+    context_lines = 8
+    max_context_lines = 200
+    max_output_chars = 20000
+    if len(args) > 2:
+        third = args[2]
+        if third in ("context", "function"):
+            mode = third
+            context_lines = int(args[3]) if len(args) > 3 else context_lines
+            max_context_lines = int(args[4]) if len(args) > 4 else max_context_lines
+            max_output_chars = int(args[5]) if len(args) > 5 else max_output_chars
+        elif third.isdigit():
+            context_lines = int(third)
+            max_context_lines = int(args[3]) if len(args) > 3 else max_context_lines
+            max_output_chars = int(args[4]) if len(args) > 4 else max_output_chars
+        else:
+            raise ValueError("source_slice third argument must be 'context', 'function', or numeric context_lines")
+    return args[0], int(args[1]), mode, context_lines, max_context_lines, max_output_chars
+
+
 # ============================================================================
 # 命令行接口 (CLI)
 # ============================================================================
@@ -986,7 +2343,7 @@ if __name__ == "__main__":
         return trace_id, allow_stale, no_audit, cleaned
 
     def _command_requires_fresh(command):
-        return command not in {"preflight", "query_audit", "get_kb_info"}
+        return command not in {"preflight", "query_audit", "query_audit_report", "get_kb_info"}
 
     def _stale_gate_result(command):
         context = _get_runtime_context()
@@ -999,7 +2356,7 @@ if __name__ == "__main__":
             }
         return None
 
-    def _print_usage():
+    def _print_usage(exit_code=1):
         print("Usage: py impl.py [--trace-id <id>] [--allow-stale] [--no-audit] <command> [args...]", file=sys.stderr)
         print("", file=sys.stderr)
         print("Commands:", file=sys.stderr)
@@ -1012,6 +2369,7 @@ if __name__ == "__main__":
         print("  get_function_implementation <function_name> [class_name] [hint] [signature_hint] - 获取函数实现", file=sys.stderr)
         print("  source_slice <relative_file> <line> [context|function] [context_lines] - 安全读取源码切片", file=sys.stderr)
         print("  search_files <keyword> [limit]             - 搜索源码文件全文索引", file=sys.stderr)
+        print("  resolve_seed <seed> [limit]                - 确定性解析 seed 类型", file=sys.stderr)
         print("  search_functions <keyword> [limit]         - 搜索函数", file=sys.stderr)
         print("  search_classes <keyword> [limit]           - 搜索类", file=sys.stderr)
         print("  search_modules <keyword>                   - 搜索模块", file=sys.stderr)
@@ -1021,6 +2379,17 @@ if __name__ == "__main__":
         print("  search_enums <keyword> [limit]             - 搜索枚举", file=sys.stderr)
         print("  query_examples <target_name> [limit]       - 查询代码示例", file=sys.stderr)
         print("  query_audit [trace_id] [limit]             - 查看查询审计记录", file=sys.stderr)
+        print("  query_audit_report [trace_id] [limit] [broad_threshold] - 生成确定性静态查询审计统计报告", file=sys.stderr)
+        print("  query_callees <function_name> [class_name] [limit] [resolution_state=resolved|all|ambiguous|unresolved] - 查询函数调用目标", file=sys.stderr)
+        print("  query_callers <function_name> [class_name] [limit] [resolution_state=resolved|all|ambiguous|unresolved] - 查询调用该函数的位置", file=sys.stderr)
+        print("  query_symbol_references <symbol_name> [limit] [resolution_state=resolved|all|ambiguous|unresolved] - 查询符号引用", file=sys.stderr)
+        print("  symbol_reference_report <symbol_name> [limit] [resolution_state=all] - 静态符号引用报表", file=sys.stderr)
+        print("  symbol_evidence_bundle <symbol_name> [limit] [resolution_state=all] - 静态证据包", file=sys.stderr)
+        print("  code_flow_index [limit] [resolution_state=all] - 静态引用图边视图", file=sys.stderr)
+        print("  query_static_closure <seed> [depth] [limit] [resolution_state=all] - 静态业务对象闭环查询", file=sys.stderr)
+        print("  query_flow <seed> [direction] [edge_types] [depth] [limit] [resolution_state=all] - 静态图遍历", file=sys.stderr)
+        print("  trace_business_flow <seed> [depth] [limit] [resolution_state=resolved] [evidence_limit] - 实验性静态证据聚合器，不能作为完整业务闭环证明", file=sys.stderr)
+        print("  trace_flow_path <from> <to> [depth] [limit] [resolution_state=resolved] - 静态路径查询", file=sys.stderr)
         print("  get_statistics                             - 获取统计信息", file=sys.stderr)
         print("  get_kb_info                                - 获取知识库版本信息", file=sys.stderr)
         print("", file=sys.stderr)
@@ -1032,7 +2401,7 @@ if __name__ == "__main__":
         print('  py impl.py source_slice "Source/Runtime/Engine/Private/Actor.cpp" 120 function', file=sys.stderr)
         print('  py impl.py search_files "RHICreateTexture" 20', file=sys.stderr)
         print('  py impl.py search_classes "Player" 20', file=sys.stderr)
-        sys.exit(1)
+        sys.exit(exit_code)
 
     def _require(args, count, message):
         if len(args) < count:
@@ -1071,16 +2440,15 @@ if __name__ == "__main__":
             signature_hint = args[3] if len(args) > 3 else None
             return get_function_implementation(args[0], class_name, module_hint, signature_hint)
         if command == "source_slice":
-            _require(args, 2, "Missing source_slice arguments")
-            mode = args[2] if len(args) > 2 else "context"
-            context_lines = int(args[3]) if len(args) > 3 else 8
-            max_context_lines = int(args[4]) if len(args) > 4 else 200
-            max_output_chars = int(args[5]) if len(args) > 5 else 20000
-            return source_slice(args[0], int(args[1]), mode, context_lines, max_context_lines, max_output_chars)
+            return source_slice(*_parse_source_slice_cli_args(args))
         if command == "search_files":
             _require(args, 1, "Missing keyword argument")
             limit = int(args[1]) if len(args) > 1 else 20
             return search_files(args[0], limit)
+        if command == "resolve_seed":
+            _require(args, 1, "Missing seed argument")
+            limit = int(args[1]) if len(args) > 1 else 20
+            return resolve_seed(args[0], limit)
         if command == "search_functions":
             _require(args, 1, "Missing keyword argument")
             limit = int(args[1]) if len(args) > 1 else 50
@@ -1116,9 +2484,87 @@ if __name__ == "__main__":
             limit = int(args[1]) if len(args) > 1 else 5
             return query_examples(args[0], limit)
         if command == "query_audit":
-            trace = args[0] if args else None
-            limit = int(args[1]) if len(args) > 1 else 20
+            trace = None
+            limit = 20
+            if "--limit" in args:
+                idx = args.index("--limit")
+                if idx + 1 >= len(args):
+                    return {"error": "query_audit --limit requires a value"}
+                limit = int(args[idx + 1])
+                args = args[:idx] + args[idx + 2:]
+            if args:
+                if len(args) == 1 and args[0].isdigit():
+                    limit = int(args[0])
+                else:
+                    trace = args[0]
+                    if len(args) > 1:
+                        limit = int(args[1])
             return query_audit(trace, limit)
+        if command == "query_audit_report":
+            trace = None
+            limit = 200
+            broad_threshold = 40
+            if args:
+                if len(args) == 1 and args[0].isdigit():
+                    limit = int(args[0])
+                else:
+                    trace = args[0]
+                    if len(args) > 1:
+                        limit = int(args[1])
+                    if len(args) > 2:
+                        broad_threshold = int(args[2])
+            return query_audit_report(trace, limit, broad_threshold)
+        if command == "query_callees":
+            _require(args, 1, "Missing function_name argument")
+            class_name, limit, confidence = _parse_optional_class_limit_confidence(args[1:])
+            return query_callees(args[0], class_name, limit, confidence)
+        if command == "query_callers":
+            _require(args, 1, "Missing function_name argument")
+            class_name, limit, confidence = _parse_optional_class_limit_confidence(args[1:])
+            return query_callers(args[0], class_name, limit, confidence)
+        if command == "query_symbol_references":
+            _require(args, 1, "Missing symbol_name argument")
+            limit, confidence = _parse_optional_limit_confidence(args[1:])
+            return query_symbol_references(args[0], limit, confidence)
+        if command == "symbol_reference_report":
+            _require(args, 1, "Missing symbol_name argument")
+            limit, resolution_state = _parse_optional_limit_confidence(args[1:])
+            return symbol_reference_report(args[0], limit, resolution_state)
+        if command == "symbol_evidence_bundle":
+            _require(args, 1, "Missing symbol_name argument")
+            limit, resolution_state = _parse_optional_limit_confidence(args[1:])
+            return symbol_evidence_bundle(args[0], limit, resolution_state)
+        if command == "code_flow_index":
+            limit = int(args[0]) if args and args[0].isdigit() else 100
+            resolution_state = args[1] if len(args) > 1 else (args[0] if args and not args[0].isdigit() else "all")
+            return code_flow_index(limit, resolution_state)
+        if command == "query_static_closure":
+            _require(args, 1, "Missing seed argument")
+            depth = int(args[1]) if len(args) > 1 else 3
+            limit = int(args[2]) if len(args) > 2 else 80
+            resolution_state = args[3] if len(args) > 3 else "all"
+            return query_static_closure(args[0], depth, limit, resolution_state)
+        if command == "query_flow":
+            _require(args, 1, "Missing seed argument")
+            direction = args[1] if len(args) > 1 else "both"
+            edge_types = args[2] if len(args) > 2 else "call,type_reference"
+            depth = int(args[3]) if len(args) > 3 else 1
+            limit = int(args[4]) if len(args) > 4 else 50
+            resolution_state = args[5] if len(args) > 5 else "all"
+            return query_flow(args[0], direction, edge_types, depth, limit, resolution_state)
+        if command == "trace_business_flow":
+            _require(args, 1, "Missing seed argument")
+            depth = int(args[1]) if len(args) > 1 else 4
+            limit = int(args[2]) if len(args) > 2 else 160
+            resolution_state = args[3] if len(args) > 3 else "resolved"
+            evidence_limit = int(args[4]) if len(args) > 4 else 12
+            return trace_business_flow(args[0], depth, limit, resolution_state, evidence_limit)
+        if command == "trace_flow_path":
+            _require(args, 2, "Missing trace_flow_path arguments")
+            depth = int(args[2]) if len(args) > 2 else 4
+            limit = int(args[3]) if len(args) > 3 else 200
+            resolution_state = args[4] if len(args) > 4 else "resolved"
+            return trace_flow_path(args[0], args[1], depth, limit, resolution_state)
         print(f"Error: Unknown command '{command}'", file=sys.stderr)
         _print_usage()
 
@@ -1127,6 +2573,8 @@ if __name__ == "__main__":
     no_audit = no_audit or _env_flag("UE5KB_NO_AUDIT")
     if len(cli_args) < 1:
         _print_usage()
+    if cli_args[0] in ("-h", "--help", "help"):
+        _print_usage(0)
 
     command = cli_args[0]
     command_args = cli_args[1:]
@@ -1134,7 +2582,7 @@ if __name__ == "__main__":
 
     try:
         result = _run_command(command, command_args, allow_stale=allow_stale)
-        if command != "query_audit" and not no_audit:
+        if command not in {"query_audit", "query_audit_report"} and not no_audit:
             audit_error = result.get("error") if isinstance(result, dict) else None
             resolved_trace_id = _record_query_audit(
                 command,
@@ -1146,7 +2594,7 @@ if __name__ == "__main__":
             )
             if isinstance(result, dict):
                 result.setdefault("_audit", {{}})["trace_id"] = resolved_trace_id
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
 
     except Exception as e:
         resolved_trace_id = resolve_trace_id(trace_id)
@@ -1162,5 +2610,5 @@ if __name__ == "__main__":
             except Exception:
                 pass
         error_result = {{"error": str(e), "command": command, "args": command_args, "_audit": {{"trace_id": resolved_trace_id}}}}
-        print(json.dumps(error_result, ensure_ascii=False, indent=2))
+        print(json.dumps(error_result, ensure_ascii=True, indent=2))
         sys.exit(1)

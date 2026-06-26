@@ -4,11 +4,11 @@
 
 ## 执行摘要
 
-当前系统已实现基础的 context optimization（分层查询、observation masking、token budget），但架构上存在以下可优化点：
+当前系统已实现基础的 context optimization（静态命令、有界输出、token budget），但架构上存在以下可优化点：
 
 1. **Pipeline 架构不够清晰** - 构建流程耦合度高，难以独立迭代
 2. **文件系统作为状态机未充分利用** - 缺少阶段性检查点和幂等性设计
-3. **Context 优化未完全集成** - 现有的 layered_query 等模块未集成到生成的 Skill 中
+3. **Context 优化需要统一契约** - 生成的 Skill 应只暴露显式静态命令
 4. **缺少 Multi-Agent 分区** - 大型引擎扫描时可能遇到 context 限制
 5. **工具设计可简化** - 过多专用查询函数，应考虑架构精简
 
@@ -120,7 +120,7 @@ discover → extract → analyze → build → generate
 #### 阶段 4: Build (构建索引)
 
 **输入**: `data/analyze/` 所有模块
-**输出**: `KnowledgeBase/global_index/`, `KnowledgeBase/module_graphs/`
+**输出**: canonical skill variant 下的 `global_index/`, `module_graphs/`
 
 将 JSON 转换为优化的存储格式（SQLite + Pickle）
 
@@ -131,8 +131,8 @@ discover → extract → analyze → build → generate
 
 #### 阶段 5: Generate (生成 Skill)
 
-**输入**: `KnowledgeBase/`
-**输出**: `~/.claude/skills/ue5kb-{version}/`
+**输入**: canonical skill variant，通常为 `~/.agents/skills/<skill-name>/variants/<commit>/`
+**输出**: shared skill directory，通常为 `~/.agents/skills/ue5kb-{version}/`
 
 从模板生成 Skill 文件
 
@@ -180,7 +180,7 @@ D:\Unreal Engine\UnrealEngine51_500\
 │       │   └── code_graph.json
 │       └── Engine/
 │           └── code_graph.json
-├── KnowledgeBase/              # 最终输出（保持不变）
+├── .agents/skills/<skill>/variants/<commit>/   # canonical KB output
 │   ├── global_index/
 │   └── module_graphs/
 └── .pipeline_state             # Pipeline 状态文件（新增）
@@ -226,11 +226,11 @@ D:\Unreal Engine\UnrealEngine51_500\
 
 ### 当前问题
 
-Context optimization 模块已实现（`query/layered_query.py`, `result_cache.py`, `token_budget.py`），但：
+Context optimization 相关能力已实现（静态命令、有界输出、token budget），但：
 
-1. **未集成到生成的 Skill** - `impl.py.template` 仍使用旧的直接查询方式
-2. **未完全实现** - `LayeredQueryInterface._load_class_info()` 是占位符
-3. **缺少使用文档** - 用户不知道如何使用分层查询
+1. **需要收敛生成的 Skill** - `impl.py.template` 必须只暴露显式静态命令
+2. **需要统一静态命令契约** - 查询入口必须是显式命令
+3. **缺少使用文档** - 用户不知道如何从摘要命令推进到 `source_slice`
 
 ### 优化方案
 
@@ -247,64 +247,35 @@ def query_class_info(class_name: str) -> Dict:
 **优化后结构：**
 
 ```python
-# 导入 Context Optimization 模块
-from ue5_kb.query.layered_query import LayeredQueryInterface
-from ue5_kb.query.result_cache import get_result_cache
-from ue5_kb.query.token_budget import get_token_budget, ContextCategory
-
-# 初始化
-_layered_query = LayeredQueryInterface(str(KB_PATH))
-_result_cache = get_result_cache()
-_token_budget = get_token_budget()
-
-def query_class_info(class_name: str, detail_level: str = 'summary') -> Dict:
+def query_class_info(class_name: str) -> Dict:
     """
-    查询类信息（Context 优化版）
+    查询类信息（静态命令版）
 
     Args:
         class_name: 类名
-        detail_level: 详情级别 ('summary' | 'details' | 'source')
 
     Returns:
-        分层的查询结果
-
-    Token 使用:
-        - summary: ~200 tokens (推荐)
-        - details: ~1000 tokens
-        - source: ~5000 tokens
+        结构化摘要，包含 file/line 证据锚点
     """
-    result = _layered_query.query_class(class_name, detail_level)
+    ...
 
-    # 记录 Token 使用
-    tokens = _estimate_tokens(result)
-    _token_budget.allocate(ContextCategory.QUERY_RESULTS, tokens)
+def source_slice(file: str, line: int, mode: str = "context") -> Dict:
+    """按显式文件行号读取有界源码切片。"""
+    ...
 
-    return result
-
-def query_function_info(function_name: str, detail_level: str = 'summary') -> Dict:
-    """查询函数信息（Context 优化版）"""
-    result = _layered_query.query_function(function_name, detail_level)
-
-    # 应用 Observation Masking（如果结果过大）
-    if isinstance(result.get('matches'), list) and len(result['matches']) > 5:
-        result = _result_cache.mask_large_result(result['matches'])
-
-    return result
-
-def get_token_budget_stats() -> Dict:
-    """获取 Token 预算统计（调试用）"""
-    return _token_budget.get_statistics()
+def resolve_seed(seed: str) -> Dict:
+    """确定性解析 seed 类型，不做自然语言意图识别。"""
+    ...
 ```
 
-#### 2.2 完善 LayeredQueryInterface
+#### 2.2 完善静态命令查询
 
-**当前占位符实现需要补全：**
+**当前能力需要补全：**
 
 ```python
-def _load_class_info(self, class_name: str) -> Optional[Dict[str, Any]]:
-    """加载类信息（占位符，实际会调用现有接口）"""
-    # TODO: 集成现有的 query_class_info
-    return None
+def resolve_seed(seed: str) -> Dict[str, Any]:
+    """查询前确定 seed 是 function/class/struct/interface/miss。"""
+    ...
 ```
 
 **完善后：**
@@ -538,33 +509,33 @@ ue5kb init --engine-path "D:/UE5" --partition runtime
 
 > "Production evidence shows that removing specialized tools often improves performance. Vercel's d0 agent achieved 100% success rate by reducing from 17 specialized tools to 2 primitives."
 
-### 优化方案：精简为核心查询接口
+### 优化方案：精简为核心静态查询接口
 
 **当前：17 个专用函数**
 **优化后：3 个通用接口**
 
 ```python
-# 1. 通用查询接口（支持 natural language query）
-def query(question: str, detail_level: str = 'summary') -> Dict:
+# 1. 显式静态查询接口（禁止自然语言意图识别）
+def query(command: str, detail_level: str = 'summary') -> Dict:
     """
-    通用查询接口（自然语言）
+    通用静态查询接口；command 必须是确定性命令。
 
     Examples:
-        query("Core 模块有哪些依赖？")
-        query("AActor 类继承自什么？")
-        query("有多少个 Runtime 模块？")
+        query("module:Core")
+        query("class:AActor")
+        query("statistics")
 
     Args:
-        question: 自然语言问题
+        command: 静态查询命令
         detail_level: 'summary' | 'details' | 'source'
 
     Returns:
         查询结果（自动应用 context optimization）
     """
-    # 使用 LLM 理解意图，路由到合适的查询
+    # 解析显式命令，路由到确定性静态索引
     ...
 
-# 2. 直接访问接口（给 LLM 使用，类似 bash/SQL）
+# 2. 直接访问接口（类似 bash/SQL 的结构化查询）
 def direct_query(
     query_type: str,
     target: str,
@@ -598,8 +569,8 @@ def stats(category: Optional[str] = None) -> Dict:
 
 **为什么精简更好？**
 
-1. **减少 LLM 选择负担** - 17 个函数 vs 3 个函数
-2. **更符合自然交互** - 用户问问题，不需要知道具体函数名
+1. **减少调用方选择负担** - 17 个函数 vs 3 个静态命令入口
+2. **更符合工具编排** - 上层 workflow 选择显式命令，用户不需要知道内部函数名
 3. **灵活性更高** - 通用接口可以处理组合查询
 4. **维护成本更低** - 核心逻辑集中，易于优化
 
@@ -607,13 +578,13 @@ def stats(category: Optional[str] = None) -> Dict:
 
 - 如果知识库结构复杂且不一致（当前 UE5-KB 结构清晰）
 - 如果需要严格的类型安全（当前是动态 Python）
-- 如果模型推理能力不足（Claude Sonnet 已足够强大）
+- 如果调用方无法稳定生成显式静态命令
 
 **建议：**
 
 - 保留当前的 17 个专用函数作为 **底层实现**
 - 对外暴露 3 个通用接口作为 **用户 API**
-- 让 LLM 根据问题自动选择调用哪个底层函数
+- 让上层 workflow 根据明确意图选择静态命令，不在 KB 工具内做生成式路由
 
 ---
 
@@ -771,8 +742,8 @@ ue5kb update --modules Core,Engine
 
 **时间：1-2 天**
 
-1. 完善 `LayeredQueryInterface` 的占位符实现
-2. 更新 `impl.py.template` 使用分层查询
+1. 完善静态命令的 seed 解析和空结果诊断
+2. 更新 `impl.py.template` 使用有界源码切片
 3. 添加 Token 预算监控
 4. 编写使用文档和示例
 
@@ -799,9 +770,9 @@ ue5kb update --modules Core,Engine
 
 **时间：1 天**
 
-1. 实现通用查询接口
+1. 实现显式静态查询接口
 2. 保留专用函数作为底层实现
-3. 添加意图识别和路由逻辑
+3. 添加确定性命令分发
 4. A/B 测试对比效果
 
 **收益：**
@@ -857,7 +828,7 @@ ue5kb update --modules Core,Engine
 
 **缓解措施：**
 - 在 summary 层保留关键信息
-- 提供简单的方式获取详细信息（ref_id）
+- 提供简单的方式通过 `source_slice` 获取详细信息
 - A/B 测试对比质量
 
 ### 风险 3: 工具精简可能降低成功率
@@ -906,7 +877,7 @@ ue5kb update --modules Core,Engine
 
 1. **Pipeline Architecture** - 分阶段、幂等、可缓存
 2. **File System as State Machine** - 文件存在 = 阶段完成
-3. **Observation Masking** - 屏蔽大型输出，使用引用
+3. **有界输出** - 大型结果使用 limit 和 `source_slice`
 4. **Context Partitioning** - Sub-agent 隔离 context
 5. **Architectural Reduction** - 精简工具，提升效果
 

@@ -81,8 +81,8 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | `query_module_classes` | `<module_name> [class_type]` | 查询模块中的所有类 |
 | `query_function_info` | `<function_name> [module_hint]` | 查询函数信息（包含声明和实现位置） |
 | `get_function_implementation` | `<function_name> [class_name] [module_hint]` | 获取函数的完整实现代码 |
-| `source_slice` | `<relative_file> <line> [context\|function] [context_lines] [max_context_lines] [max_output_chars]` | 安全读取 `source_root` 内源码切片 |
-| `search_files` | `<keyword> [limit=20]` | 搜索源码文件全文索引，FTS5 不可用时降级 LIKE |
+| `source_slice` | `<relative_file> <line> [context\|function\|context_lines] [context_lines] [max_context_lines] [max_output_chars]` | 安全读取 `source_root` 内源码切片；第三参为数字时按 context 半径兼容处理 |
+| `search_files` | `<keyword> [limit=20]` | 搜索源码文件全文索引，返回行号锚点；FTS5 不可用时降级 LIKE |
 | `search_functions` | `<keyword> [limit=50]` | 搜索包含关键字的函数 |
 | `search_classes` | `<keyword> [limit=50]` | 搜索包含关键字的类 |
 | `search_modules` | `<keyword>` | 搜索包含关键字的模块 |
@@ -91,7 +91,19 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | `query_enum_info` | `<enum_name> [module_hint]` | 查询枚举信息（含枚举值） |
 | `search_enums` | `<keyword> [limit=50]` | 搜索枚举 |
 | `query_examples` | `<target_name> [limit=5]` | 查询代码使用示例 |
-| `query_audit` | `[trace_id] [limit=20]` | 查看 `runtime/query_audit.db` 中的查询审计记录 |
+| `query_audit` | `[trace_id] [--limit N]` 或 `[N]` | 查看 `runtime/query_audit.db` 中的查询审计记录；单个数字参数按 limit 处理 |
+| `query_audit_report` | `[trace_id] [limit=200] [broad_threshold=40]` | 基于审计记录生成确定性静态统计报告，包含失败率、宽泛搜索和验收状态 |
+| `query_callees` | `<function_name> [class_name] [limit=50] [resolution_state=resolved]` | 查询函数调用目标，默认仅 resolved |
+| `query_callers` | `<function_name> [class_name] [limit=50] [resolution_state=resolved]` | 查询调用某函数的位置，默认仅 resolved |
+| `query_symbol_references` | `<symbol_name> [limit=50] [resolution_state=resolved]` | 查询符号引用，默认仅 resolved |
+| `resolve_seed` | `<seed> [limit=20]` | 查询前确定性解析 seed 是 function/class/struct/substring/miss |
+| `symbol_reference_report` | `<symbol_name> [limit=50] [resolution_state=all]` | 静态符号引用报表 |
+| `symbol_evidence_bundle` | `<symbol_name> [limit=20] [resolution_state=all]` | 固定 schema 静态证据包 |
+| `code_flow_index` | `[limit=100] [resolution_state=all]` | 静态引用图边视图，不复制 KB |
+| `query_static_closure` | `<seed> [depth=3] [limit=80] [resolution_state=all]` | 静态业务对象闭环查询，返回 `closure_validation` 和可执行 `next_static_command_objects` |
+| `query_flow` | `<seed> [direction] [edge_types] [depth] [limit] [resolution_state]` | 静态图遍历 |
+| `trace_business_flow` | `<seed> [depth=4] [limit=160] [resolution_state=resolved] [evidence_limit=12]` | 实验性静态证据聚合器，返回内部调用统计、证据切片、frontier 和 Mermaid 流程图；不能作为完整业务闭环证明 |
+| `trace_flow_path` | `<from> <to> [depth] [limit] [resolution_state]` | 静态路径查询 |
 | `get_statistics` | - | 获取知识库统计信息 |
 
 ### 查询示例
@@ -115,11 +127,25 @@ py "{SKILL_PATH}/impl.py" search_classes Player 20
 # 安全读取源码函数块
 py "{SKILL_PATH}/impl.py" source_slice Source/Runtime/Engine/Private/Actor.cpp 120 function
 
+# 兼容读取指定行上下文半径：第三个数字表示 context_lines
+py "{SKILL_PATH}/impl.py" source_slice Source/Runtime/Engine/Private/Actor.cpp 120 16
+
 # 搜索源码文件
 py "{SKILL_PATH}/impl.py" search_files RHICreateTexture 20
 
-# 查看同一 trace 的审计记录
-py "{SKILL_PATH}/impl.py" query_audit demo 20
+# 查看最近 20 条审计记录；查询同一 trace 时把 trace_id 放在 --limit 前
+py "{SKILL_PATH}/impl.py" query_audit --limit 20
+
+# 生成确定性静态审计统计报告，用于评估查询效率和失败率
+py "{SKILL_PATH}/impl.py" query_audit_report my-trace-id 200 40
+
+# 静态证据包与引用图
+py "{SKILL_PATH}/impl.py" resolve_seed FMyFeatureFragment
+py "{SKILL_PATH}/impl.py" symbol_reference_report BeginPlay 20 all
+py "{SKILL_PATH}/impl.py" symbol_evidence_bundle BeginPlay 10 resolved
+py "{SKILL_PATH}/impl.py" query_static_closure FeatureLayer 3 80 all
+py "{SKILL_PATH}/impl.py" query_flow BeginPlay out call 1 20 all
+py "{SKILL_PATH}/impl.py" trace_business_flow FeatureLayer 4 160 resolved 12
 
 # 获取统计信息
 py "{SKILL_PATH}/impl.py" get_statistics
@@ -134,6 +160,10 @@ py "{SKILL_PATH}/impl.py" get_statistics
 5. **使用搜索功能**：如果只知道关键字，使用 `search_modules`、`search_classes` 或 `search_functions`
 6. **KB miss 时才降级**：KB 未找到目标时，明确标注"KB miss"，再降级到 Glob/Grep/read_file 源码搜索
 7. **处理错误结果**：如果返回的 JSON 包含 `error` 字段，说明查询失败
+8. **不要把 partial/truncated 当作闭环完成**：`query_static_closure` 只有 `closure_validation.status == "PASS"` 才能证明闭环；当前 derived/static 结果通常应作为辅助定位而不是最终完备证明
+9. **保持 static-only**：查询命令不得调用 LLM、RAG、embedding 或 vector search；`source_slice`、`search_files` 只能作为证据回源，不能伪装成语义边
+10. **复杂业务不要声称一条命令闭环**：`trace_business_flow` 只能做首轮静态证据聚合；它的 `automation_score.status` 和 `closure_validation.status` 不会返回 `PASS`，不得作为“完整业务逻辑/一查到底”的验收门
+11. **不要混淆两种闭包**：`trace_business_flow.coverage.closed` 固定为 `false`，表示它不是业务闭环证明；`formal_semantic_closure == false` 时，不能宣传成全局形式化语义闭包证明
 
 ---
 
@@ -178,6 +208,7 @@ py "{SKILL_PATH}/impl.py" get_statistics
 - **必须使用工具搜索** - 模糊搜索找不到时，明确告知用户
 - **源码问答必须先 preflight** - stale 时先刷新，不能绕过 KB 直接猜
 - **大结果用 query_audit 追踪** - 默认审计只记录命令、参数摘要和结果数量，不记录源码全文
+- **实战验收用 query_audit_report** - 对复杂业务探索必须统计失败事件、broad search 和 acceptance 状态；该报告只基于静态审计记录，不引入 LLM/RAG
 - **返回错误信息中的提示** - 如果 error 包含 `fallback_command` 字段，必须执行
 
 ---
@@ -187,6 +218,14 @@ py "{SKILL_PATH}/impl.py" get_statistics
 知识库位于: 优先由 `{SKILL_PATH}/registry.db` 动态解析到 `variants/<commit>`；不要依赖旧的固定 `KnowledgeBase` 路径。
 
 Skill 路径: `{SKILL_PATH}`
+
+### 跨 Agent 部署约定
+
+- 原始 KB 只应有一份，位于共享 Skill store 的 `{SKILL_PATH}/variants/<commit>`。
+- Claude Code / OpenCode 入口可以是目录链接或 junction，目标仍是 `{SKILL_PATH}`。
+- Codex / VS Code Copilot 入口应是轻量 adapter，调用 `{SKILL_PATH}/impl.py`，不要复制 `variants/`。
+- 不要手写或依赖引擎源码目录内的 `KnowledgeBase`；需要确认路径时运行 `preflight`。
+- Windows 控制台可能不是 UTF-8，命令输出必须按 JSON 解析，不要要求生成器输出非 ASCII 状态符号。
 
 ## 示例对话
 

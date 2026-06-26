@@ -131,3 +131,63 @@ def test_query_audit_can_record_multiple_steps_for_one_trace_and_run(tmp_path):
     assert [step[2] for step in steps] == ["search_classes", "source_slice"]
     assert run == ("ok", 2)
     assert "SOURCE_BODY_SHOULD_NOT_BE_STORED" not in all_text
+
+
+def test_query_audit_report_classifies_failures_and_broad_queries(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    context = {
+        "data_trust": "fresh",
+        "branch": "default",
+        "source": "F:/Project/Plugins/FeatureDemo",
+        "commit": "9a52689",
+        "dirty": False,
+    }
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="feature-demo",
+        command="search_functions",
+        args=["FeatureDemo", "80"],
+        context=context,
+        result={"found_count": 80, "results": [{} for _ in range(80)]},
+    )
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="feature-demo",
+        command="get_function_implementation",
+        args=["GetExtensionTools", "FFeatureDemoModule", "FeatureDemo"],
+        context=context,
+        error="Function GetExtensionTools not found",
+    )
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="feature-demo",
+        command="get_function_implementation",
+        args=["Init", "FFeatureDemoToolkit", "FeatureDemo"],
+        context=context,
+        error="Implementation file not found for Init",
+    )
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="feature-demo",
+        command="source_slice",
+        args=["Source/FeatureDemo/Public/Command/FeatureCommandFactory.h", "1"],
+        context=context,
+        result={"file": "Source/FeatureDemo/Public/Command/FeatureCommandFactory.h"},
+    )
+
+    audit = QueryAudit.for_skill(skill_dir)
+    try:
+        report = audit.report("feature-demo", 20, broad_result_threshold=40)
+    finally:
+        audit.close()
+
+    assert report["schema"] == "query-audit-report/v1"
+    assert report["meta"]["commit"] == "9a52689"
+    assert report["counts"]["business_queries"] == 4
+    assert report["counts"]["failure_events"] == 2
+    assert report["counts"]["broad_search_events"] == 1
+    assert report["failures"][0]["type"] == "semantic_miss"
+    assert report["failures"][1]["type"] == "path_resolution_failure"
+    assert report["broad_searches"][0]["command"] == "search_functions"
+    assert report["acceptance"]["status"] == "FAIL"
+    assert report["acceptance"]["static_only"] is True

@@ -98,8 +98,7 @@ print(state.completed_stages)  # ['discover', 'extract', ...]
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **LayeredQueryInterface** | `layered_query.py` | Progressive disclosure queries (summary → details → source) |
-| **ResultCache** | `result_cache.py` | LRU caching and observation masking |
+| **Static command runtime** | generated `impl.py` | Explicit commands such as `query_class_info`, `source_slice`, `search_files`, `resolve_seed` |
 | **TokenBudget** | `token_budget.py` | Token budget tracking per category |
 
 ---
@@ -116,23 +115,24 @@ print(state.completed_stages)  # ['discover', 'extract', ...]
 │   ├── build/                # build outputs
 │   └── generate/             # skill_generated.txt
 ├── .pipeline_state           # Pipeline state (hidden file)
-└── KnowledgeBase/            # Final outputs
-    ├── global_index/
-    │   ├── index.db              # SQLite: fast queries
-    │   ├── global_index.pkl      # Pickle: complete data
-    │   └── global_index.json     # JSON: human-readable
-    └── module_graphs/
-        ├── Core.pkl              # Per-module code graphs
-        ├── Engine.pkl
-        └── ... (1757+ files)
+└── .pipeline_state           # Pipeline state (hidden file)
+
+Canonical KB output now lives under:
+C:\Users\<user>\.agents\skills\<skill-name>\variants\<commit>\
+├── global_index/
+└── module_graphs/
 ```
 
 ### Generated Skills
 ```
-~/.claude/skills/{skill-name}/
+~/.agents/skills/{skill-name}/
 ├── skill.md     # Skill definition
-└── impl.py      # Query functions (hardcoded KB_PATH)
+├── impl.py      # Query functions; KB resolved through registry.db
+├── registry.db
+└── variants/<commit>/  # single canonical KB variant
 ```
+
+Claude Code, OpenCode, Codex, and VS Code Copilot use thin adapters/links that point back to this canonical skill. Do not copy `variants/`.
 
 ---
 
@@ -141,11 +141,11 @@ print(state.completed_stages)  # ['discover', 'extract', ...]
 **Problem**: Raw queries return 1000+ tokens, causing context bloat.
 
 **Solution**: Three-tier progressive disclosure:
-1. **Summary** (~200 tokens): Key info + ref_id
-2. **Details** (~1000 tokens): Full data using ref_id
+1. **Summary** (~200 tokens): Key info + stable fields
+2. **Details** (~1000 tokens): Full data through explicit follow-up commands
 3. **Source** (~5000 tokens): Raw C++ code
 
-**Observation Masking**: Large results return first 5 + ref_id (87% token reduction).
+**Bounded outputs**: Large results return bounded slices and explicit next commands.
 
 **Token Budget**: Explicit budget tracking per category.
 
@@ -232,7 +232,7 @@ feat: add namespace detection to C++ parser
 from ue5_kb.core.config import Config
 from ue5_kb.core.global_index import GlobalIndex
 
-cfg = Config(base_path="D:/UE5Engine/KnowledgeBase")
+cfg = Config(base_path="C:/Users/<user>/.agents/skills/ue5kb-5.5.4/variants/<commit>")
 idx = GlobalIndex(cfg)
 idx.load()
 print(idx.get_statistics())

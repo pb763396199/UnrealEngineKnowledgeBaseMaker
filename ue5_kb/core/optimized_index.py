@@ -321,88 +321,64 @@ class FastQueryInterface:
 
         self._initialized = True
 
-    def query(self, question: str) -> Dict[str, Any]:
+    def query(self, command: str, target: str = "") -> Dict[str, Any]:
         """
-        自然语言查询接口
+        确定性静态查询入口。
 
-        Args:
-            question: 自然语言问题
-
-        Returns:
-            查询结果
+        支持的命令:
+            statistics
+            module:<ModuleName>
+            dependents:<ModuleName>
+            search_modules:<Keyword>
         """
-        question_lower = question.lower()
+        raw = (command or "").strip()
+        if target:
+            raw = f"{raw}:{target.strip()}"
+        supported = ["statistics", "module:<name>", "dependents:<name>", "search_modules:<keyword>"]
+        if not raw or any(ch.isspace() for ch in raw):
+            return {"error": "unsupported_static_query", "supported_commands": supported, "query": command}
 
-        # 快速路径 - 常见查询模式
-        if 'massentity' in question_lower:
-            return self._query_mass_entity()
-        elif '有多少' in question or '统计' in question:
+        query_command, _, query_target = raw.partition(":")
+        query_command = query_command.lower()
+        if query_command == "statistics" and not query_target:
             return self._query_statistics()
-        elif '依赖' in question:
-            return self._query_dependencies(question)
-        elif '搜索' in question or '查找' in question:
-            return self._search(question)
+        if query_command == "module" and query_target:
+            return self._query_module(query_target)
+        if query_command == "dependents" and query_target:
+            return self._query_dependents(query_target)
+        if query_command == "search_modules" and query_target:
+            return self._search_modules(query_target)
 
-        return {"error": "无法理解的问题", "query": question}
-
-    def _query_mass_entity(self) -> Dict[str, Any]:
-        """MassEntity 专用查询（预计算结果）"""
-        # 这里可以缓存常用查询结果
-        me = self.index.get_module('MassEntity')
-        deps = self.index.get_dependents('MassEntity')
-
-        # 获取相关模块
-        mass_modules = self.index.search_modules('Mass')
-
-        return {
-            "module": "MassEntity",
-            "info": me,
-            "dependents": deps[:20],  # 限制返回数量
-            "related_modules": mass_modules,
-            "summary": "MassEntity 是 UE5 的 ECS (Entity Component System) 实现，用于高效管理大量游戏对象。"
-        }
+        return {"error": "unsupported_static_query", "supported_commands": supported, "query": command}
 
     def _query_statistics(self) -> Dict[str, Any]:
         """统计查询（优化版）"""
         return self.index.get_statistics()
 
-    def _query_dependencies(self, question: str) -> Dict[str, Any]:
-        """依赖查询"""
-        # 提取模块名
-        import re
-        for module in self.index.get_all_module_names():
-            if module.lower() in question.lower():
-                info = self.index.get_module(module)
-                deps = self.index.get_dependents(module)
-                return {
-                    "module": module,
-                    "info": info,
-                    "dependencies": info.get('dependencies', []),
-                    "dependents": deps[:20]
-                }
+    def _query_module(self, module_name: str) -> Dict[str, Any]:
+        """按精确模块名查询模块信息。"""
+        info = self.index.get_module(module_name)
+        if not info:
+            return {"error": "module_not_found", "module": module_name}
+        return {"module": module_name, "info": info, "dependencies": info.get("dependencies", [])}
 
-        return {"error": "无法识别模块名"}
+    def _query_dependents(self, module_name: str) -> Dict[str, Any]:
+        """按精确模块名查询反向依赖。"""
+        info = self.index.get_module(module_name)
+        if not info:
+            return {"error": "module_not_found", "module": module_name}
+        return {"module": module_name, "info": info, "dependents": self.index.get_dependents(module_name)[:50]}
 
-    def _search(self, question: str) -> Dict[str, Any]:
-        """搜索模块"""
-        # 提取关键词
-        keywords = re.findall(r'[A-Z][a-zA-Z0-9]*', question)
-
-        results = []
-        for keyword in keywords:
-            results.extend(self.index.search_modules(keyword))
-
-        return {
-            "query": question,
-            "results": list(set(results))[:50]
-        }
+    def _search_modules(self, keyword: str) -> Dict[str, Any]:
+        """按显式关键词搜索模块名。"""
+        return {"query": keyword, "results": self.index.search_modules(keyword)[:50]}
 
 
 # 便捷函数
-def query_kb_fast(question: str, config_path: str = None) -> Dict[str, Any]:
+def query_kb_fast(command: str, config_path: str = None) -> Dict[str, Any]:
     """快速查询接口（单例模式）"""
     interface = FastQueryInterface(config_path=config_path)
-    return interface.query(question)
+    return interface.query(command)
 
 
 def migrate_to_sqlite(base_path: str = None):
@@ -452,7 +428,7 @@ if __name__ == "__main__":
     init_time = time.time() - start
 
     start = time.time()
-    result = interface.query("MassEntity 架构")
+    result = interface.query("module:MassEntity")
     query_time = time.time() - start
 
     print(f"\n优化版性能:")

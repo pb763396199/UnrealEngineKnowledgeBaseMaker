@@ -261,6 +261,43 @@ class TestBranchManagerRegisterReuse:
         # 应该不是 reused（目录缺失走新导入路径）
         assert result.get("reused") is not True, f"Should not reuse when dir missing: {result}"
 
+    def test_register_promotes_temp_variant_without_copy_source_leftover(self, tmp_path):
+        """register 应直接提升 variants 下的临时构建目录，避免保留第二份 KB。"""
+        from ue5_kb.branch_manager import BranchManager
+
+        skill_dir = tmp_path / "skill_promote"
+        variants_dir = skill_dir / "variants"
+        variants_dir.mkdir(parents=True)
+        _make_registry(skill_dir / "registry.db", str(variants_dir))
+
+        temp_kb = variants_dir / "_build_tmp_init"
+        (temp_kb / "global_index").mkdir(parents=True)
+        (temp_kb / "global_index" / "index.db").write_bytes(b"db")
+
+        source_dir = tmp_path / "engine_src"
+        source_dir.mkdir()
+
+        import unittest.mock as mock
+        mock_vcs = mock.MagicMock()
+        mock_vcs.get_head_id.return_value = "abcdef1234567890"
+        mock_vcs.get_type.return_value = "git"
+        mock_vcs.is_dirty.return_value = False
+        mock_vcs.get_worktree_fingerprint.return_value = None
+
+        with mock.patch("ue5_kb.branch_manager.VCSAdapter.detect", return_value=mock_vcs):
+            result = BranchManager(skill_dir).register(
+                branch="default",
+                source=str(source_dir),
+                kb_path=str(temp_kb),
+                force=True,
+            )
+
+        assert result.get("status") == "ok", result
+        final_kb = Path(result["kb_path"])
+        assert final_kb == variants_dir / "abcdef1"
+        assert (final_kb / "global_index" / "index.db").exists()
+        assert not temp_kb.exists()
+
 
 class TestBranchManagerUpdateReuse:
     def test_force_update_replaces_existing_kb_dir_without_source_pollution(self, tmp_path):
@@ -335,6 +372,366 @@ class TestBranchManagerUpdateReuse:
         ).fetchone()
         conn.close()
         assert active == ("DEV",)
+
+
+class TestCanonicalSkillStoreDefaults:
+    def test_init_engine_mode_defaults_kb_under_agents_skill_store(self, tmp_path, monkeypatch):
+        """CLI init 默认应构建到共享 skill store 的 variants 临时目录。"""
+        from ue5_kb import cli as cli_module
+
+        engine = tmp_path / "UE_5.5"
+        build_dir = engine / "Engine" / "Build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "Build.version").write_text(
+            json.dumps({"MajorVersion": 5, "MinorVersion": 5, "PatchVersion": 4}),
+            encoding="utf-8",
+        )
+
+        skill_root = tmp_path / "skills"
+        monkeypatch.setenv("UE5_KB_SKILL_ROOT", str(skill_root))
+        captured = {}
+
+        class FakeCoordinator:
+            def __init__(self, base_path, kb_path=None, **kwargs):
+                captured["base_path"] = Path(base_path)
+                captured["kb_path"] = Path(kb_path)
+
+            def run_all(self, **kwargs):
+                captured["kwargs"] = kwargs
+                return {
+                    "generate": {
+                        "skill_path": str(skill_root / "ue5kb-5.5.4"),
+                        "kb_path": str(skill_root / "ue5kb-5.5.4" / "variants" / "abcdef1"),
+                    }
+                }
+
+        monkeypatch.setattr("ue5_kb.pipeline.coordinator.PipelineCoordinator", FakeCoordinator)
+
+        cli_module.init_engine_mode(
+            engine,
+            kb_path=None,
+            skill_path=None,
+            skill_root=None,
+            skill_name=None,
+            force=False,
+            stage=None,
+            workers=1,
+            verbose=False,
+        )
+
+        assert captured["kb_path"] == skill_root / "ue5kb-5.5.4" / "variants" / "_build_tmp_init"
+        assert captured["kb_path"] != engine / "KnowledgeBase"
+        assert captured["kwargs"]["skill_path"] == str(skill_root / "ue5kb-5.5.4")
+
+    def test_init_plugin_mode_defaults_kb_under_agents_skill_store(self, tmp_path, monkeypatch):
+        """插件模式 init 默认也应构建到共享 skill store。"""
+        from ue5_kb import cli as cli_module
+
+        plugin = tmp_path / "Plugins" / "MyPlugin"
+        plugin.mkdir(parents=True)
+        (plugin / "MyPlugin.uplugin").write_text(
+            json.dumps({"VersionName": "1.2.3"}),
+            encoding="utf-8",
+        )
+
+        skill_root = tmp_path / "skills"
+        monkeypatch.setenv("UE5_KB_SKILL_ROOT", str(skill_root))
+        captured = {}
+
+        class FakeCoordinator:
+            def __init__(self, base_path, is_plugin=False, plugin_name=None, kb_path=None, **kwargs):
+                captured["base_path"] = Path(base_path)
+                captured["is_plugin"] = is_plugin
+                captured["plugin_name"] = plugin_name
+                captured["kb_path"] = Path(kb_path)
+
+            def run_all(self, **kwargs):
+                captured["kwargs"] = kwargs
+                return {
+                    "generate": {
+                        "skill_path": str(skill_root / "MyPlugin-kb"),
+                        "kb_path": str(skill_root / "MyPlugin-kb" / "variants" / "abcdef1"),
+                    }
+                }
+
+        monkeypatch.setattr("ue5_kb.pipeline.coordinator.PipelineCoordinator", FakeCoordinator)
+
+        cli_module.init_plugin_mode(
+            plugin,
+            kb_path=None,
+            skill_path=None,
+            skill_root=None,
+            skill_name=None,
+            force=False,
+            stage=None,
+            workers=1,
+            verbose=False,
+        )
+
+        assert captured["is_plugin"] is True
+        assert captured["plugin_name"] == "MyPlugin"
+        assert captured["kb_path"] == skill_root / "MyPlugin-kb" / "variants" / "_build_tmp_init"
+        assert captured["kb_path"] != plugin / "KnowledgeBase"
+        assert captured["kwargs"]["skill_path"] == str(skill_root / "MyPlugin-kb")
+
+    def test_generate_stage_moves_pipeline_state_to_promoted_kb_path(self, tmp_path):
+        """generate 返回最终 KB 后，PipelineCoordinator 状态应写入最终目录。"""
+        from ue5_kb.pipeline.coordinator import PipelineCoordinator
+
+        base_path = tmp_path / "source"
+        base_path.mkdir()
+        temp_kb = tmp_path / "skill" / "variants" / "_build_tmp_init"
+        final_kb = tmp_path / "skill" / "variants" / "abcdef1"
+        temp_kb.mkdir(parents=True)
+        final_kb.mkdir(parents=True)
+
+        class FakeGenerateStage:
+            stage_name = "generate"
+
+            def is_completed(self):
+                return False
+
+            def run(self, **kwargs):
+                return {
+                    "skill_name": "Fake-kb",
+                    "skill_path": str(tmp_path / "skill"),
+                    "kb_path": str(final_kb),
+                }
+
+        coord = PipelineCoordinator(base_path, kb_path=temp_kb)
+        coord.stages["generate"] = FakeGenerateStage()
+
+        result = coord.run_stage("generate", force=True)
+
+        assert result["kb_path"] == str(final_kb)
+        assert (final_kb / ".pipeline_state").exists()
+        assert not (temp_kb / ".pipeline_state").exists()
+
+    def test_project_resolver_scans_agents_skill_root_by_default(self, tmp_path, monkeypatch):
+        """uproject resolver 默认扫描 canonical .agents-style skill root。"""
+        from ue5_kb.project_resolver import scan_kb_skills
+
+        skill_root = tmp_path / "agents" / "skills"
+        skill = skill_root / "ue5kb-5.5.4"
+        skill.mkdir(parents=True)
+        (skill / "skill.md").write_text("# skill", encoding="utf-8")
+        (skill / "impl.py").write_text("", encoding="utf-8")
+        monkeypatch.setenv("UE5_KB_SKILL_ROOT", str(skill_root))
+
+        assert scan_kb_skills() == {"5.5.4": skill}
+
+    def test_skill_name_validation_rejects_path_escape_and_yaml_breakers(self, tmp_path):
+        """skill_name 进入路径和 adapter frontmatter 前必须被约束为单一路径段。"""
+        from ue5_kb.skill_store import get_skill_path, install_provider_adapters, validate_skill_name
+
+        assert validate_skill_name("AesWorld-kb") == "AesWorld-kb"
+        assert validate_skill_name("ue5kb-5.5.4") == "ue5kb-5.5.4"
+
+        invalid_names = [
+            "..",
+            "AesWorld/KB",
+            r"AesWorld\KB",
+            "AesWorld..KB",
+            "AesWorld\nKB",
+            "AesWorld:KB",
+        ]
+        for name in invalid_names:
+            with pytest.raises(ValueError):
+                get_skill_path(name, tmp_path / "skills")
+            with pytest.raises(ValueError):
+                install_provider_adapters(name, tmp_path / "skills" / "AesWorld-kb")
+
+    def test_legacy_optimized_index_query_is_static_command_only(self):
+        """optimized_index 的旧 query 入口不得继续暴露自然语言解析承诺。"""
+        source = Path("ue5_kb/core/optimized_index.py").read_text(encoding="utf-8")
+        assert "自然语言查询接口" not in source
+        assert "自然语言问题" not in source
+        assert "MassEntity 架构" not in source
+        assert "unsupported_static_query" in source
+        assert "module:<name>" in source
+
+    def test_branch_update_all_help_defaults_to_agents_skill_store(self):
+        """branch update-all 不能带项目专用默认路径，也不能退回 provider 私有 .claude 目录。"""
+        from click.testing import CliRunner
+        from ue5_kb.cli import cli
+
+        result = CliRunner().invoke(cli, ["branch", "update-all", "--help"])
+
+        assert result.exit_code == 0
+        assert ".agents" in result.output
+        assert "<SkillName>-kb" in result.output
+        assert "AesWorld-kb" not in result.output
+        assert ".claude" not in result.output
+
+    def test_update_without_registry_does_not_fallback_to_source_knowledgebase(self, tmp_path, monkeypatch):
+        """update 默认路径解析失败时必须显式失败，不能写回 source/KnowledgeBase。"""
+        from click.testing import CliRunner
+        from ue5_kb.cli import cli
+
+        plugin = tmp_path / "Plugins" / "MyPlugin"
+        plugin.mkdir(parents=True)
+        (plugin / "MyPlugin.uplugin").write_text(json.dumps({"VersionName": "1.0"}), encoding="utf-8")
+        monkeypatch.setenv("UE5_KB_SKILL_ROOT", str(tmp_path / "skills"))
+
+        def fail_update_stage(*args, **kwargs):
+            raise AssertionError("UpdateStage should not be created when registry resolution fails")
+
+        monkeypatch.setattr("ue5_kb.pipeline.update.UpdateStage", fail_update_stage)
+
+        result = CliRunner().invoke(cli, ["update", "--plugin-path", str(plugin), "--check"])
+
+        assert result.exit_code == 0
+        assert "无法从 canonical Skill registry 解析 KB 路径" in result.output
+        assert "不会写入源码树 KnowledgeBase" in result.output
+        assert "--kb-path" in result.output
+        assert not (plugin / "KnowledgeBase").exists()
+
+    def test_pipeline_run_defaults_kb_under_agents_skill_store(self, tmp_path, monkeypatch):
+        """pipeline run 入口也必须默认写入共享 skill store，而不是 Engine/KnowledgeBase。"""
+        from click.testing import CliRunner
+        from ue5_kb.cli import cli
+
+        engine = tmp_path / "UE_5.5"
+        build_dir = engine / "Engine" / "Build"
+        build_dir.mkdir(parents=True)
+        (build_dir / "Build.version").write_text(
+            '{"MajorVersion":5,"MinorVersion":5,"PatchVersion":4}',
+            encoding="utf-8",
+        )
+        skill_root = tmp_path / "agents" / "skills"
+        monkeypatch.setenv("UE5_KB_SKILL_ROOT", str(skill_root))
+
+        captured = {}
+
+        class FakeCoordinator:
+            def __init__(self, base_path, kb_path=None, **kwargs):
+                captured["base_path"] = Path(base_path)
+                captured["kb_path"] = Path(kb_path)
+
+            def run_all(self, **kwargs):
+                captured["kwargs"] = kwargs
+                return {
+                    "generate": {
+                        "skill_name": kwargs["skill_name"],
+                        "skill_path": kwargs["skill_path"],
+                        "kb_path": str(skill_root / "ue5kb-5.5.4" / "variants" / "abcdef1"),
+                    }
+                }
+
+        monkeypatch.setattr("ue5_kb.pipeline.coordinator.PipelineCoordinator", FakeCoordinator)
+
+        result = CliRunner().invoke(cli, ["pipeline", "run", "--engine-path", str(engine)])
+
+        assert result.exit_code == 0
+        assert captured["kb_path"] == skill_root / "ue5kb-5.5.4" / "variants" / "_build_tmp_pipeline"
+        assert captured["kb_path"] != engine / "KnowledgeBase"
+        assert captured["kwargs"]["skill_name"] == "ue5kb-5.5.4"
+        assert captured["kwargs"]["skill_path"] == str(skill_root / "ue5kb-5.5.4")
+
+    def test_force_adapter_reuses_existing_resolved_link(self, tmp_path, monkeypatch):
+        """force 安装 adapter 时，已指向 canonical skill 的 junction/link 不应被备份。"""
+        import ue5_kb.skill_store as skill_store
+
+        source = tmp_path / "canonical"
+        destination = tmp_path / "provider" / "Skill"
+        source.mkdir()
+        destination.mkdir(parents=True)
+
+        original_resolve = Path.resolve
+
+        def fake_resolve(path_self, *args, **kwargs):
+            if path_self == destination:
+                return original_resolve(source, *args, **kwargs)
+            return original_resolve(path_self, *args, **kwargs)
+
+        def fail_backup(path):
+            raise AssertionError(f"should not backup existing resolved adapter: {path}")
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        monkeypatch.setattr(skill_store, "_backup_existing_path", fail_backup)
+
+        result = skill_store.create_directory_link(source, destination, force=True)
+
+        assert result == {"status": "ok", "action": "exists", "path": str(destination)}
+
+    def test_force_directory_link_restores_backup_when_link_creation_fails(self, tmp_path, monkeypatch):
+        """force 安装目录 adapter 失败时，必须恢复原 provider 目录。"""
+        import ue5_kb.skill_store as skill_store
+
+        source = tmp_path / "canonical"
+        destination = tmp_path / "provider" / "Skill"
+        source.mkdir()
+        destination.mkdir(parents=True)
+        marker = destination / "original.txt"
+        marker.write_text("keep me", encoding="utf-8")
+
+        def fail_symlink(*args, **kwargs):
+            raise OSError("symlink disabled")
+
+        class FailedProcess:
+            returncode = 1
+            stderr = "junction disabled"
+            stdout = ""
+
+        monkeypatch.setattr(skill_store.os, "symlink", fail_symlink)
+        monkeypatch.setattr(skill_store.subprocess, "run", lambda *args, **kwargs: FailedProcess())
+
+        result = skill_store.create_directory_link(source, destination, force=True)
+
+        assert result["status"] == "skipped"
+        assert result["reason"].startswith("link_failed")
+        assert result["restored"] == "True"
+        assert destination.exists()
+        assert (destination / "original.txt").read_text(encoding="utf-8") == "keep me"
+
+    def test_force_file_adapter_restores_backup_when_write_fails(self, tmp_path, monkeypatch):
+        """force 写入文件 adapter 失败时，必须恢复原文件。"""
+        import ue5_kb.skill_store as skill_store
+
+        target = tmp_path / "provider" / "Skill.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("original", encoding="utf-8")
+
+        original_write_text = Path.write_text
+
+        def fail_replacement_write(path_self, *args, **kwargs):
+            if path_self.name == ".Skill.md.tmp":
+                raise OSError("disk full")
+            return original_write_text(path_self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", fail_replacement_write)
+
+        result = skill_store.write_text_if_safe(target, "replacement", force=True)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "write_failed"
+        assert result["restored"] == "True"
+        assert target.read_text(encoding="utf-8") == "original"
+
+    def test_force_file_adapter_restores_backup_after_partial_replace_failure(self, tmp_path, monkeypatch):
+        """原子替换阶段失败且目标出现半写文件时，也必须恢复原 adapter。"""
+        import ue5_kb.skill_store as skill_store
+
+        target = tmp_path / "provider" / "Skill.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("original", encoding="utf-8")
+
+        original_replace = Path.replace
+
+        def fail_replace_with_partial(path_self, target_path, *args, **kwargs):
+            if path_self.name == ".Skill.md.tmp":
+                Path(target_path).write_text("partial", encoding="utf-8")
+                raise OSError("replace interrupted")
+            return original_replace(path_self, target_path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "replace", fail_replace_with_partial)
+
+        result = skill_store.write_text_if_safe(target, "replacement", force=True)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "write_failed"
+        assert result["restored"] == "True"
+        assert target.read_text(encoding="utf-8") == "original"
 
 
 # ---------------------------------------------------------------------------

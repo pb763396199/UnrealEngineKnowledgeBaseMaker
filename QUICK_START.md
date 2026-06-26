@@ -26,9 +26,11 @@ ue5kb pipeline run --engine-path .
 ```
 
 **输出位置**：
-- 中间数据：`./data/` （JSON 格式，可读）
-- 最终知识库：`./KnowledgeBase/`
-- Claude Skill：`~/.claude/skills/ue5kb-{version}/`
+- 中间数据：`~/.agents/skills/ue5kb-{version}/variants/<commit>/data/`（JSON 格式，可读）
+- 原始知识库：`~/.agents/skills/ue5kb-{version}/variants/<commit>/`
+- 共享 Skill：`~/.agents/skills/ue5kb-{version}/`
+- Claude Code / OpenCode：目录链接到共享 Skill
+- Codex / VS Code Copilot：轻量 adapter 调用共享 `impl.py`
 
 ---
 
@@ -87,7 +89,7 @@ ue5kb pipeline status --engine-path "D:\UE5"
 discover   ✓      2026-02-03   total_count: 1757
 extract    ✓      2026-02-03   success_count: 1755
 analyze    ✓      2026-02-03   analyzed_count: 1600
-build      ✓      2026-02-03   kb_path: D:\UE5\KnowledgeBase
+  build      OK     2026-02-03   kb_path: C:\Users\<you>\.agents\skills\ue5kb-5.1.500\variants\<commit>
 generate   ✓      2026-02-03   skill_name: ue5kb-5.1.500
 ```
 
@@ -134,7 +136,7 @@ ue5kb pipeline run --engine-path .
 
 ## 🎯 使用生成的 Skill
 
-Skill 自动安装在 `~/.claude/skills/ue5kb-{version}/`
+Skill 自动安装在 `~/.agents/skills/ue5kb-{version}/`。其他 Agent 入口复用这份 Skill，不复制 `variants/`。
 
 ### 基础查询（原有方法）
 
@@ -152,31 +154,25 @@ query_class_info('AActor')
 query_function_info('BeginPlay')
 ```
 
-### 优化查询（新方法，推荐！）
+### 优化查询（当前推荐）
 
-```python
-# 分层查询类信息
-# 1. 先用 summary（~150 tokens）
-summary = query_class_layered('AActor', 'summary')
-# 返回: name, module, parent, method_count, key_methods, ref_id
+```powershell
+# 1. 先预检，确认 KB/source/indices 可信
+py "<skill>\impl.py" preflight
 
-# 2. 需要详情时（~800 tokens）
-details = query_class_layered(summary['ref_id'], 'details')
-# 返回: 完整方法列表, properties, file_path, line_number
+# 2. 先取结构化摘要和文件行号锚点
+py "<skill>\impl.py" query_class_info AActor
+py "<skill>\impl.py" query_function_info BeginPlay
 
-# 3. 需要源码时（~2000+ tokens）
-source = query_class_layered(details['source_ref'], 'source')
-# 返回: 完整源代码
+# 3. 需要源码时再读取有界切片
+py "<skill>\impl.py" source_slice Engine/Source/Runtime/Engine/Classes/GameFramework/Actor.h 234 context 8 40 12000
 
-# 分层查询函数
-func_summary = query_function_layered('BeginPlay', 'summary')
-# ~50 tokens
-
-func_details = query_function_layered('BeginPlay', 'details')
-# ~300 tokens
+# 4. 调用/引用链使用静态图命令
+py "<skill>\impl.py" resolve_seed AActor 10
+py "<skill>\impl.py" symbol_evidence_bundle AActor 20 all
 ```
 
-**Token 节省**: 使用 `summary` 模式可节省 **70-85%** Token！
+**Token 节省**: 先用摘要命令，再用 `source_slice` 精确读取上下文，避免一次性返回整文件或大结果。
 
 ### 监控 Token 使用
 
@@ -204,8 +200,8 @@ ue5kb pipeline run --engine-path .
 # 3. 等待完成（约 30-60 分钟，取决于模块数）
 
 # 4. 验证生成
-ls KnowledgeBase/
-ls ~/.claude/skills/
+ls ~/.agents/skills/ue5kb-5.1.0/
+ls ~/.agents/skills/ue5kb-5.1.0/variants/
 ```
 
 ### 任务 2：修改代码后更新
@@ -252,38 +248,33 @@ ue5kb pipeline run --engine-path .
 ## 📁 输出结构
 
 ```
-D:\Unreal Engine\UE5.1\
-├── data/                          # Pipeline 中间数据（新）
-│   ├── discover/
-│   │   └── modules.json           # 发现的模块列表
-│   ├── extract/
-│   │   ├── Core/
-│   │   │   └── dependencies.json  # 依赖关系
-│   │   └── ...
-│   ├── analyze/
-│   │   ├── Core/
-│   │   │   └── code_graph.json    # 代码结构
-│   │   └── ...
-│   └── partitions/                # 分区结果（如果使用）
-│       ├── runtime.json
-│       └── ...
-├── .pipeline_state                # Pipeline 状态跟踪（新）
-└── KnowledgeBase/                 # 最终知识库
-    ├── config.yaml
-    ├── global_index/
-    │   ├── index.db               # SQLite 索引
-    │   ├── global_index.pkl       # Pickle 备份
-    │   └── function_index.db      # 函数索引
-    └── module_graphs/
-        ├── Core.pkl
-        ├── Engine.pkl
-        └── ...
-
-~/.claude/skills/
-└── ue5kb-5.1.500/                 # 生成的 Skill
+~/.agents/skills/
+└── ue5kb-5.1.500/                 # 共享 Skill 与唯一原始 KB
     ├── skill.md
-    └── impl.py
+    ├── impl.py
+    ├── registry.db
+    ├── runtime/
+    └── variants/<commit>/         # 默认最终知识库
+        ├── .pipeline_state
+        ├── data/                  # Pipeline 中间数据
+        │   ├── discover/
+        │   ├── extract/
+        │   ├── analyze/
+        │   └── partitions/
+        ├── global_index/
+        │   ├── index.db           # SQLite 索引
+        │   ├── class_index.db
+        │   ├── function_index.db
+        │   ├── enum_index.db
+        │   ├── symbol_reference_index.db
+        │   └── files_fts.db
+        └── module_graphs/
+            ├── Core.pkl
+            ├── Engine.pkl
+            └── ...
 ```
+
+源码树下的 `KnowledgeBase/` 是旧布局或显式 `--kb-path` 自定义输出；默认构建不会再复制一份到引擎/插件目录。
 
 ---
 
@@ -308,13 +299,13 @@ D:\Unreal Engine\UE5.1\
 
 ### Q: 如何节省 Token？
 
-**A**: 使用新的分层查询：
-```python
-# ❌ 旧方法（~1000 tokens）
-result = query_class_info('AActor')
+**A**: 使用显式静态命令和有界输出：
+```powershell
+# 先取结构化摘要
+py "<skill>\impl.py" query_class_info AActor
 
-# ✅ 新方法（~150 tokens，节省 85%）
-summary = query_class_layered('AActor', 'summary')
+# 只对需要的文件行号读取源码切片
+py "<skill>\impl.py" source_slice Engine/Source/Runtime/Engine/Classes/GameFramework/Actor.h 234 context 8 40 12000
 ```
 
 ### Q: Pipeline 失败了怎么办？
@@ -378,7 +369,7 @@ ue5kb init --plugin-path "F:\MyProject\Plugins\MyPlugin"
 cd "D:\Unreal Engine\UE5.1"
 ue5kb pipeline run --engine-path .
 
-# 等待完成，然后在 Claude Code 中使用生成的 Skill！
+# 等待完成，然后在 Claude Code / OpenCode / Codex / VS Code Copilot 中使用生成的 Skill！
 ```
 
 **版本**: v2.5.0 (Context Engineering Edition)

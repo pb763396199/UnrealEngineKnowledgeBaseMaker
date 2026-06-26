@@ -1,7 +1,7 @@
 """
 UE5 Knowledge Base Builder - CLI 接口
 
-通用工具：为任何版本的 UE5 引擎生成知识库和 Claude Skill
+通用工具：为任何版本的 UE5 引擎生成知识库和跨 Agent Skill
 """
 import click
 from pathlib import Path
@@ -24,6 +24,13 @@ def cli():
     支持双模式：
     - 引擎模式: 为整个 UE5 引擎生成知识库（1757+ 模块）
     - 插件模式: 为单个插件生成独立知识库
+
+    \b
+    默认存储策略：
+    - 原始 KB 只保存在共享 Skill store: ~/.agents/skills/<skill>/variants/<commit>
+    - Claude Code / OpenCode 使用目录链接指向共享 Skill，避免复制 KB
+    - Codex / VS Code Copilot 使用轻量 adapter 文件指向共享 impl.py
+    - 不再默认写入引擎或插件源码目录下的 KnowledgeBase
 
     \b
     v2.15.0 新特性：
@@ -94,9 +101,11 @@ def cli():
 @click.option('--plugin-path', type=click.Path(exists=True),
               help='插件路径（与 --engine-path 二选一，未指定时自动检测）')
 @click.option('--kb-path', type=click.Path(),
-              help='知识库保存路径 (默认: 引擎/插件根目录/KnowledgeBase)')
+              help='知识库保存路径 (默认: ~/.agents/skills/<skill>/variants/_build_tmp_init；generate 后提升为 variants/<commit>)')
 @click.option('--skill-path', type=click.Path(),
-              help='Skill 保存路径 (默认: ~/.claude/skills/ue5kb-{版本})')
+              help='Skill 保存路径 (默认: ~/.agents/skills/ue5kb-{版本} 或 ~/.agents/skills/{插件名}-kb)')
+@click.option('--skill-root', type=click.Path(),
+              help='共享 Skill 根目录 (默认: ~/.agents/skills，可用 UE5_KB_SKILL_ROOT 覆盖)')
 @click.option('--skill-name', type=str, default=None,
               help='Skill 名称 (默认: ue5kb-{版本} 或 {插件名}-kb)')
 @click.option('--force', is_flag=True,
@@ -108,7 +117,7 @@ def cli():
 @click.option('--verbose', '-v', is_flag=True,
               help='显示详细输出（用于调试）')
 @click.pass_context
-def init(ctx, engine_path, plugin_path, kb_path, skill_path, skill_name, force, stage, workers, verbose):
+def init(ctx, engine_path, plugin_path, kb_path, skill_path, skill_root, skill_name, force, stage, workers, verbose):
     """初始化并生成知识库和 Skill
 
     \b
@@ -116,6 +125,8 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, skill_name, force, 
     - CPP 文件索引：知识库现在包含函数的实现文件位置（.cpp）
     - Skill 新增 get_function_implementation 命令，可直接获取函数实现代码
     - 自动检测：在引擎/插件目录直接运行 `ue5kb init`，无需指定路径
+    - 共享 Skill store：默认写入 ~/.agents/skills，并为 Claude Code、OpenCode、Codex、VS Code Copilot 安装 adapter
+    - 单份原始 KB：默认只保留 registry 指向的 variants/<commit>，不要依赖旧 KnowledgeBase 路径
     - 并行加速：多进程处理，4-8x 性能提升
     - 多进度条：实时显示各 worker 状态
     - 性能监控：各阶段耗时统计
@@ -134,6 +145,12 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, skill_name, force, 
     3. 插件模式（--plugin-path）
        为单个插件生成独立知识库
        示例: ue5kb init --plugin-path "F:\\MyProject\\Plugins\\MyPlugin"
+
+    \b
+    4. 共享 Skill/adapter 路径
+       默认原始 KB: %USERPROFILE%\\.agents\\skills\\<skill>\\variants\\<commit>
+       Claude Code/OpenCode: 链接到共享 Skill
+       Codex/Copilot: 轻量说明文件调用共享 impl.py
 
     \b
     高级选项：
@@ -156,7 +173,7 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, skill_name, force, 
     \b
     输出内容：
     - 知识库：包含模块索引和代码图谱
-    - Claude Skill：自动生成查询接口
+    - 跨 Agent Skill：自动生成查询接口，并安装 provider adapter
 
     \b
     Pipeline 阶段：
@@ -190,7 +207,7 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, skill_name, force, 
 
         # 显示检测结果
         console.print("\n[bold cyan]UE5 Knowledge Base Builder[/bold cyan]")
-        console.print("为任何版本的 UE5 引擎生成知识库和 Claude Skill\n")
+        console.print("为任何版本的 UE5 引擎生成知识库和跨 Agent Skill\n")
         console.print("[bold]自动检测结果:[/bold]\n")
 
         mode_display = {
@@ -216,13 +233,13 @@ def init(ctx, engine_path, plugin_path, kb_path, skill_path, skill_name, force, 
     # 判断模式
     if plugin_path:
         # 插件模式
-        init_plugin_mode(plugin_path, kb_path, skill_path, skill_name, force, stage, workers, verbose)
+        init_plugin_mode(plugin_path, kb_path, skill_path, skill_root, skill_name, force, stage, workers, verbose)
     else:
         # 引擎模式
-        init_engine_mode(engine_path, kb_path, skill_path, skill_name, force, stage, workers, verbose)
+        init_engine_mode(engine_path, kb_path, skill_path, skill_root, skill_name, force, stage, workers, verbose)
 
 
-def init_engine_mode(engine_path_str, kb_path, skill_path, skill_name, force, stage, workers, verbose=False):
+def init_engine_mode(engine_path_str, kb_path, skill_path, skill_root, skill_name, force, stage, workers, verbose=False):
     """引擎模式：为整个 UE5 引擎生成知识库（使用 Pipeline 架构）"""
     console.print("\n[bold cyan]模式: 引擎知识库生成[/bold cyan]\n")
 
@@ -235,9 +252,11 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, skill_name, force, st
     engine_version = detect_engine_version(engine_path)
     console.print(f"[green]OK[/green] 检测到引擎版本: [bold cyan]{engine_version}[/bold cyan]")
 
-    # 3. 计算默认路径
-    default_kb_path = engine_path / "KnowledgeBase"
-    kb_path = Path(kb_path) if kb_path else default_kb_path
+    # 3. 计算默认路径：默认直接构建到共享 Skill store 的 variants 临时目录
+    from ue5_kb.skill_store import get_skill_path, get_transient_kb_path
+    resolved_skill_name = skill_name or f"ue5kb-{engine_version}"
+    resolved_skill_path = Path(skill_path) if skill_path else get_skill_path(resolved_skill_name, Path(skill_root) if skill_root else None)
+    kb_path = Path(kb_path) if kb_path else get_transient_kb_path(resolved_skill_path, "init")
 
     # 4. 显示配置摘要
     console.print("\n[bold]配置摘要:[/bold]\n")
@@ -246,6 +265,8 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, skill_name, force, st
     table.add_column("值", style="yellow")
     table.add_row("引擎路径", str(engine_path))
     table.add_row("引擎版本", engine_version)
+    table.add_row("Skill 名称", resolved_skill_name)
+    table.add_row("Skill 路径", str(resolved_skill_path))
     table.add_row("知识库路径", str(kb_path))
 
     # 显示高级选项
@@ -275,38 +296,43 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, skill_name, force, st
         if stage:
             # 仅运行指定阶段
             console.print(f"运行阶段: [cyan]{stage}[/cyan]\n")
-            result = coordinator.run_stage(stage, force=force, parallel=workers, verbose=verbose, skill_name=skill_name)
+            result = coordinator.run_stage(
+                stage,
+                force=force,
+                parallel=workers,
+                verbose=verbose,
+                skill_name=resolved_skill_name,
+                skill_path=str(resolved_skill_path),
+                force_adapters=force,
+            )
             results = {stage: result}
         else:
             # 运行完整 Pipeline
-            results = coordinator.run_all(force=force, parallel=workers, verbose=verbose, skill_name=skill_name)
+            results = coordinator.run_all(
+                force=force,
+                parallel=workers,
+                verbose=verbose,
+                skill_name=resolved_skill_name,
+                skill_path=str(resolved_skill_path),
+                force_adapters=force,
+            )
 
         # 6. 显示结果
         display_pipeline_results(results)
 
-        # 8. 处理自定义 Skill 路径
-        if skill_path:
-            skill_path = Path(skill_path)
-            default_skill_dir = Path.home() / ".claude" / "skills" / f"ue5kb-{engine_version}"
-            if default_skill_dir.exists():
-                import shutil
-                if skill_path.exists():
-                    shutil.rmtree(skill_path)
-                shutil.move(str(default_skill_dir), str(skill_path))
-                console.print(f"[green]OK[/green] Skill 已移动到: {skill_path}")
-
         # 9. 完成
         console.print(f"\n[green]OK 全部完成![/green]")
         console.print(f"\n[bold]生成的文件:[/bold]")
-        console.print(f"  - 知识库: {kb_path}")
+        final_kb_path = results.get('generate', {}).get('kb_path', str(kb_path))
+        console.print(f"  - 知识库: {final_kb_path}")
 
         generate_result = results.get('generate', {})
         if 'skill_path' in generate_result:
-            skill_location = skill_path if skill_path else generate_result['skill_path']
+            skill_location = generate_result['skill_path']
             console.print(f"  - Skill:  {skill_location}")
 
         console.print(f"\n[bold cyan]Next steps:[/bold cyan]")
-        console.print(f"  使用 Claude Code 时，可以直接查询关于 UE{engine_version} 源码的问题")
+        console.print(f"  在 Claude Code / OpenCode / Codex / VS Code Copilot 中，可以查询关于 UE{engine_version} 源码的问题")
         console.print(f"  [dim]提示: 使用 'ue5kb pipeline status --engine-path \"{engine_path}\"' 查看状态[/dim]")
 
     except Exception as e:
@@ -316,7 +342,7 @@ def init_engine_mode(engine_path_str, kb_path, skill_path, skill_name, force, st
         return
 
 
-def init_plugin_mode(plugin_path_str, kb_path, skill_path, skill_name, force, stage, workers, verbose=False):
+def init_plugin_mode(plugin_path_str, kb_path, skill_path, skill_root, skill_name, force, stage, workers, verbose=False):
     """插件模式：为单个插件生成知识库（使用 Pipeline 架构）"""
     console.print("\n[bold cyan]模式: 插件知识库生成[/bold cyan]\n")
 
@@ -331,9 +357,11 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, skill_name, force, st
     if plugin_version != "unknown":
         console.print(f"[green]OK[/green] 插件版本: [bold cyan]{plugin_version}[/bold cyan]")
 
-    # 计算默认路径
-    default_kb_path = plugin_path / "KnowledgeBase"
-    kb_path = Path(kb_path) if kb_path else default_kb_path
+    # 计算默认路径：默认直接构建到共享 Skill store 的 variants 临时目录
+    from ue5_kb.skill_store import get_skill_path, get_transient_kb_path
+    resolved_skill_name = skill_name or f"{plugin_name}-kb"
+    resolved_skill_path = Path(skill_path) if skill_path else get_skill_path(resolved_skill_name, Path(skill_root) if skill_root else None)
+    kb_path = Path(kb_path) if kb_path else get_transient_kb_path(resolved_skill_path, "init")
 
     # 显示配置摘要
     console.print("\n[bold]配置摘要:[/bold]\n")
@@ -343,6 +371,8 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, skill_name, force, st
     table.add_row("插件路径", str(plugin_path))
     table.add_row("插件名称", plugin_name)
     table.add_row("插件版本", plugin_version)
+    table.add_row("Skill 名称", resolved_skill_name)
+    table.add_row("Skill 路径", str(resolved_skill_path))
     table.add_row("知识库路径", str(kb_path))
 
     if force:
@@ -370,10 +400,25 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, skill_name, force, st
 
         if stage:
             console.print(f"运行阶段: [cyan]{stage}[/cyan]\n")
-            result = coordinator.run_stage(stage, force=force, parallel=workers, verbose=verbose, skill_name=skill_name)
+            result = coordinator.run_stage(
+                stage,
+                force=force,
+                parallel=workers,
+                verbose=verbose,
+                skill_name=resolved_skill_name,
+                skill_path=str(resolved_skill_path),
+                force_adapters=force,
+            )
             results = {stage: result}
         else:
-            results = coordinator.run_all(force=force, parallel=workers, verbose=verbose, skill_name=skill_name)
+            results = coordinator.run_all(
+                force=force,
+                parallel=workers,
+                verbose=verbose,
+                skill_name=resolved_skill_name,
+                skill_path=str(resolved_skill_path),
+                force_adapters=force,
+            )
 
         # 显示结果
         display_pipeline_results(results)
@@ -381,10 +426,14 @@ def init_plugin_mode(plugin_path_str, kb_path, skill_path, skill_name, force, st
         # 完成
         console.print(f"\n[green]OK 全部完成![/green]")
         console.print(f"\n[bold]生成的文件:[/bold]")
-        console.print(f"  - 知识库: {kb_path}")
+        final_kb_path = results.get('generate', {}).get('kb_path', str(kb_path))
+        console.print(f"  - 知识库: {final_kb_path}")
+        generate_result = results.get('generate', {})
+        if 'skill_path' in generate_result:
+            console.print(f"  - Skill:  {generate_result['skill_path']}")
 
         console.print(f"\n[bold cyan]Next steps:[/bold cyan]")
-        console.print(f"  使用 Claude Code 时，可以直接查询关于 {plugin_name} 插件的问题")
+        console.print(f"  在 Claude Code / OpenCode / Codex / VS Code Copilot 中，可以查询关于 {plugin_name} 插件的问题")
 
     except Exception as e:
         console.print(f"\n[red]X Pipeline 执行失败: {e}[/red]")
@@ -455,7 +504,7 @@ def status():
 @click.option('--plugin-path', type=click.Path(exists=True),
               help='插件路径（未指定时自动检测）')
 @click.option('--kb-path', type=click.Path(),
-              help='知识库路径（默认: 引擎/插件目录下的 KnowledgeBase）')
+              help='知识库路径（默认: 现有 Skill registry 解析路径；--full 时使用 init 默认路径）')
 @click.option('--full', is_flag=True,
               help='强制完全重建（不使用增量更新）')
 @click.option('--check', is_flag=True,
@@ -483,7 +532,19 @@ def update(engine_path, plugin_path, kb_path, full, check):
         console.print("[yellow]执行完全重建...[/yellow]")
         # 调用 init 命令
         ctx = click.get_current_context()
-        ctx.invoke(init, engine_path=engine_path, plugin_path=plugin_path, kb_path=kb_path, force=True)
+        ctx.invoke(
+            init,
+            engine_path=engine_path,
+            plugin_path=plugin_path,
+            kb_path=kb_path,
+            skill_path=None,
+            skill_root=None,
+            skill_name=None,
+            force=True,
+            stage=None,
+            workers=0,
+            verbose=False,
+        )
         return
 
     # 检测路径
@@ -507,8 +568,15 @@ def update(engine_path, plugin_path, kb_path, full, check):
 
     # 运行增量更新
     from .pipeline.update import UpdateStage
-
-    kb_path = Path(kb_path) if kb_path else base_path / "KnowledgeBase"
+    if kb_path:
+        kb_path = Path(kb_path)
+    else:
+        try:
+            kb_path = _resolve_default_kb_path_for_update(base_path, is_plugin)
+        except RuntimeError as exc:
+            console.print(f"[red]{exc}[/red]")
+            console.print("[yellow]请先运行 ue5kb init 生成 canonical Skill，或显式传入 --kb-path。[/yellow]")
+            return
     updater = UpdateStage(base_path, kb_path=kb_path)
 
     console.print(f"\n[bold cyan]增量更新检查[/bold cyan]")
@@ -594,9 +662,8 @@ def branch():
 @click.option(
     '--skill-path',
     type=click.Path(),
-    default=str(Path.home() / '.claude' / 'skills' / 'AesWorld-kb'),
-    show_default=True,
-    help='Skill 目录（包含 registry.db）',
+    required=True,
+    help='Skill 目录（包含 registry.db），例如 ~/.agents/skills/<SkillName>-kb',
 )
 @click.option('--force', is_flag=True, help='强制对所有分支执行 update')
 @click.option('--check', is_flag=True, help='仅检查是否 stale，不执行构建')
@@ -671,11 +738,38 @@ def branch_update_all(skill_path, force, check, keep_old):
     )
 
 
+def _resolve_default_kb_path_for_update(base_path: Path, is_plugin: bool) -> Path:
+    """Resolve update target from the canonical skill registry."""
+    from ue5_kb.branch_manager import BranchManager
+    from ue5_kb.skill_store import get_skill_path
+
+    base_path = Path(base_path)
+    if is_plugin:
+        plugin_name, _ = detect_plugin_info(base_path)
+        skill_name = f"{plugin_name}-kb"
+    else:
+        skill_name = f"ue5kb-{detect_engine_version(base_path)}"
+
+    skill_path = get_skill_path(skill_name)
+    try:
+        return BranchManager(skill_path).resolve_kb_path()
+    except Exception as exc:
+        raise RuntimeError(
+            f"无法从 canonical Skill registry 解析 KB 路径: {skill_path}. "
+            "默认 update 不会写入源码树 KnowledgeBase。"
+        ) from exc
+
+
 def detect_engine_version(engine_path: Path) -> str:
     """从引擎路径检测版本号"""
     # 方法1: 读取 Engine/Build/Build.version 文件 (最准确)
     build_version_file = engine_path / "Engine" / "Build" / "Build.version"
-    if build_version_file.exists():
+    try:
+        build_version_exists = build_version_file.exists()
+    except OSError:
+        # 目录不可访问 (如 WinError 433 设备不存在/损坏的目录)
+        build_version_exists = False
+    if build_version_exists:
         try:
             import json
             content = build_version_file.read_text()
@@ -693,12 +787,17 @@ def detect_engine_version(engine_path: Path) -> str:
         except Exception as e:
             console.print(f"[dim]读取 Build.version 失败: {e}[/dim]")
 
-    # 方法2: 从文件夹名称解析 (如 UnrealEngine51_500 -> 5.1.500)
+    # 方法2: 从文件夹名称解析 (如 UnrealEngine51_500 -> 5.1.500, UE_5.8 -> 5.8.0)
     path_name = engine_path.name
     match = re.search(r'(\d+)\.(\d+)\.(\d+)', path_name)
     if match:
         major, minor, patch = match.groups()
         return f"{major}.{minor}.{patch}"
+    # 方法2b: 两段式版本号 (如 UE_5.8 -> 5.8.0)
+    match = re.search(r'(\d+)[_.](\d+)(?!\.\d)', path_name)
+    if match:
+        major, minor = match.groups()
+        return f"{major}.{minor}.0"
 
     # 默认返回 unknown
     return "unknown"
@@ -821,12 +920,28 @@ def pipeline_run(engine_path, force, workers):
     console.print(f"\n[bold cyan]=== Pipeline 运行 ===[/bold cyan]")
     console.print(f"引擎路径: {engine_path}")
     console.print(f"强制运行: {force}")
-    console.print(f"并行度: {workers if workers > 0 else '自动检测'}\n")
+    engine_path_obj = Path(engine_path)
+    engine_version = detect_engine_version(engine_path_obj)
+    from ue5_kb.skill_store import get_skill_path, get_transient_kb_path
+    skill_name = f"ue5kb-{engine_version}"
+    skill_path = get_skill_path(skill_name)
+    kb_path = get_transient_kb_path(skill_path, "pipeline")
 
-    coordinator = PipelineCoordinator(Path(engine_path))
+    console.print(f"并行度: {workers if workers > 0 else '自动检测'}")
+    console.print(f"Skill 路径: {skill_path}")
+    console.print(f"知识库路径: {kb_path}\n")
+
+    coordinator = PipelineCoordinator(engine_path_obj, kb_path=kb_path)
 
     try:
-        results = coordinator.run_all(force=force, parallel=workers)
+        results = coordinator.run_all(
+            force=force,
+            parallel=workers,
+            engine_version=engine_version,
+            skill_name=skill_name,
+            skill_path=str(skill_path),
+            force_adapters=force,
+        )
 
         # 显示结果摘要
         console.print(f"\n[bold green]=== Pipeline 完成 ===[/bold green]\n")

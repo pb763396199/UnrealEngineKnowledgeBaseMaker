@@ -108,7 +108,7 @@ class PipelineCoordinator:
                 # 显示阶段耗时
                 if not result.get('skipped'):
                     elapsed = self.timer.get_stage_metrics(stage_name).elapsed
-                    self.console.print(f"[cyan]✓ {stage_name} 完成 ({elapsed:.2f}s)[/cyan]")
+                    self.console.print(f"[cyan]OK {stage_name} 完成 ({elapsed:.2f}s)[/cyan]")
 
             except Exception as e:
                 self.console.print(f"\n[red][Pipeline] 错误: 阶段 '{stage_name}' 失败[/red]")
@@ -153,6 +153,12 @@ class PipelineCoordinator:
 
         try:
             result = stage.run(**kwargs)
+
+            if stage_name == 'generate' and result.get('kb_path'):
+                final_kb_path = Path(result['kb_path'])
+                if final_kb_path != self.kb_path:
+                    self.kb_path = final_kb_path
+                    self.state = PipelineState(self.base_path, kb_path=self.kb_path)
 
             # 更新状态
             self.state.mark_completed(stage_name, result)
@@ -283,7 +289,12 @@ class PipelineCoordinator:
     def _detect_engine_version(self) -> str:
         """从 Engine/Build/Build.version 读取版本"""
         build_version = self.base_path / "Engine" / "Build" / "Build.version"
-        if build_version.exists():
+        try:
+            build_version_exists = build_version.exists()
+        except OSError:
+            # 目录不可访问 (如 WinError 433 设备不存在/损坏的目录)
+            build_version_exists = False
+        if build_version_exists:
             try:
                 with open(build_version, 'r', encoding='utf-8') as f:
                     data = json.load(f)

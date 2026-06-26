@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-from ue5_kb.core.files_fts_index import FilesFtsIndex, build_files_fts_index, search_files
+from ue5_kb.core.files_fts_index import FilesFtsIndex, _attach_line_anchor, build_files_fts_index, search_files
 
 
 def _make_source_tree(root):
@@ -30,6 +30,10 @@ def test_files_fts_builds_and_searches_with_fts_or_like(tmp_path):
     assert result["found_count"] >= 1
     assert result["results"][0]["path"].startswith("Source/")
     assert "BeginPlay" in result["results"][0]["snippet"]
+    assert result["results"][0]["line_status"] == "exact"
+    assert result["results"][0]["line_start"] == 1
+    assert result["results"][0]["line_end"] == 1
+    assert result["results"][0]["match_start"] == 6
 
 
 def test_files_fts_like_fallback_when_fts_disabled(tmp_path):
@@ -44,6 +48,9 @@ def test_files_fts_like_fallback_when_fts_disabled(tmp_path):
     assert result["fallback"] == "like_no_fts"
     assert result["found_count"] == 1
     assert "RegisterComponent" in result["results"][0]["snippet"]
+    assert result["results"][0]["line_status"] == "exact"
+    assert result["results"][0]["line_start"] == 2
+    assert result["results"][0]["line_end"] == 2
 
 
 def test_files_fts_match_error_falls_back_to_like(tmp_path, monkeypatch):
@@ -111,6 +118,66 @@ def test_files_fts_like_fallback_escapes_special_input(tmp_path):
     assert namespace["found_count"] == 1
     assert all(row["path"].endswith("Special.cpp") for row in percent["results"])
     assert all(row["path"].endswith("Special.cpp") for row in underscore["results"])
+    assert percent["results"][0]["line_status"] == "exact"
+    assert underscore["results"][0]["line_status"] == "exact"
+    assert operator["results"][0]["line_status"] == "exact"
+    assert namespace["results"][0]["line_status"] == "exact"
+
+
+def test_files_fts_line_anchor_for_multiline_match(tmp_path):
+    source_root = tmp_path / "Plugin"
+    source = source_root / "Source" / "MyModule" / "Private"
+    source.mkdir(parents=True)
+    (source / "Multi.cpp").write_text(
+        "void First() {}\nvoid Second() {\n  BeginPlay();\n}\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "KnowledgeBase" / "global_index" / "files_fts.db"
+    build_files_fts_index(source_root, db_path, force_disable_fts=True)
+
+    result = search_files(db_path, "BeginPlay", limit=10)
+
+    assert result["found_count"] == 1
+    assert result["results"][0]["line_status"] == "exact"
+    assert result["results"][0]["line_start"] == 3
+    assert result["results"][0]["line_end"] == 3
+
+
+def test_files_fts_line_anchor_prefers_fts_highlight():
+    content = (
+        '#include "AesWaterOverlayerApi.h"\n'
+        "void RegisterHandlers()\n"
+        "{\n"
+        '  Register(AesEarthBus::WaterOverlayerCreate, &HandleCreateWaterOverlayer);\n'
+        "}\n"
+    )
+    item = {"snippet": '...Register(AesEarthBus::[WaterOverlayerCreate], &HandleCreateWaterOverlayer)...'}
+
+    _attach_line_anchor(item, content, "WaterOverlayer", item["snippet"])
+
+    assert item["line_status"] == "exact"
+    assert item["line_start"] == 4
+    assert item["line_end"] == 4
+
+
+def test_files_fts_line_anchor_uses_snippet_context_for_duplicate_highlight():
+    content = (
+        "void Earlier()\n"
+        "{\n"
+        "  WaterOverlayerCreate();\n"
+        "}\n"
+        "void Later()\n"
+        "{\n"
+        "  Dispatch(AesEarthBus::WaterOverlayerCreate, &HandleCreateWaterOverlayer);\n"
+        "}\n"
+    )
+    item = {"snippet": '...Dispatch(AesEarthBus::[WaterOverlayerCreate], &HandleCreateWaterOverlayer)...'}
+
+    _attach_line_anchor(item, content, "WaterOverlayer", item["snippet"])
+
+    assert item["line_status"] == "exact"
+    assert item["line_start"] == 7
+    assert item["line_end"] == 7
 
 
 def test_files_fts_skips_large_files(tmp_path):

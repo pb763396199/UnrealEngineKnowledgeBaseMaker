@@ -120,7 +120,7 @@ class TokenBudget:
 
             # 根据类别应用不同的优化策略
             if category == ContextCategory.QUERY_RESULTS:
-                print("   → 建议: 使用 Observation Masking 屏蔽大型结果")
+                print("   → 建议: 使用 limit 或 source_slice 控制大型结果")
             elif category == ContextCategory.MESSAGE_HISTORY:
                 print("   → 建议: 压缩对话历史或启动新会话")
             elif category == ContextCategory.TOOL_DEFINITIONS:

@@ -1,7 +1,7 @@
 """
 UE5 知识库系统 - 查询结果缓存
 
-基于 Observation Masking 理论：
+基于有界结果缓存：
 - 替换冗长的输出为紧凑的引用
 - 保留关键信息摘要
 - 按需加载完整结果
@@ -92,7 +92,7 @@ class ResultCache:
 
     def mask_large_result(self, result: Any, threshold: int = 5) -> Dict[str, Any]:
         """
-        屏蔽大型结果（Observation Masking）
+        屏蔽大型结果（bounded result cache）
 
         Args:
             result: 查询结果
@@ -119,7 +119,7 @@ class ResultCache:
                 "summary": f"找到 {len(result)} 个结果",
                 "sample": result[:threshold],
                 "ref_id": ref_id,
-                "tip": f"使用 get_full_results('{ref_id}') 查看完整列表"
+                "tip": "使用显式静态命令缩小范围后再查询完整列表"
             }
 
         elif isinstance(result, dict) and self._estimate_tokens(result) > 1000:
@@ -137,7 +137,7 @@ class ResultCache:
                 "summary": f"大型结果（{len(result)} 个字段）",
                 "keys": list(result.keys())[:10],  # 仅显示前10个键
                 "ref_id": ref_id,
-                "tip": f"使用 get_full_results('{ref_id}') 查看完整内容"
+                "tip": "使用显式静态命令或 source_slice 获取所需内容"
             }
 
         else:

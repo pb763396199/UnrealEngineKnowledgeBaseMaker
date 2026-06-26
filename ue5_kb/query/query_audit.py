@@ -13,6 +13,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 MAX_ARG_CHARS = 240
 MAX_ERROR_CHARS = 500
+DEFAULT_REPORT_LIMIT = 200
+DEFAULT_BROAD_RESULT_THRESHOLD = 40
 
 
 def resolve_trace_id(explicit_trace_id: Optional[str] = None) -> str:
@@ -67,6 +69,44 @@ def _truncate_error(error: Optional[str]) -> Optional[str]:
     if not error:
         return None
     return error[:MAX_ERROR_CHARS]
+
+
+def _parse_args_summary(args_summary: Optional[str]) -> List[str]:
+    if not args_summary:
+        return []
+    try:
+        value = json.loads(args_summary)
+    except Exception:
+        return [args_summary]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+def _classify_failure(row: Dict[str, Any]) -> str:
+    error = (row.get("error") or "").lower()
+    if "implementation file not found" in error or "file not found" in error:
+        return "path_resolution_failure"
+    if "not found" in error or "未找到" in error:
+        return "semantic_miss"
+    if "invalid literal" in error or "requires a value" in error or "missing" in error:
+        return "call_error"
+    if error:
+        return "query_error"
+    return "none"
+
+
+def _is_broad_query(row: Dict[str, Any], broad_result_threshold: int) -> bool:
+    count = row.get("result_count")
+    if not isinstance(count, int):
+        return False
+    if count >= broad_result_threshold:
+        return True
+    args = _parse_args_summary(row.get("args_summary"))
+    for arg in reversed(args):
+        if arg.isdigit() and count >= int(arg):
+            return True
+    return False
 
 
 class QueryAudit:
@@ -417,6 +457,110 @@ class QueryAudit:
             )
         rows = [dict(row) for row in cursor.fetchall()]
         return {"trace_id": trace_id, "found_count": len(rows), "steps": rows}
+
+    def report(
+        self,
+        trace_id: Optional[str] = None,
+        limit: int = DEFAULT_REPORT_LIMIT,
+        broad_result_threshold: int = DEFAULT_BROAD_RESULT_THRESHOLD,
+    ) -> Dict[str, Any]:
+        """Build a deterministic static report from recorded query audit rows."""
+        recent = self.recent(trace_id, limit)
+        steps = list(reversed(recent["steps"]))
+        command_counts: Dict[str, int] = {}
+        failures: List[Dict[str, Any]] = []
+        broad_searches: List[Dict[str, Any]] = []
+        total_duration_ms = 0
+        max_result_count = 0
+
+        for step in steps:
+            command = step.get("command") or ""
+            command_counts[command] = command_counts.get(command, 0) + 1
+            duration = step.get("duration_ms")
+            if isinstance(duration, int):
+                total_duration_ms += duration
+            count = step.get("result_count")
+            if isinstance(count, int):
+                max_result_count = max(max_result_count, count)
+            if step.get("status") == "error" or step.get("error"):
+                failures.append(
+                    {
+                        "id": step.get("id"),
+                        "command": command,
+                        "args": _parse_args_summary(step.get("args_summary")),
+                        "type": _classify_failure(step),
+                        "error": step.get("error"),
+                    }
+                )
+            if _is_broad_query(step, broad_result_threshold):
+                broad_searches.append(
+                    {
+                        "id": step.get("id"),
+                        "command": command,
+                        "args": _parse_args_summary(step.get("args_summary")),
+                        "result_count": count,
+                        "threshold": broad_result_threshold,
+                    }
+                )
+
+        business_queries = len(steps)
+        failure_count = len(failures)
+        broad_count = len(broad_searches)
+        failure_rate = (failure_count / business_queries) if business_queries else 0.0
+        acceptance_status = (
+            "PASS"
+            if business_queries > 0 and failure_count == 0 and broad_count <= 1
+            else "FAIL"
+        )
+        acceptance_reasons: List[str] = []
+        if business_queries == 0:
+            acceptance_reasons.append("no audit rows found")
+        if failure_count:
+            acceptance_reasons.append("failure_events must be 0")
+        if broad_count > 1:
+            acceptance_reasons.append("broad_search_events must be <= 1 or followed by narrowing queries")
+
+        meta = {
+            "trace_id": trace_id,
+            "row_limit": max(1, min(int(limit), 200)),
+            "broad_result_threshold": broad_result_threshold,
+        }
+        if steps:
+            last = steps[-1]
+            meta.update(
+                {
+                    "data_trust": last.get("data_trust"),
+                    "branch": last.get("branch"),
+                    "source": last.get("source"),
+                    "commit": last.get("commit_id"),
+                    "dirty": bool(last.get("dirty")) if last.get("dirty") is not None else None,
+                }
+            )
+
+        return {
+            "schema": "query-audit-report/v1",
+            "meta": meta,
+            "counts": {
+                "business_queries": business_queries,
+                "failure_events": failure_count,
+                "broad_search_events": broad_count,
+                "command_counts": command_counts,
+            },
+            "efficiency": {
+                "total_duration_ms": total_duration_ms,
+                "average_duration_ms": int(total_duration_ms / business_queries) if business_queries else 0,
+                "failure_rate": round(failure_rate, 4),
+                "max_result_count": max_result_count,
+                "status": acceptance_status,
+            },
+            "failures": failures,
+            "broad_searches": broad_searches,
+            "acceptance": {
+                "status": acceptance_status,
+                "reasons": acceptance_reasons,
+                "static_only": True,
+            },
+        }
 
     def close(self) -> None:
         self.conn.close()

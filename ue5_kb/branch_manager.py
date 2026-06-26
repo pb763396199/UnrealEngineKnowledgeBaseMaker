@@ -234,6 +234,38 @@ def _import_kb_to_store(
     return target_dir
 
 
+def _promote_kb_within_store(src_dir: Path, store_dir: str, kb_dir: str) -> Path:
+    """Promote an already-built KB from a temp dir under the variants store."""
+    store_path = Path(store_dir)
+    src_dir = Path(src_dir)
+    target_dir = store_path / kb_dir
+
+    try:
+        if src_dir.parent.resolve() != store_path.resolve():
+            raise ValueError(f"source is outside variants store: {src_dir}")
+    except OSError as e:
+        raise ValueError(f"cannot resolve source/store paths: {e}") from e
+
+    if not src_dir.exists():
+        raise FileNotFoundError(f"KB source does not exist: {src_dir}")
+
+    if target_dir.exists():
+        old_dir = store_path / f"_old_{kb_dir}"
+        if old_dir.exists():
+            shutil.rmtree(str(old_dir))
+        target_dir.rename(old_dir)
+        try:
+            src_dir.rename(target_dir)
+        except Exception:
+            old_dir.rename(target_dir)
+            raise
+        shutil.rmtree(str(old_dir))
+    else:
+        src_dir.rename(target_dir)
+
+    return target_dir
+
+
 # ---------------------------------------------------------------------------
 # DB 辅助
 # ---------------------------------------------------------------------------
@@ -256,7 +288,7 @@ class BranchManager:
     def __init__(self, skill_dir: Path):
         """
         Args:
-            skill_dir: skill 目录（如 ~/.claude/skills/AesWorld-kb/）
+            skill_dir: skill 目录（如 ~/.agents/skills/<SkillName>-kb/）
         """
         self.skill_dir = Path(skill_dir)
         self.registry_db = self.skill_dir / "registry.db"
@@ -585,7 +617,13 @@ class BranchManager:
             if kb_dir is None:
                 return {"error": f"Hash 碰撞无法解决: {commit_id}"}
 
-            final_dir = _import_kb_to_store(kb_source, kb_store_dir, kb_dir)
+            store_path = Path(kb_store_dir)
+            if existing_kb_path is not None and kb_source.resolve() == existing_kb_path.resolve():
+                final_dir = existing_kb_path
+            elif kb_source.parent.resolve() == store_path.resolve() and kb_source.name.startswith("_build_tmp_"):
+                final_dir = _promote_kb_within_store(kb_source, kb_store_dir, kb_dir)
+            else:
+                final_dir = _import_kb_to_store(kb_source, kb_store_dir, kb_dir)
             self._run_post_import_migration(final_dir)
 
             file_count = sum(1 for _ in final_dir.rglob("*") if _.is_file())
@@ -625,6 +663,7 @@ class BranchManager:
                 "branch": branch,
                 "commit": commit_id[:7],
                 "files": file_count,
+                "kb_path": str(final_dir),
                 "refreshed": bool(existing_kb_dir),
                 "dirty": is_dirty,
                 "worktree_fingerprint": self._short_fingerprint(worktree_fingerprint),

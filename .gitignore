@@ -135,6 +135,7 @@ Thumbs.db
 *.pkl
 *.db
 ue5kb_config.yaml
+.omx/
 
 # Security sensitive files
 *.key

@@ -1,6 +1,6 @@
 # UE5 Knowledge Base Maker
 
-> 通用工具：为 UE5 引擎和插件生成知识库和 Claude Skill
+> 通用工具：为 UE5 引擎和插件生成知识库和跨 Agent Skill
 
 ## 功能特性
 
@@ -14,7 +14,8 @@
 - 🔧 **通用工具** - 支持任何 UE5 引擎版本（5.0, 5.1, 5.2, 5.3, 5.4+）
 - 📊 **知识库生成** - 自动扫描源码，构建模块索引和代码图谱
 - 🔌 **完整覆盖** - 扫描 Engine/Source、Engine/Plugins、Engine/Platforms（含 Private 目录）
-- 🤖 **Skill 生成** - 自动生成 Claude Code Skill（模块级+代码级查询）
+- 🤖 **Skill 生成** - 自动生成共享 Skill，并为 Claude Code、OpenCode、Codex、VS Code Copilot 安装入口
+- 🧩 **单份 KB 存储** - 原始知识库默认只保存在 `~/.agents/skills/<skill>/variants/<commit>`，其他 Agent 入口通过链接或轻量 adapter 复用
 - ⚙️ **灵活配置** - 命令行引导式配置，无需环境变量
 - 🚀 **高性能** - SQLite 存储，36x 性能提升
 - 🎯 **自动检测** - 自动检测引擎/插件版本
@@ -61,8 +62,8 @@ python impl.py query_module_dependents Core
 
 - **ClassIndex** - 类的快速索引，查询时间从 ~5s 降至 <10ms（**500x 提升**）
 - **FunctionIndex 增强** - 函数模糊搜索，查询时间从 ~8s 降至 <10ms（**800x 提升**）
-- **查询降级机制** - 精确查询失败时自动提示模糊搜索，**防止 LLM 幻觉**
-- **fallback_command** - 错误返回包含降级命令，LLM 自动执行下一步操作
+- **查询降级机制** - 精确查询失败时自动提示模糊搜索，降低生成式幻觉风险
+- **fallback_command** - 错误返回包含确定性的下一步查询命令，便于 Agent 继续静态检索
 
 ### CPP 文件索引（v2.12.0 新增）📍
 
@@ -125,7 +126,7 @@ ue5kb update
 ue5kb update --full
 
 # 查询知识库版本
-python ~/.claude/skills/ue5kb-5.5.4/impl.py get_kb_info
+python ~/.agents/skills/ue5kb-5.5.4/impl.py get_kb_info
 ```
 
 **输出示例**：
@@ -190,22 +191,23 @@ ue5kb init --engine-path "D:\UE5.1" --kb-path "J:/MyUE5KB"
 
 **生成结果**:
 ```
-D:\Unreal Engine\UnrealEngine51_500\
-└── KnowledgeBase\              # 知识库（统一目录）
-    ├── .pipeline_state         # Pipeline 状态文件
-    ├── data/                   # 工作数据目录
+C:\Users\{user}\.agents\skills\
+└── ue5kb-5.1.500\              # 共享 Skill
+    ├── skill.md
+    ├── impl.py
+    ├── registry.db
+    ├── runtime/
+    └── variants/
+        └── <commit>\           # 原始知识库（唯一数据副本）
+            ├── .pipeline_state # Pipeline 状态文件
+            ├── data/           # 工作数据目录
     │   ├── discover/
     │   ├── extract/
     │   ├── analyze/
     │   ├── build/
     │   └── generate/
-    ├── global_index/           # 全局索引
-    └── module_graphs/          # 模块图谱
-
-C:\Users\{user}\.claude\skills\
-└── ue5kb-5.1.500\              # Claude Skill
-    ├── skill.md
-    └── impl.py
+            ├── global_index/   # 全局索引
+            └── module_graphs/  # 模块图谱
 ```
 
 ### 并行处理系统（v2.10.0 新增）⚡
@@ -251,17 +253,16 @@ ue5kb init --plugin-path "F:\MyPlugin" --kb-path "J:/PluginKB"
 
 **生成结果**:
 ```
-F:\MyProject\Plugins\MyPlugin\
-└── KnowledgeBase\              # 插件知识库（统一目录）
-    ├── .pipeline_state         # Pipeline 状态文件
-    ├── data/                   # 工作数据目录
-    ├── global_index/           # 全局索引
-    └── module_graphs/          # 模块图谱
-
-C:\Users\{user}\.claude\skills\
-└── myplugin-kb-1.0\            # 插件专属 Skill
+C:\Users\{user}\.agents\skills\
+└── MyPlugin-kb\                # 插件专属共享 Skill
     ├── skill.md
     └── impl.py
+    └── variants\
+        └── <commit>\           # 插件知识库（唯一数据副本）
+            ├── .pipeline_state # Pipeline 状态文件
+            ├── data/           # 工作数据目录
+            ├── global_index/   # 全局索引
+            └── module_graphs/  # 模块图谱
 ```
 
 ### 模式对比
@@ -269,8 +270,8 @@ C:\Users\{user}\.claude\skills\
 | 特性 | 引擎模式 | 插件模式 |
 |------|---------|---------|
 | **扫描范围** | Engine/Source, Engine/Plugins, Engine/Platforms | Plugin/Source/** |
-| **模块数量** | 1757 个（UE5.1） | 取决于插件规模（如 AesWorld: 40 个） |
-| **知识库路径** | `{引擎}/KnowledgeBase/` | `{插件}/KnowledgeBase/` |
+| **模块数量** | 1757 个（UE5.1） | 取决于插件规模（例如 40 个左右） |
+| **知识库路径** | `~/.agents/skills/ue5kb-{version}/variants/<commit>/` | `~/.agents/skills/{PluginName}-kb/variants/<commit>/` |
 | **Skill 命名** | `ue5kb-{version}` | `{name}-kb-{version}` |
 | **模块分类** | Runtime, Editor, Plugins.*, Platforms.* | Plugin.{PluginName} |
 | **生成时间** | ~30-60 分钟（串行） | ~1-5 分钟 |
@@ -360,25 +361,32 @@ ue5kb pipeline status --engine-path "D:\UE5"
 ### 知识库结构
 
 ```
-{引擎根目录}/KnowledgeBase/      # 统一输出目录
-├── .pipeline_state             # Pipeline 状态文件
-├── data/                       # 工作数据目录
+~/.agents/skills/<skill-name>/       # 共享 Skill 与唯一原始 KB
+├── skill.md                         # Canonical Skill
+├── impl.py                          # 查询入口
+├── registry.db                      # 分支/variant 注册表
+├── runtime/                         # 查询审计等运行时文件
+└── variants/<commit>/               # 原始知识库（默认唯一存储）
+    ├── .pipeline_state              # Pipeline 状态文件
+    ├── data/                        # 工作数据目录
 │   ├── discover/               # 阶段 1: 发现的模块列表
 │   ├── extract/                # 阶段 2: 模块依赖信息
 │   ├── analyze/                # 阶段 3: 代码分析结果
 │   ├── build/                  # 阶段 4: 构建摘要
 │   └── generate/               # 阶段 5: Skill 生成标记
-├── global_index/               # 全局模块索引
+    ├── global_index/                # 全局模块索引
 │   ├── index.db                # SQLite 数据库
 │   ├── class_index.db          # 类快速索引
 │   ├── function_index.db       # 函数快速索引
 │   ├── enum_index.db           # 枚举快速索引 (v2.14.0)
 │   └── global_index.pkl        # Pickle 索引
-└── module_graphs/              # 模块知识图谱
+    └── module_graphs/               # 模块知识图谱
     ├── Core.pkl
     ├── Engine.pkl
     └── ... (1,757+ 个模块)
 ```
+
+源码树下的 `KnowledgeBase/` 仅属于历史布局或显式 `--kb-path` 自定义输出；默认不会再写入引擎/插件源码目录。
 
 ### 模块覆盖范围
 
@@ -414,9 +422,11 @@ ue5kb pipeline status --engine-path "D:\UE5"
 ### Skill 结构
 
 ```
-C:\Users\pb763\.claude\skills\ue5kb-{version}/
+C:\Users\pb763\.agents\skills\ue5kb-{version}/
 ├── skill.md               # Skill 定义
-└── impl.py                # Skill 实现（含知识库路径）
+├── impl.py                # Skill 实现（从 registry 解析知识库路径）
+├── registry.db            # 分支/版本注册表
+└── variants/<commit>/     # 原始知识库
 ```
 
 ## 多引擎支持
@@ -424,25 +434,26 @@ C:\Users\pb763\.claude\skills\ue5kb-{version}/
 可以为同一台机器的多个引擎版本生成独立的知识库和 Skill：
 
 ```
-D:\Unreal Engine\UnrealEngine51_500\
-└── KnowledgeBase\          ← 知识库
-C:\Users\pb763\.claude\skills\ue5kb-5.1.500\  ← Skill
+C:\Users\pb763\.agents\skills\ue5kb-5.1.500\
+├── registry.db
+└── variants\<commit>\      ← 知识库
 
-D:\Unreal Engine\UnrealEngine5.3\
-└── KnowledgeBase\          ← 知识库
-C:\Users\pb763\.claude\skills\ue5kb-5.3\  ← Skill
+C:\Users\pb763\.agents\skills\ue5kb-5.3\
+├── registry.db
+└── variants\<commit>\      ← 知识库
 ```
 
-每个 Skill 独立工作，自动指向对应的知识库！
+每个 Skill 独立工作，Claude Code / OpenCode / Codex / VS Code Copilot 入口都复用同一份知识库。
 
 ## 使用生成的 Skill
 
-安装后，在 Claude Code 中直接询问问题：
+安装后，Claude Code / OpenCode / Codex / VS Code Copilot 应先运行 Skill 的 `preflight`，再把用户请求映射为确定性静态命令；`impl.py` 不接受自由文本作为查询入口。
 
-```
-"Core 模块有哪些依赖？"
-"AActor 类继承自什么？"
-"列出所有 Runtime 模块"
+```powershell
+py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" preflight
+py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" query_module_info Core
+py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" query_class_info AActor
+py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" search_modules Runtime
 ```
 
 ## 版本要求
@@ -554,7 +565,7 @@ pip install click rich pyyaml networkx
 
 ### v2.14.0 (2026-02-09)
 
-**全面知识库增强 - 大幅提升 LLM 对 UE5 源码的理解能力**
+**全面知识库增强 - 大幅提升 Agent 对 UE5 源码的静态查询能力**
 - Doxygen 注释提取（`/** ... */` 和 `///`）
 - UENUM 枚举解析（含枚举值、说明符）+ EnumIndex 快速索引
 - UCLASS/UPROPERTY/USTRUCT 说明符提取（Blueprintable, EditAnywhere 等）
@@ -606,23 +617,23 @@ pip install click rich pyyaml networkx
 ### v2.8.0 (2026-02-05)
 
 **统一知识库文件管理 + 插件模式 Skill 对齐**
-- **统一工作文件管理**: 所有 Pipeline 工作文件（`.pipeline_state` 和 `data/`）统一放在 `KnowledgeBase/` 目录下
-  - 状态文件：`{base_path}/.pipeline_state` → `{base_path}/KnowledgeBase/.pipeline_state`
-  - 工作数据：`{base_path}/data/` → `{base_path}/KnowledgeBase/data/`
+- **历史布局说明**: v2.8 曾将 Pipeline 工作文件统一放在源码树 `KnowledgeBase/` 目录下；当前默认已迁移到共享 Skill store 的 `variants/<commit>/`
+  - 状态文件：`variants/<commit>/.pipeline_state`
+  - 工作数据：`variants/<commit>/data/`
 - **插件模式 Skill 对齐**: 插件模式的 Skill markdown 模板现在与引擎模式完全一致
   - 添加 `search_functions` 命令文档
   - 添加查询降级机制说明
   - 添加函数相关查询示例
-- **更好的文件管理**: 删除知识库时可以直接删除整个 `KnowledgeBase/` 文件夹
+- **更好的文件管理**: 当前默认删除/GC `variants/<commit>/`，不再依赖源码树 `KnowledgeBase/` 文件夹
 
 ### v2.7.0 (2026-02-05)
 
-**查询降级机制 - 防止 LLM 幻觉**
+**查询降级机制 - 降低生成式幻觉风险**
 - **快速索引系统**: ClassIndex 和 FunctionIndex，查询性能提升 500-800x
 - **查询降级机制**: 精确查询失败时自动提示模糊搜索
-- **防止 LLM 幻觉**: 彻底解决 LLM 在知识库查询失败时基于训练数据乱回答的问题
+- **降低生成式幻觉风险**: 查询失败时返回确定性 fallback 命令，避免基于记忆或训练数据乱回答
 - **新增 search_functions**: 函数模糊搜索命令
-- **Skill Prompt 增强**: 添加"查询失败处理"章节，明确引导 LLM 行为
+- **Skill Prompt 增强**: 添加"查询失败处理"章节，明确引导 Agent 使用静态 fallback
 
 ### v2.6.0 (2026-02-04)
 
@@ -638,7 +649,7 @@ pip install click rich pyyaml networkx
 **插件模式支持**
 - **插件模式**: 为单个插件生成独立知识库
 - **双模式 CLI**: 引擎模式和插件模式自动路由
-- **插件专属 Skill**: 自动生成插件专属 Claude Code Skill
+- **插件专属 Skill**: 自动生成插件专属跨 Agent Skill
 
 ### v2.0.0 (2026-02-02)
 
@@ -646,7 +657,7 @@ pip install click rich pyyaml networkx
 - **移除**: 所有硬编码路径
 - **新增**: CLI 引导式配置
 - **新增**: 自动引擎版本检测
-- **新增**: 自动生成 Claude Skill
+- **新增**: 自动生成跨 Agent Skill
 - **优化**: SQLite 36x 性能提升
 - **支持**: 多引擎版本独立知识库
 

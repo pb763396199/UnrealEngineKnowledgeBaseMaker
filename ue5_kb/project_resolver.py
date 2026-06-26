@@ -35,12 +35,13 @@ def parse_uproject(uproject_path: Path) -> Optional[str]:
 
 def scan_kb_skills(skills_dir: Optional[Path] = None) -> Dict[str, Path]:
     """
-    扫描 ~/.claude/skills/ 下的 ue5kb-* 目录。
+    扫描共享 Skill store 下的 ue5kb-* 目录。
 
     返回 {engine_version: skill_dir_path} 映射。
     """
     if skills_dir is None:
-        skills_dir = Path.home() / ".claude" / "skills"
+        from .skill_store import get_default_skill_root
+        skills_dir = get_default_skill_root()
 
     if not skills_dir.is_dir():
         return {}
@@ -112,7 +113,7 @@ def resolve_engine_kb(uproject_path: Path, skills_dir: Optional[Path] = None) ->
         {
             "engine_association": "5.5",
             "matched_version": "5.5.4",
-            "skill_path": Path("~/.claude/skills/ue5kb-5.5.4"),
+            "skill_path": Path("~/.agents/skills/ue5kb-5.5.4"),
             "kb_path": Path("..."),  # 尝试从 registry 或 fallback 解析
         }
         失败返回 None。

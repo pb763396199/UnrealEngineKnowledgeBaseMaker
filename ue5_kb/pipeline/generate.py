@@ -1,20 +1,20 @@
 """
 Pipeline 阶段 5: Generate (生成 Skill)
 
-从模板生成 Claude Code Skill
+从模板生成跨 Agent 共享 Skill
 """
 
 from pathlib import Path
 from typing import Dict, Any
-import shutil
 from .base import PipelineStage
+from ..skill_store import get_skill_path, install_provider_adapters
 
 
 class GenerateStage(PipelineStage):
     """
     生成阶段
 
-    从模板生成 Claude Code Skill
+    从模板生成跨 Agent 共享 Skill
     """
 
     def __init__(self, base_path: Path, is_plugin: bool = False, plugin_name: str = None, kb_path: Path = None):
@@ -40,9 +40,17 @@ class GenerateStage(PipelineStage):
         # 这里返回标记文件
         return self.stage_dir / "skill_generated.txt"
 
-    def run(self, engine_version: str = None, skill_name: str = None, **kwargs) -> Dict[str, Any]:
+    def run(
+        self,
+        engine_version: str = None,
+        skill_name: str = None,
+        skill_path: str = None,
+        install_adapters: bool = True,
+        force_adapters: bool = False,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """
-        生成 Claude Code Skill
+        生成跨 Agent 共享 Skill
 
         Args:
             engine_version: 引擎版本
@@ -51,7 +59,7 @@ class GenerateStage(PipelineStage):
         Returns:
             生成结果
         """
-        print(f"[Generate] 生成 Claude Code Skill...")
+        print(f"[Generate] 生成跨 Agent 共享 Skill...")
 
         # 获取知识库路径（支持外置路径）
         kb_path = self._kb_root
@@ -70,14 +78,24 @@ class GenerateStage(PipelineStage):
                 skill_name = f"ue5kb-{engine_version}"
 
         # 确定 Skill 目录
-        skill_path = self._get_skill_path(skill_name)
+        skill_path = Path(skill_path) if skill_path else self._get_skill_path(skill_name)
 
         # 生成 Skill（根据模式选择模板）
         # 插件模式使用插件版本，引擎模式使用引擎版本
         version = self._detect_plugin_version() if self.is_plugin else engine_version
         if not version:
             version = "1.0"
-        self._generate_skill(kb_path, skill_path, version)
+        registry_result = self._generate_skill(kb_path, skill_path, version)
+        final_kb_path = Path(registry_result.get("kb_path", kb_path)) if registry_result else kb_path
+        if final_kb_path != kb_path:
+            self._kb_root = final_kb_path
+            self.data_dir = self._kb_root / "data"
+            self.stage_dir = self.data_dir / self.stage_name
+            kb_path = final_kb_path
+
+        adapter_results = {}
+        if install_adapters:
+            adapter_results = install_provider_adapters(skill_name, skill_path, force=force_adapters)
 
         # 创建标记文件
         self.stage_dir.mkdir(parents=True, exist_ok=True)
@@ -88,7 +106,8 @@ class GenerateStage(PipelineStage):
             'skill_name': skill_name,
             'skill_path': str(skill_path),
             'kb_path': str(kb_path),
-            'engine_version': engine_version
+            'engine_version': engine_version,
+            'adapters': adapter_results
         }
 
         self.save_result(result, "generate_result.json")
@@ -159,12 +178,9 @@ class GenerateStage(PipelineStage):
 
     def _get_skill_path(self, skill_name: str) -> Path:
         """获取 Skill 路径"""
-        import os
-        home = Path.home()
-        claude_skills_dir = home / ".claude" / "skills"
-        return claude_skills_dir / skill_name
+        return get_skill_path(skill_name)
 
-    def _generate_skill(self, kb_path: Path, skill_path: Path, engine_version: str) -> None:
+    def _generate_skill(self, kb_path: Path, skill_path: Path, engine_version: str) -> Dict[str, Any]:
         """
         生成 Skill 文件
 
@@ -262,9 +278,27 @@ class GenerateStage(PipelineStage):
         print(f"  生成 skill.md 和 impl.py")
 
         # 初始化多分支注册表并注册默认分支
-        self._init_branch_registry(skill_path, kb_path)
+        registry_result = self._init_branch_registry(skill_path, kb_path)
+        final_kb_path = Path(registry_result.get("kb_path", kb_path)) if registry_result else kb_path
+        if final_kb_path != kb_path:
+            self._rewrite_embedded_kb_path(skill_path, kb_path, final_kb_path)
+        return registry_result
 
-    def _init_branch_registry(self, skill_path: Path, kb_path: Path) -> None:
+    @staticmethod
+    def _rewrite_embedded_kb_path(skill_path: Path, old_kb_path: Path, new_kb_path: Path) -> None:
+        """Update fallback KB literals after a temp variant is promoted."""
+        old_text = str(old_kb_path).replace('\\', '\\\\')
+        new_text = str(new_kb_path).replace('\\', '\\\\')
+        for filename in ("skill.md", "impl.py"):
+            path = skill_path / filename
+            if not path.exists():
+                continue
+            content = path.read_text(encoding="utf-8")
+            updated = content.replace(old_text, new_text).replace(str(old_kb_path), str(new_kb_path))
+            if updated != content:
+                path.write_text(updated, encoding="utf-8")
+
+    def _init_branch_registry(self, skill_path: Path, kb_path: Path) -> Dict[str, Any]:
         """初始化多分支注册表并注册初始 KB"""
         try:
             from ..branch_manager import BranchManager
@@ -273,7 +307,7 @@ class GenerateStage(PipelineStage):
 
             # 注册默认分支 — 使用源码目录做 VCS 检测
             source_path = str(self.base_path)
-            mgr.register(
+            result = mgr.register(
                 branch="default",
                 source=source_path,
                 kb_path=str(kb_path),
@@ -281,5 +315,7 @@ class GenerateStage(PipelineStage):
                 force=True,
             )
             print(f"  初始化多分支注册表，注册 default 分支")
+            return result
         except Exception as e:
             print(f"  警告: 注册表初始化失败 ({e})，多分支功能将使用回退路径")
+            return {}

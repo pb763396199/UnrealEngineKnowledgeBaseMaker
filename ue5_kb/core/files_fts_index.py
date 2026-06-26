@@ -218,8 +218,12 @@ def build_files_fts_index(
         conn.close()
 
 
+def _keyword_tokens(keyword: str) -> List[str]:
+    return [token for token in "".join(ch if ch.isalnum() or ch == "_" else " " for ch in keyword).split() if token]
+
+
 def _make_fts_query(keyword: str) -> str:
-    tokens = [token for token in "".join(ch if ch.isalnum() or ch == "_" else " " for ch in keyword).split() if token]
+    tokens = _keyword_tokens(keyword)
     if not tokens:
         return '""'
     return " OR ".join(f"{token}*" for token in tokens)
@@ -239,6 +243,116 @@ def _make_snippet(content: str, keyword: str, max_chars: int = 240) -> str:
     if end < len(content):
         snippet += "..."
     return snippet
+
+
+def _find_keyword_span(content: str, keyword: str) -> Optional[Tuple[int, int]]:
+    """Return a deterministic character span for keyword evidence in content."""
+    if not content or not keyword:
+        return None
+
+    lower_content = content.lower()
+    lower_keyword = keyword.lower()
+    index = lower_content.find(lower_keyword)
+    if index >= 0:
+        return index, index + len(keyword)
+
+    best: Optional[Tuple[int, int]] = None
+    for token in _keyword_tokens(keyword):
+        token_index = lower_content.find(token.lower())
+        if token_index < 0:
+            continue
+        candidate = (token_index, token_index + len(token))
+        if best is None or candidate[0] < best[0]:
+            best = candidate
+    return best
+
+
+def _line_anchor(content: str, span: Optional[Tuple[int, int]]) -> Dict[str, object]:
+    """Convert a character span into stable 1-based line/column evidence."""
+    if span is None:
+        return {
+            "line_start": None,
+            "line_end": None,
+            "match_start": None,
+            "match_end": None,
+            "line_status": "missing",
+        }
+
+    start, end = span
+    start = max(0, min(start, len(content)))
+    end = max(start, min(end, len(content)))
+    line_start = content.count("\n", 0, start) + 1
+    line_end = content.count("\n", 0, end) + 1
+    previous_newline = content.rfind("\n", 0, start)
+    match_start = start - previous_newline
+    end_previous_newline = content.rfind("\n", 0, end)
+    match_end = end - end_previous_newline
+    return {
+        "line_start": line_start,
+        "line_end": line_end,
+        "match_start": match_start,
+        "match_end": match_end,
+        "line_status": "exact",
+    }
+
+
+def _find_highlighted_span(content: str, snippet: Optional[str]) -> Optional[Tuple[int, int]]:
+    if not content or not snippet:
+        return None
+    start = snippet.find("[")
+    end = snippet.find("]", start + 1)
+    if start < 0 or end <= start + 1:
+        return None
+    highlighted = snippet[start + 1:end]
+    if not highlighted:
+        return None
+
+    def clean_context(value: str) -> str:
+        return value.replace("[", "").replace("]", "").replace("...", "")
+
+    prefix = clean_context(snippet[:start])[-80:]
+    suffix = clean_context(snippet[end + 1:])[:80]
+    lower_content = content.lower()
+    lower_highlighted = highlighted.lower()
+    lower_prefix = prefix.lower()
+    lower_suffix = suffix.lower()
+
+    candidates: List[Tuple[int, int, int]] = []
+    search_from = 0
+    while True:
+        index = lower_content.find(lower_highlighted, search_from)
+        if index < 0:
+            break
+        score = 0
+        if lower_prefix:
+            window_start = max(0, index - len(lower_prefix) - 20)
+            if lower_prefix.strip() and lower_prefix.strip() in lower_content[window_start:index]:
+                score += 2
+        if lower_suffix:
+            window_end = min(len(content), index + len(highlighted) + len(lower_suffix) + 20)
+            if lower_suffix.strip() and lower_suffix.strip() in lower_content[index + len(highlighted):window_end]:
+                score += 2
+        candidates.append((score, index, index + len(highlighted)))
+        search_from = index + max(1, len(highlighted))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    _, match_start, match_end = candidates[0]
+    return match_start, match_end
+
+
+def _attach_line_anchor(
+    item: Dict[str, object],
+    content: str,
+    keyword: str,
+    highlighted_snippet: Optional[str] = None,
+) -> Dict[str, object]:
+    span = _find_highlighted_span(content, highlighted_snippet)
+    if span is None:
+        span = _find_keyword_span(content, keyword)
+    item.update(_line_anchor(content, span))
+    return item
 
 
 def _escape_like(keyword: str) -> str:
@@ -297,7 +411,7 @@ class FilesFtsIndex:
     def _search_fts(self, keyword: str, limit: int) -> List[Dict[str, object]]:
         cursor = self.conn.execute(
             """
-            SELECT f.path, f.module, f.extension,
+            SELECT f.path, f.module, f.extension, f.content,
                      snippet(files_fts, 3, '[', ']', '...', 12) AS snippet,
                      rank AS rank
             FROM files_fts
@@ -311,6 +425,8 @@ class FilesFtsIndex:
         rows = []
         for row in cursor.fetchall():
             item = dict(row)
+            content = item.pop("content", "")
+            _attach_line_anchor(item, content, keyword, str(item.get("snippet") or ""))
             item["ranking_reason"] = "fts_rank"
             rows.append(item)
         return rows
@@ -332,6 +448,7 @@ class FilesFtsIndex:
             item = dict(row)
             content = item.pop("content", "")
             item["snippet"] = _make_snippet(content, keyword)
+            _attach_line_anchor(item, content, keyword)
             item["rank"] = None
             item["ranking_reason"] = "like_fallback"
             rows.append(item)
