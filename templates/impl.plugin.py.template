@@ -18,6 +18,18 @@ from typing import Dict, List, Any, Optional
 from ue5_kb.branch_manager import BranchManager, safe_pickle_load
 from ue5_kb.core.files_fts_index import search_files as _search_files_index
 from ue5_kb.query.query_audit import QueryAudit, record_query, resolve_trace_id
+from ue5_kb.query.query_memory import (
+    attach_business_flow as _query_memory_attach_flow,
+    diff_memory as _query_memory_diff,
+    list_negative_hints as _query_memory_negative_hints,
+    list_subjects as _query_memory_subjects,
+    record_memory as _query_memory_record,
+    render_memory as _query_memory_render,
+    replay_memory as _query_memory_replay,
+    search_memory as _query_memory_search,
+    snapshot_memory as _query_memory_snapshot,
+    validate_memory as _query_memory_validate,
+)
 from ue5_kb.query.runtime_context import preflight as _build_preflight
 from ue5_kb.query.source_slice import slice_source as _slice_source
 from ue5_kb.vcs import VCSAdapter
@@ -119,6 +131,102 @@ def query_audit_report(trace_id: str = None, limit: int = 200, broad_threshold: 
         return audit.report(trace_id, limit, broad_threshold)
     finally:
         audit.close()
+
+
+def _memory_command_runner(command: str, args: List[str]) -> Dict[str, Any]:
+    return _run_command(command, args, allow_stale=True, read_only=True)
+
+
+def query_memory_record(trace_id: str, intent: str, seed: str) -> Dict[str, Any]:
+    """把一次查询 trace 提升为可复用路线；不保存业务事实。"""
+    return _query_memory_record(
+        skill_dir=SKILL_DIR,
+        trace_id=trace_id,
+        intent=intent,
+        seed=seed,
+        context=_get_runtime_context(),
+        source_root=SOURCE_ROOT,
+        command_runner=_memory_command_runner,
+    )
+
+
+def query_memory_search(keyword: str, intent: str = None, limit: int = 20) -> Dict[str, Any]:
+    """搜索历史查询路线候选；返回路线，不返回事实。"""
+    return _query_memory_search(skill_dir=SKILL_DIR, keyword=keyword, intent=intent, limit=limit)
+
+
+def query_memory_validate(memory_id: str) -> Dict[str, Any]:
+    """纯算法校验历史查询路线是否过时。"""
+    return _query_memory_validate(
+        skill_dir=SKILL_DIR,
+        memory_id=memory_id,
+        context=_get_runtime_context(),
+        source_root=SOURCE_ROOT,
+        command_runner=_memory_command_runner,
+    )
+
+
+def query_memory_replay(memory_id: str) -> Dict[str, Any]:
+    """在当前 KB 上重跑历史查询路线。"""
+    return _query_memory_replay(skill_dir=SKILL_DIR, memory_id=memory_id, command_runner=_memory_command_runner)
+
+
+def query_memory_diff(memory_id: str) -> Dict[str, Any]:
+    """对比历史路线和当前 KB 的确定性差异。"""
+    return _query_memory_diff(
+        skill_dir=SKILL_DIR,
+        memory_id=memory_id,
+        context=_get_runtime_context(),
+        source_root=SOURCE_ROOT,
+        command_runner=_memory_command_runner,
+    )
+
+
+def query_memory_promote(trace_id: str, intent: str, seed: str) -> Dict[str, Any]:
+    """把当前 trace 提升为推荐查询路线。"""
+    result = query_memory_record(trace_id, intent, seed)
+    memory_id = result.get("memory_id")
+    if memory_id:
+        validation = query_memory_validate(memory_id)
+        result["promotion_validation"] = validation
+        result["promoted"] = validation.get("overall") == "fresh"
+        if not result["promoted"]:
+            result["promotion_blocked_reason"] = validation.get("overall", "unknown")
+    return result
+
+
+def query_memory_subjects(keyword: str = None, limit: int = 50) -> Dict[str, Any]:
+    """查看 evidence-bound business subject 视图。"""
+    return _query_memory_subjects(skill_dir=SKILL_DIR, keyword=keyword, limit=limit)
+
+
+def query_memory_negative_hints(keyword: str = None, limit: int = 50) -> Dict[str, Any]:
+    """查看隔离失败提示；这些提示不参与主图事实检索。"""
+    return _query_memory_negative_hints(skill_dir=SKILL_DIR, keyword=keyword, limit=limit)
+
+
+def query_memory_snapshot(subject_or_pattern_id: str) -> Dict[str, Any]:
+    """保存 subject/pattern 的完整 JSON 快照。"""
+    return _query_memory_snapshot(skill_dir=SKILL_DIR, subject_or_pattern_id=subject_or_pattern_id)
+
+
+def query_memory_render(target: str = "all", view: str = "full") -> Dict[str, Any]:
+    """生成 Obsidian Markdown/Mermaid 展示层。"""
+    return _query_memory_render(skill_dir=SKILL_DIR, target=target, view=view)
+
+
+def query_memory_render_graph(target: str = "all", view: str = "business") -> Dict[str, Any]:
+    """生成指定 graph 视图的 Obsidian Markdown/Mermaid。"""
+    return _query_memory_render(skill_dir=SKILL_DIR, target=target, view=view)
+
+
+def query_memory_attach_flow(memory_id: str, flow_json_path: str) -> Dict[str, Any]:
+    """为已有 memory 附加人工/AI 归纳的业务流程图。"""
+    flow_path = Path(flow_json_path)
+    if not flow_path.is_absolute():
+        flow_path = SKILL_DIR / flow_path
+    flow = json.loads(flow_path.read_text(encoding="utf-8"))
+    return _query_memory_attach_flow(skill_dir=SKILL_DIR, memory_id=memory_id, flow=flow)
 
 
 def source_slice(
@@ -2575,10 +2683,17 @@ if __name__ == "__main__":
         return command not in {
             "preflight", "query_audit", "query_audit_report", "status", "check_freshness", "get_kb_info",
             "ensure_fresh", "init", "register", "update", "set_active", "remove", "gc",
+            "query_memory_search", "query_memory_record", "query_memory_promote",
+            "query_memory_subjects", "query_memory_negative_hints",
+            "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_attach_flow",
         }
 
     def _write_command(command):
-        return command in {"ensure_fresh", "init", "register", "update", "set_active", "remove", "gc"}
+        return command in {
+            "ensure_fresh", "init", "register", "update", "set_active", "remove", "gc",
+            "query_memory_record", "query_memory_validate", "query_memory_diff", "query_memory_promote",
+            "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_attach_flow",
+        }
 
     def _stale_gate_result(command):
         context = _get_runtime_context()
@@ -2614,6 +2729,19 @@ if __name__ == "__main__":
         print("  ensure_fresh [source] [--force]            - 检查并更新当前插件源码对应的 KB", file=sys.stderr)
         print("  query_audit [trace_id] [limit]             - 查看查询审计记录", file=sys.stderr)
         print("  query_audit_report [trace_id] [limit] [broad_threshold] - 生成确定性静态查询审计统计报告", file=sys.stderr)
+        print("  query_memory_record <trace_id> <intent> <seed> - 记录历史查询路线，不保存业务事实", file=sys.stderr)
+        print("  query_memory_search <keyword> [intent] [limit] - 搜索历史查询路线候选", file=sys.stderr)
+        print("  query_memory_validate <memory_id>          - 纯算法校验历史路线新鲜度", file=sys.stderr)
+        print("  query_memory_replay <memory_id>            - 在当前 KB 上重跑历史路线", file=sys.stderr)
+        print("  query_memory_diff <memory_id>              - 对比历史路线和当前结果", file=sys.stderr)
+        print("  query_memory_promote <trace_id> <intent> <seed> - 提升当前 trace 为推荐路线", file=sys.stderr)
+        print("  query_memory_subjects [keyword] [limit]    - 查看 evidence-bound 业务主题视图", file=sys.stderr)
+        print("  query_memory_negative_hints [keyword] [limit] - 查看隔离失败避坑提示", file=sys.stderr)
+        print("  query_memory_snapshot <subject_id|pattern_id> - 保存完整 JSON 历史快照", file=sys.stderr)
+        print("  query_memory_render [subject|pattern|all] [view=full] - 生成 Obsidian Markdown/Mermaid", file=sys.stderr)
+        print("  query_memory_render_graph [subject|pattern|all] [business|evidence|evolution|query-path] - 生成 graph 视图", file=sys.stderr)
+        print("  query_memory_attach_flow <memory_id> <flow.json> - 为历史路线附加可读业务流程图", file=sys.stderr)
+        print("  Memory store: memory/memory.sqlite; Obsidian view: memory/obsidian/", file=sys.stderr)
         print("  query_callees <function_name> [class_name] [limit] [resolution_state=resolved|all|ambiguous] - 查询函数调用的 callees", file=sys.stderr)
         print("  query_callers <function_name> [class_name] [limit] [resolution_state=resolved|all|ambiguous] - 查询调用该函数的 callers", file=sys.stderr)
         print("  query_symbol_references <symbol_name> [limit] [resolution_state=resolved|all|ambiguous]      - 查询符号的所有引用", file=sys.stderr)
@@ -2815,6 +2943,48 @@ if __name__ == "__main__":
                     if len(args) > 2:
                         broad_threshold = int(args[2])
             return query_audit_report(trace, limit, broad_threshold)
+        if command == "query_memory_record":
+            _require(args, 3, "Missing query_memory_record arguments")
+            return query_memory_record(args[0], args[1], args[2])
+        if command == "query_memory_search":
+            _require(args, 1, "Missing keyword argument")
+            intent = args[1] if len(args) > 1 else None
+            limit = int(args[2]) if len(args) > 2 else 20
+            return query_memory_search(args[0], intent, limit)
+        if command == "query_memory_validate":
+            _require(args, 1, "Missing memory_id argument")
+            return query_memory_validate(args[0])
+        if command == "query_memory_replay":
+            _require(args, 1, "Missing memory_id argument")
+            return query_memory_replay(args[0])
+        if command == "query_memory_diff":
+            _require(args, 1, "Missing memory_id argument")
+            return query_memory_diff(args[0])
+        if command == "query_memory_promote":
+            _require(args, 3, "Missing query_memory_promote arguments")
+            return query_memory_promote(args[0], args[1], args[2])
+        if command == "query_memory_subjects":
+            keyword = args[0] if args else None
+            limit = int(args[1]) if len(args) > 1 else 50
+            return query_memory_subjects(keyword, limit)
+        if command == "query_memory_negative_hints":
+            keyword = args[0] if args else None
+            limit = int(args[1]) if len(args) > 1 else 50
+            return query_memory_negative_hints(keyword, limit)
+        if command == "query_memory_snapshot":
+            _require(args, 1, "Missing query_memory_snapshot subject_id")
+            return query_memory_snapshot(args[0])
+        if command == "query_memory_render":
+            target = args[0] if args else "all"
+            view = args[1] if len(args) > 1 else "full"
+            return query_memory_render(target, view)
+        if command == "query_memory_render_graph":
+            target = args[0] if args else "all"
+            view = args[1] if len(args) > 1 else "business"
+            return query_memory_render_graph(target, view)
+        if command == "query_memory_attach_flow":
+            _require(args, 2, "Missing query_memory_attach_flow arguments")
+            return query_memory_attach_flow(args[0], args[1])
         if command == "init":
             return _branch_mgr.init_registry(_option_value(args, "--kb_store"))
         if command == "register":
@@ -2854,7 +3024,13 @@ if __name__ == "__main__":
 
     try:
         result = _run_command(command, command_args, allow_stale=allow_stale, read_only=read_only)
-        if command not in {"query_audit", "query_audit_report"} and not no_audit:
+        if command not in {
+            "query_audit", "query_audit_report",
+            "query_memory_search", "query_memory_validate", "query_memory_replay",
+            "query_memory_diff", "query_memory_record", "query_memory_promote",
+            "query_memory_subjects", "query_memory_negative_hints",
+            "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_attach_flow",
+        } and not no_audit:
             audit_error = result.get("error") if isinstance(result, dict) else None
             resolved_trace_id = _record_query_audit(
                 command,

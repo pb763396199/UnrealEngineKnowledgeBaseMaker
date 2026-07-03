@@ -418,11 +418,24 @@ def test_engine_and_plugin_impl_templates_include_runtime_commands():
         assert "def search_files" in content
         assert "def query_audit" in content
         assert "def query_audit_report" in content
+        assert "def query_memory_record" in content
+        assert "def query_memory_search" in content
+        assert "def query_memory_validate" in content
+        assert "def query_memory_replay" in content
+        assert "def query_memory_diff" in content
+        assert "def query_memory_promote" in content
+        assert "def query_memory_subjects" in content
+        assert "def query_memory_negative_hints" in content
+        assert "def query_memory_snapshot" in content
+        assert "def query_memory_render" in content
+        assert "promotion_validation" in content
+        assert "query_memory_validate(memory_id)" in content
         assert "--trace-id" in content
         assert "--allow-stale" in content
         assert "--no-audit" in content
         assert "UE5KB_NO_AUDIT" in content
-        assert "query_audit.db" in content
+        assert "memory.sqlite" in content
+        assert "ue5_kb.query.query_memory" in content
         assert "ue5_kb.query.runtime_context" in content
         assert "ue5_kb.query.source_slice" in content
         assert "ue5_kb.core.files_fts_index" in content
@@ -431,6 +444,21 @@ def test_engine_and_plugin_impl_templates_include_runtime_commands():
         assert "_stale_gate_result" in content
         assert "ambiguous_function_implementation" in content
         assert "signature_hint" in content
+
+
+def test_engine_template_memory_command_runner_uses_engine_run_command_signature(tmp_path):
+    namespace = _load_rendered_impl_namespace("templates/impl.py.template", tmp_path)
+    calls = []
+
+    def fake_run_command(command, args, allow_stale=False):
+        calls.append((command, args, allow_stale))
+        return {"ok": True, "command": command}
+
+    namespace["_run_command"] = fake_run_command
+    result = namespace["_memory_command_runner"]("source_slice", ["Feature.cpp", "1"])
+
+    assert result == {"ok": True, "command": "source_slice"}
+    assert calls == [("source_slice", ["Feature.cpp", "1"], True)]
 
 
 def test_engine_template_does_not_advertise_read_only_without_write_commands():
@@ -467,11 +495,27 @@ def test_plugin_template_read_only_blocks_write_commands_but_allows_maintenance_
     assert "Command '{command}' is disabled in read-only mode" in content
     assert '"ensure_fresh", "init", "register", "update"' in content
     assert '"preflight", "query_audit", "query_audit_report", "status", "check_freshness", "get_kb_info"' in content
+    stale_gate_segment = content[
+        content.index("def _command_requires_fresh"):
+        content.index("def _write_command")
+    ]
+    assert '"query_memory_search"' in stale_gate_segment
+    assert "query_memory_validate" not in stale_gate_segment
+    assert "query_memory_replay" not in stale_gate_segment
     write_command_segment = content[
         content.index("def _write_command"):
         content.index("def _stale_gate_result")
     ]
     assert "query_audit_report" not in write_command_segment
+    assert "query_memory_record" in write_command_segment
+    assert "query_memory_validate" in write_command_segment
+    assert "query_memory_diff" in write_command_segment
+    assert "query_memory_promote" in write_command_segment
+    assert "query_memory_snapshot" in write_command_segment
+    assert "query_memory_render" in write_command_segment
+    assert "query_memory_subjects" not in write_command_segment
+    assert "query_memory_negative_hints" not in write_command_segment
+    assert "query_memory_replay" not in write_command_segment
 
 
 def test_impl_templates_fail_closed_when_registry_resolution_fails():
@@ -497,6 +541,13 @@ def test_engine_and_plugin_skill_templates_require_preflight_and_new_commands():
         assert "search_files" in content
         assert "query_audit" in content
         assert "query_audit_report" in content
+        assert "query_memory_record" in content
+        assert "query_memory_validate" in content
+        assert "query_memory_replay" in content
+        assert "query_memory_subjects" in content
+        assert "query_memory_negative_hints" in content
+        assert "query_memory_snapshot" in content
+        assert "query_memory_render" in content
         assert "--trace-id" in content
 
 
@@ -823,6 +874,16 @@ def test_skill_templates_document_static_graph_commands():
         "trace_business_flow",
         "trace_flow_path",
         "query_audit_report",
+        "query_memory_record",
+        "query_memory_search",
+        "query_memory_validate",
+        "query_memory_replay",
+        "query_memory_diff",
+        "query_memory_promote",
+        "query_memory_subjects",
+        "query_memory_negative_hints",
+        "query_memory_snapshot",
+        "query_memory_render",
     ]
     for template in ("templates/skill.md.template", "templates/skill.plugin.md.template"):
         content = _read(template)
@@ -869,7 +930,16 @@ def test_impl_templates_expose_seed_resolution_and_query_audit_limit_rules():
         assert "query_audit --limit requires a value" in content
         assert "len(args) == 1 and args[0].isdigit()" in content
         assert 'command == "query_audit_report"' in content
-        assert 'command not in {"query_audit", "query_audit_report"}' in content
+        assert 'command == "query_memory_record"' in content
+        assert 'command == "query_memory_validate"' in content
+        stale_end = content.index("def _write_command") if "def _write_command" in content else content.index("def _stale_gate_result")
+        stale_gate_segment = content[
+            content.index("def _command_requires_fresh"):
+            stale_end
+        ]
+        assert '"query_memory_search"' in stale_gate_segment
+        assert "query_memory_validate" not in stale_gate_segment
+        assert "query_memory_replay" not in stale_gate_segment
         assert 'cli_args[0] in ("-h", "--help", "help")' in content
         assert "_print_usage(0)" in content
 

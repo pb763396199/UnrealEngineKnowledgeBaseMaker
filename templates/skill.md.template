@@ -91,8 +91,20 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | `query_enum_info` | `<enum_name> [module_hint]` | 查询枚举信息（含枚举值） |
 | `search_enums` | `<keyword> [limit=50]` | 搜索枚举 |
 | `query_examples` | `<target_name> [limit=5]` | 查询代码使用示例 |
-| `query_audit` | `[trace_id] [--limit N]` 或 `[N]` | 查看 `runtime/query_audit.db` 中的查询审计记录；单个数字参数按 limit 处理 |
+| `query_audit` | `[trace_id] [--limit N]` 或 `[N]` | 查看 `memory/memory.sqlite` 中的查询审计记录；单个数字参数按 limit 处理 |
 | `query_audit_report` | `[trace_id] [limit=200] [broad_threshold=40]` | 基于审计记录生成确定性静态统计报告，包含失败率、宽泛搜索和验收状态 |
+| `query_memory_record` | `<trace_id> <intent> <seed>` | 把一轮查询 trace 或有价值片段记录为可复用路线，不保存业务事实 |
+| `query_memory_search` | `<keyword> [intent] [limit=20]` | 搜索已沉淀路线，也返回自动审计日志中的 trace 片段候选 |
+| `query_memory_validate` | `<memory_id>` | 纯算法校验历史路线是否对当前 KB/源码仍新鲜 |
+| `query_memory_replay` | `<memory_id>` | 在当前 KB 上重跑历史路线 |
+| `query_memory_diff` | `<memory_id>` | 输出历史路线和当前查询结果的差异 |
+| `query_memory_promote` | `<trace_id> <intent> <seed>` | 把当前 trace 提升为推荐查询路线 |
+| `query_memory_subjects` | `[keyword] [limit=50]` | 查看 evidence-bound 业务主题视图；subject 不是事实主键 |
+| `query_memory_negative_hints` | `[keyword] [limit=50]` | 查看隔离失败避坑提示；不参与主图事实检索 |
+| `query_memory_snapshot` | `<subject_id\|pattern_id>` | 保存 subject 或 pattern 的完整 JSON 历史快照 |
+| `query_memory_render` | `[subject\|pattern\|all] [view=full]` | 从 `memory/memory.sqlite` 程序化生成 Obsidian Markdown/Mermaid；`full` 保持主文档 |
+| `query_memory_render_graph` | `[subject\|pattern\|all] [business\|evidence\|evolution\|query-path]` | 生成独立 graph 视图：业务、证据、演进、查询路径 |
+| `query_memory_attach_flow` | `<memory_id> <flow.json>` | 把本轮已验证证据归纳出的业务流程图附加到 memory；返回质量评分和 `publication_status`，Markdown 只默认展示 `published` 泳道业务图 |
 | `query_callees` | `<function_name> [class_name] [limit=50] [resolution_state=resolved]` | 查询函数调用目标，默认仅 resolved |
 | `query_callers` | `<function_name> [class_name] [limit=50] [resolution_state=resolved]` | 查询调用某函数的位置，默认仅 resolved |
 | `query_symbol_references` | `<symbol_name> [limit=50] [resolution_state=resolved]` | 查询符号引用，默认仅 resolved |
@@ -118,6 +130,8 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | 业务探索 | `query_static_closure`, `query_flow`, `trace_flow_path` | 高/中 | 复杂链路用它们导航，再回源验证 |
 | 实验聚合 | `trace_business_flow` | 实验 | 首轮证据聚合和画图；不能作为完整业务闭环证明 |
 | 审计复盘 | `query_audit`, `query_audit_report` | 中/高 | 统计本轮调用次数、失败率和宽泛搜索 |
+| 查询记忆 | `query_memory_search`, `query_memory_validate`, `query_memory_replay`, `query_memory_record` | 高 | 复用已沉淀路线和自动审计 trace 片段，但必须重跑当前事实 |
+| 记忆可视化 | `query_memory_subjects`, `query_memory_attach_flow`, `query_memory_render`, `query_memory_render_graph`, `query_memory_snapshot`, `query_memory_negative_hints` | 中/高 | 查看业务证据图谱、保存业务流程附注、生成 Obsidian 图、导出多视图 graph、归档快照、复查避坑 |
 | 版本统计 | `get_statistics`, `get_kb_info` | 中 | 确认 KB 规模、版本和来源 |
 
 ### 常见任务路径
@@ -127,6 +141,8 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | 查一个类 | `preflight` → `resolve_seed` → `query_class_info` → `symbol_evidence_bundle` |
 | 查一个函数 | `preflight` → `query_function_info` → `get_function_implementation` → `query_callees/query_callers` |
 | 查复杂业务链 | `preflight` → `resolve_seed` → `query_static_closure` → 按 `next_static_command_objects` 继续 `query_flow/symbol_evidence_bundle/source_slice` |
+| 复用历史业务路线 | `preflight` → `query_memory_search` → 看 `results` 和 `audit_traces` → `query_memory_validate`/`query_memory_replay` → 继续查 `expanded/changed` 缺口 |
+| 沉淀业务流程图 | 完成源码证据核查 → `query_memory_record` → 写入 flow.json（可声明 `quality_baseline`）→ `query_memory_attach_flow` → 确认 `publication_status=published` → `query_memory_render` → 打开 Markdown 复查泳道图、节点证据和关键实体覆盖 |
 | 不确定名字 | `search_classes/search_functions/search_modules` → 找到准确符号后回到结构化查询 |
 | 效率复盘 | 查询时加 `--trace-id` → `query_audit_report` |
 
@@ -163,6 +179,21 @@ py "{SKILL_PATH}/impl.py" query_audit --limit 20
 # 生成确定性静态审计统计报告，用于评估查询效率和失败率
 py "{SKILL_PATH}/impl.py" query_audit_report my-trace-id 200 40
 
+# 将本轮 trace 提升为历史查询路线；复用前必须 validate/replay
+py "{SKILL_PATH}/impl.py" query_memory_record my-trace-id explain_business_flow FeatureLayer
+py "{SKILL_PATH}/impl.py" query_memory_search FeatureLayer explain_business_flow 10
+py "{SKILL_PATH}/impl.py" query_memory_validate <memory_id>
+py "{SKILL_PATH}/impl.py" query_memory_replay <memory_id>
+py "{SKILL_PATH}/impl.py" query_memory_subjects FeatureLayer
+py "{SKILL_PATH}/impl.py" query_memory_negative_hints FeatureLayer
+py "{SKILL_PATH}/impl.py" query_memory_snapshot <subject_id_or_pattern_id>
+py "{SKILL_PATH}/impl.py" query_memory_attach_flow <memory_id> flow.json
+py "{SKILL_PATH}/impl.py" query_memory_render FeatureLayer
+py "{SKILL_PATH}/impl.py" query_memory_render_graph FeatureLayer business
+py "{SKILL_PATH}/impl.py" query_memory_render_graph FeatureLayer evidence
+py "{SKILL_PATH}/impl.py" query_memory_render_graph FeatureLayer evolution
+py "{SKILL_PATH}/impl.py" query_memory_render_graph FeatureLayer query-path
+
 # 静态证据包与引用图
 py "{SKILL_PATH}/impl.py" resolve_seed FMyFeatureFragment
 py "{SKILL_PATH}/impl.py" symbol_reference_report BeginPlay 20 all
@@ -189,6 +220,10 @@ py "{SKILL_PATH}/impl.py" get_statistics
 10. **复杂业务不要声称一条命令闭环**：`trace_business_flow` 只能做首轮静态证据聚合；它的 `automation_score.status` 和 `closure_validation.status` 不会返回 `PASS`，不得作为“完整业务逻辑/一查到底”的验收门
 11. **不要混淆两种闭包**：`trace_business_flow.coverage.closed` 固定为 `false`，表示它不是业务闭环证明；`formal_semantic_closure == false` 时，不能宣传成全局形式化语义闭包证明
 12. **复杂业务回答必须引用源码证据**：即使 `query_static_closure` 给出下一步建议，也要用 `source_slice` 或 `get_function_implementation` 验证关键入口、分支、注册、回调和终点
+13. **历史记忆先复用路线，再沉淀业务流程**：`query_memory_search` 会暴露自动审计 trace 片段，`query_memory_record/promote` 把有价值片段沉淀为稳定路线；完成业务解释后必须把本轮归纳出的泳道业务图写成 flow.json 并调用 `query_memory_attach_flow`，否则 Markdown 只能退回静态调用图，不能代表完整业务流程
+14. **业务流程附注必须过质量门槛**：`query_memory_attach_flow` 会给出确定性评分和 `publication_status`；低于 flow.json 声明的 `quality_baseline` 或通用默认基线时只保存为 `candidate`，默认 Markdown 不展示；必须补齐节点、边、泳道、分支条件、节点证据和关键实体覆盖后重挂成 `published`
+15. **业务流程附注不是原始事实源**：`query_memory_attach_flow` 保存的是基于当前源码证据归纳出的业务图；最终事实仍必须能由 `query_memory_validate/replay`、文件 hash、anchor hash 和当前 `source_slice/get_function_implementation` 复查
+16. **Obsidian Markdown 是生成物**：`query_memory_render` 只从 `memory/memory.sqlite` 生成可视化 Markdown/Mermaid，不能把 MD 当事实源手写维护；需要改格式时重新生成
 
 ---
 
