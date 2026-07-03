@@ -188,6 +188,9 @@ py "<skill>\impl.py" symbol_evidence_bundle AActor 20 all
 | 只知道关键字 | `search_classes` / `search_functions` / `search_modules` | 找到准确名字后回到结构化查询 | 中 |
 | 画静态关系图 | `query_flow <seed> ...` | 必要时用 `trace_flow_path <from> <to>` 验证连接 | 中 |
 | 统计本轮查了几次 | `query_audit_report <trace-id>` | 看失败率、宽泛搜索和效率 | 高 |
+| 复用历史路线 | `query_memory_search <keyword> [intent]` | 先看已沉淀路线和自动审计 trace 片段，再 validate/replay/补查缺口 | 高 |
+| 查看记忆图谱 | `query_memory_subjects <keyword>` | 查看 evidence-bound 业务主题视图，搜索也会返回 file/module/symbol 证据命中 | 中 |
+| 生成可视化 | `query_memory_render [subject|pattern|all]` | 输出 Obsidian Markdown/Mermaid，可人工复查 | 中 |
 | 首轮证据聚合 | `trace_business_flow <seed>` | 只能看证据和流程图，不能当闭环结论 | 实验 |
 
 ### 常见问题查询路径
@@ -213,9 +216,23 @@ py "<skill>\impl.py" symbol_evidence_bundle FeatureLayer 20 resolved
 # 复盘本轮效率
 py "<skill>\impl.py" --trace-id my-case query_class_info MyActor
 py "<skill>\impl.py" query_audit_report my-case 200 40
+
+# 沉淀并复用历史查询路线：search 会先发现自动审计 trace，历史只提供路线，事实必须重跑当前 KB
+py "<skill>\impl.py" query_memory_record my-case explain_business_flow MyActor
+py "<skill>\impl.py" query_memory_search MyActor explain_business_flow 10
+py "<skill>\impl.py" query_memory_validate <memory_id>
+py "<skill>\impl.py" query_memory_replay <memory_id>
+py "<skill>\impl.py" query_memory_subjects MyActor
+py "<skill>\impl.py" query_memory_negative_hints MyActor
+py "<skill>\impl.py" query_memory_snapshot <subject_id_or_pattern_id>
+py "<skill>\impl.py" query_memory_render MyActor
 ```
 
 `trace_business_flow` 是实验性命令。它会返回 `REVIEW_ONLY`，不能作为“完整业务逻辑已经查到底”的证明。
+`query_memory_*` 是路线和静态证据图谱复用工具，不是事实缓存；`query_memory_search` 会返回已沉淀路线和未沉淀的自动审计 trace 片段，最终答案仍要引用当前 `source_slice` 或函数实现。
+Memory 是插件/引擎级共享资产，不按 branch/variant 分开；branch、variant、commit 只用于追溯和新鲜度分析。
+失败步骤只进入 `query_memory_negative_hints`，不会进入主图 replay/validate；同一 intent 下的多个 subject 会自动形成 pattern 视图；`query_memory_render` 生成的 Markdown/Mermaid 是展示层，可随格式变化重新生成。
+`query_memory_validate` 返回 `fresh/equivalent/expanded` 时只能复用路线并重跑证据；返回 `changed/broken/unknown` 时应从 `resolve_seed` 重新查。
 
 ### 监控 Token 使用
 

@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>UE5 Knowledge Base Maker · UE 语义化 AI 知识层</title>
+<style>
+  /* 严格对齐 aesworld-pcg-agent-presentation/shared/deck.css：固定 16:9 · 1600×900 · overflow hidden · radius 30/24/8 */
+  :root {
+    --paper: #fbfaf6;
+    --paper-2: #f4f0e8;
+    --ink: #14110f;
+    --muted: #68625a;
+    --line: rgba(20, 17, 15, .12);
+    --line-strong: rgba(20, 17, 15, .22);
+    --brand: #2f6fed;
+    --brand-2: #55b59a;
+    --accent: #d56b36;
+    --green: #15806a;
+    --glass: rgba(255, 255, 255, .72);
+    --shadow: 0 28px 80px rgba(36, 31, 25, .12);
+    --radius: 24px;
+    --sans: "Inter", "Segoe UI", "Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif;
+    --mono: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+    --stage-scale: 1;
+    --stage-scaled-width: 1600px;
+    --stage-scaled-height: 900px;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; margin: 0; overflow: hidden;
+    background:
+      radial-gradient(circle at 15% 10%, rgba(47, 111, 237, .18), transparent 32vw),
+      radial-gradient(circle at 88% 18%, rgba(85, 181, 154, .16), transparent 28vw),
+      radial-gradient(circle at 72% 82%, rgba(213, 107, 54, .13), transparent 30vw),
+      var(--paper);
+    color: var(--ink); font-family: var(--sans);
+    -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none;
+    background-image:
+      linear-gradient(rgba(20, 17, 15, .035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(20, 17, 15, .035) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: radial-gradient(circle at 50% 35%, #000 0, transparent 78%);
+    z-index: 0;
+  }
+
+  .slide { width: 100vw; height: 100vh; display: grid; place-items: center; padding: 20px 32px; position: relative; overflow: hidden; }
+  .stage-viewport { width: var(--stage-scaled-width); height: var(--stage-scaled-height); position: relative; }
+  .stage {
+    width: 1600px; height: 900px; aspect-ratio: 16 / 9;
+    position: relative; overflow: hidden; border-radius: 30px;
+    background: linear-gradient(135deg, rgba(255, 255, 255, .88), rgba(255, 255, 255, .62)), var(--paper);
+    box-shadow: var(--shadow); border: 1px solid rgba(255, 255, 255, .78);
+    padding: 50px 54px;
+    transform: scale(var(--stage-scale)); transform-origin: top left;
+  }
+  .stage::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(circle at 8% 12%, rgba(255,255,255,.45), transparent 13%),
+      linear-gradient(90deg, rgba(20,17,15,.04) 1px, transparent 1px),
+      linear-gradient(rgba(20,17,15,.035) 1px, transparent 1px);
+    background-size: auto, 42px 42px, 42px 42px; opacity: .46; mix-blend-mode: multiply;
+  }
+
+  .content { position: relative; z-index: 2; height: 100%; display: flex; flex-direction: column; }
+
+  .chrome {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 24px;
+    font: 600 11px/1.2 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+    color: rgba(20, 17, 15, .56); margin-bottom: 18px;
+  }
+  .chrome .dot { color: var(--brand); }
+
+  h1, h2, h3, p { margin: 0; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 10px; width: fit-content;
+    font: 700 11px/1.1 var(--mono); letter-spacing: .16em; text-transform: uppercase;
+    color: var(--brand); margin-bottom: 12px;
+  }
+  .eyebrow::before { content: ""; width: 30px; height: 2px; background: currentColor; border-radius: 99px; }
+
+  /* ① Hero */
+  .hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 36px; }
+  .hero h1 {
+    font-size: 55px; line-height: .98; letter-spacing: -.045em; font-weight: 850;
+    background: linear-gradient(100deg, var(--ink) 36%, var(--brand) 118%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero .lead { margin-top: 12px; font-size: 19px; line-height: 1.4; color: var(--muted); font-weight: 450; }
+  .hero .why {
+    flex: 0 0 auto; text-align: right; max-width: 360px;
+    font-size: 15px; line-height: 1.5; color: var(--muted); font-weight: 450;
+    border-right: 3px solid var(--brand); padding-right: 15px;
+  }
+  .hero .why b { display: block; color: var(--ink); font-size: 17px; font-weight: 800; margin-bottom: 3px; }
+
+  /* ② 中央：左右双面板 */
+  .duo { margin-top: 22px; display: grid; grid-template-columns: 55fr 45fr; gap: 22px; flex: 1 1 auto; min-height: 0; }
+  .card {
+    background: var(--glass); border: 1px solid rgba(20,17,15,.09); border-radius: var(--radius);
+    padding: 22px 24px 18px; box-shadow: 0 18px 60px rgba(35,30,25,.08); backdrop-filter: blur(18px);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .card.lead-panel { border-color: rgba(47,111,237,.18); box-shadow: 0 22px 60px rgba(47,111,237,.12); }
+  .card .cap { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 2px; }
+  .card .cap .eyebrow { margin-bottom: 0; }
+  .card .cap .tagline { font-size: 12.5px; color: var(--brand); font-weight: 700; }
+
+  /* 左：产出流程图（压缩） */
+  .pipe-svg { width: 100%; flex: 1 1 auto; min-height: 0; display: block; margin-top: 10px; }
+
+  /* 右：知识库文件夹树 */
+  .kb-tree {
+    margin-top: 12px; flex: 1 1 auto; min-height: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(246,249,253,.92));
+    border: 1px solid rgba(69,92,126,.2); border-radius: 14px;
+    padding: 16px 18px; font-family: var(--mono); font-size: 13px; line-height: 1.62; color: #28323f;
+    overflow: hidden;
+  }
+  .kb-tree .row { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+  .kb-tree .tw { color: rgba(20,17,15,.32); }
+  .kb-tree .dir { color: #1d55c8; font-weight: 800; }
+  .kb-tree .file { color: #28323f; font-weight: 600; }
+  .kb-tree .active-dir { color: #0d6b54; font-weight: 800; }
+  .kb-tree .note { margin-left: auto; padding-left: 14px; font-size: 11px; color: #7a8699; font-weight: 500; }
+  .kb-tree .badge { font-size: 10px; color: #0d6b54; font-weight: 700; }
+  .kb-tree .lvl1 { padding-left: 0; }
+  .kb-tree .lvl2 { padding-left: 0; }
+
+  /* ③ 底部三栏 */
+  .grid3 { margin-top: 20px; display: grid; grid-template-columns: 1.04fr 1.5fr 1.12fr; gap: 22px; }
+  .col { display: flex; flex-direction: column; }
+  .col .eyebrow { font-size: 10.5px; margin-bottom: 10px; }
+  .col h2 { font-size: 19px; line-height: 1.18; font-weight: 820; letter-spacing: -.02em; }
+
+  .pain .oldchain {
+    margin-top: 11px; font-family: var(--mono); font-size: 12.5px; color: #2d3242;
+    background: rgba(47,111,237,.05); border: 1px dashed var(--line-strong);
+    border-radius: 10px; padding: 11px 12px; line-height: 1.5;
+  }
+  .pain .verdict { margin-top: 12px; font-size: 16px; font-weight: 800; color: var(--ink); line-height: 1.3; }
+  .pain .verdict b { color: var(--brand); }
+
+  .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; }
+  .step {
+    background: rgba(255,255,255,.85); border: 1px solid rgba(20,17,15,.1); border-radius: 12px;
+    padding: 10px 9px; position: relative; display: flex; flex-direction: column; gap: 4px;
+    box-shadow: 0 8px 22px rgba(28,43,67,.06);
+  }
+  .step .n {
+    width: 24px; height: 24px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand), var(--brand-2));
+    color: #fff; font-weight: 800; font-size: 12px; display: grid; place-items: center;
+  }
+  .step .cmd { font-family: var(--mono); font-size: 12.5px; color: #1d55c8; font-weight: 800; letter-spacing: -.03em; }
+  .step .desc { font-size: 11px; color: var(--muted); line-height: 1.2; }
+  .step:not(:nth-child(5))::after {
+    content: "›"; position: absolute; right: -8px; top: 50%; transform: translateY(-50%);
+    color: rgba(20,17,15,.3); font-size: 18px; font-weight: 700; z-index: 2;
+  }
+  .entries { margin-top: 11px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .ent {
+    background: rgba(47,111,237,.06); border: 1px solid rgba(47,111,237,.16); border-radius: 10px;
+    padding: 8px 11px; display: flex; flex-direction: column; gap: 2px;
+  }
+  .ent .ec { font: 800 12.5px/1.1 var(--mono); color: #1f56cf; letter-spacing: -.03em; }
+  .ent .ed { font-size: 10.5px; color: var(--muted); line-height: 1.25; }
+
+  .diff ul { list-style: none; margin: 11px 0 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+  .diff li { font-size: 13px; color: var(--muted); line-height: 1.32; padding-left: 19px; position: relative; }
+  .diff li b { color: var(--ink); }
+  .diff li::before {
+    content: ""; position: absolute; left: 0; top: 6px; width: 9px; height: 9px; border-radius: 3px;
+    background: linear-gradient(135deg, var(--brand), var(--brand-2));
+  }
+  .diff .fine { margin-top: auto; padding-top: 10px; font-size: 11.5px; color: rgba(20,17,15,.55); }
+  .diff .fine b { color: var(--brand); }
+
+  .footer {
+    margin-top: 18px; display: flex; justify-content: space-between; align-items: center; gap: 24px;
+    border-top: 1px solid var(--line); padding-top: 14px;
+    font: 600 11px/1.3 var(--mono); letter-spacing: .06em; color: rgba(20,17,15,.55);
+  }
+  .footer .tri { display: flex; gap: 28px; }
+  .footer .tri b { color: var(--ink); font-weight: 800; }
+  .footer .ent-pill {
+    font: 800 12px/1 var(--mono); color: #1f56cf;
+    background: rgba(47,111,237,.1); border: 1px solid rgba(47,111,237,.2);
+    border-radius: 999px; padding: 9px 16px; letter-spacing: -.01em; text-transform: none;
+  }
+</style>
+</head>
+<body>
+  <div class="slide">
+    <div class="stage-viewport">
+      <main class="stage">
+        <div class="content">
+
+          <div class="chrome">
+            <span>UE5 Knowledge Base Maker <span class="dot">·</span> UE-aware AI Knowledge Layer</span>
+            <span>工具介绍 <span class="dot">·</span> v2.14</span>
+          </div>
+
+          <!-- ① Hero -->
+          <header class="hero">
+            <div>
+              <div class="eyebrow">UE 语义化 AI 知识层</div>
+              <h1>UE5 Knowledge Base Maker</h1>
+              <p class="lead">给 AI Agent 一张「读得懂 UE 源码」的地图。</p>
+            </div>
+            <div class="why">
+              <b>核心机制</b>
+              扫源码 · 建 UE 语义索引 · 生成可被 Agent 直接调用的 Claude Skill
+            </div>
+          </header>
+
+          <!-- ② 中央：左=产出流程 / 右=知识库文件夹 -->
+          <section class="duo">
+
+            <!-- 左面板：产出怎么做的 + 多分支 -->
+            <div class="card lead-panel">
+              <div class="cap">
+                <div class="eyebrow">产出怎么做的 · 多分支</div>
+                <span class="tagline">每 worktree 一份独立快照</span>
+              </div>
+              <svg class="pipe-svg" viewBox="0 0 760 360" preserveAspectRatio="xMidYMid meet" role="img" aria-label="多分支知识库产出流程">
+                <defs>
+                  <linearGradient id="g-pipe" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0" stop-color="#2f6fed"/><stop offset="1" stop-color="#55b59a"/>
+                  </linearGradient>
+                  <linearGradient id="g-kb" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#eef4ff"/><stop offset="1" stop-color="#dce9ff"/>
+                  </linearGradient>
+                  <marker id="ar" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+                    <path d="M0,0 L7.5,3 L0,6 Z" fill="#2f6fed"/>
+                  </marker>
+                </defs>
+
+                <!-- 源码输入 -->
+                <rect x="6" y="10" width="240" height="60" rx="11" fill="#ffffff" stroke="#d6dcea"/>
+                <text x="126" y="36" text-anchor="middle" font-size="16" font-weight="800" fill="#172033">插件源码 worktree</text>
+                <text x="126" y="56" text-anchor="middle" font-size="12.5" fill="#56647a">.Build.cs · .h · .cpp</text>
+
+                <!-- 5阶段管线（竖直堆叠成一条流水带） -->
+                <rect x="290" y="12" width="464" height="56" rx="11" fill="url(#g-pipe)"/>
+                <text x="522" y="36" text-anchor="middle" font-size="15.5" font-weight="800" fill="#ffffff">discover › extract › analyze › build › generate</text>
+                <text x="522" y="56" text-anchor="middle" font-size="11.5" fill="#eaf3ff">正则 Provider · 并行 · 增量(SHA256)</text>
+                <line x1="246" y1="40" x2="288" y2="40" stroke="#2f6fed" stroke-width="2.4" marker-end="url(#ar)"/>
+
+                <!-- KnowledgeBase 分支注册表 -->
+                <rect x="6" y="98" width="748" height="172" rx="14" fill="url(#g-kb)" stroke="#b9d0f3"/>
+                <text x="24" y="122" font-size="14" font-weight="800" fill="#2f6fed">分支注册表 registry.db + variants/&lt;commit&gt;</text>
+
+                <rect x="24" y="134" width="230" height="120" rx="10" fill="#ffffff" stroke="#2f6fed" stroke-width="2.4"/>
+                <text x="42" y="160" font-size="15" font-weight="800" fill="#172033">DEV</text>
+                <text x="236" y="160" text-anchor="end" font-size="11.5" fill="#15806a" font-weight="800">● active·fresh</text>
+                <text x="42" y="183" font-size="12" fill="#56647a">40 模块快照</text>
+                <text x="42" y="202" font-size="11.5" fill="#7a8699">commit a1b2c3d</text>
+                <text x="42" y="222" font-size="11" fill="#7a8699">Splatmap/D3D12</text>
+                <text x="42" y="240" font-size="11" fill="#7a8699">/Junction</text>
+
+                <rect x="266" y="134" width="230" height="120" rx="10" fill="#ffffff" stroke="#c2d3ef"/>
+                <text x="284" y="160" font-size="15" font-weight="800" fill="#172033">DEV_1</text>
+                <text x="478" y="160" text-anchor="end" font-size="11.5" fill="#7a8699" font-weight="700">独立快照</text>
+                <text x="284" y="183" font-size="12" fill="#56647a">Atlas / Bindless</text>
+                <text x="284" y="202" font-size="11.5" fill="#7a8699">Nanite 多网格</text>
+                <text x="284" y="240" font-size="11" fill="#7a8699">与 DEV 互不污染</text>
+
+                <rect x="508" y="134" width="230" height="120" rx="10" fill="#ffffff" stroke="#c2d3ef"/>
+                <text x="526" y="160" font-size="15" font-weight="800" fill="#172033">DEV_2</text>
+                <text x="720" y="160" text-anchor="end" font-size="11.5" fill="#7a8699" font-weight="700">独立快照</text>
+                <text x="526" y="183" font-size="12" fill="#56647a">USH / Runtime</text>
+                <text x="526" y="202" font-size="11.5" fill="#7a8699">Shader / Voxel</text>
+                <text x="526" y="240" font-size="11" fill="#7a8699">hardlink 去重共享</text>
+
+                <line x1="126" y1="70" x2="126" y2="96" stroke="#2f6fed" stroke-width="2.4" marker-end="url(#ar)"/>
+
+                <!-- Skill 出口 + freshness -->
+                <rect x="6" y="296" width="430" height="56" rx="11" fill="#ffffff" stroke="#d6dcea"/>
+                <text x="24" y="320" font-size="14" font-weight="800" fill="#172033">Claude Skill · impl.py</text>
+                <text x="24" y="340" font-size="11.5" fill="#56647a">→ Agent 一条命令查结构化答案</text>
+                <line x1="139" y1="254" x2="160" y2="294" stroke="#2f6fed" stroke-width="2.2" marker-end="url(#ar)"/>
+
+                <rect x="452" y="296" width="302" height="56" rx="11" fill="rgba(21,128,106,.08)" stroke="rgba(21,128,106,.42)"/>
+                <text x="603" y="320" text-anchor="middle" font-size="13" font-weight="800" fill="#0d6b54">ensure_fresh · 新鲜度门禁</text>
+                <text x="603" y="340" text-anchor="middle" font-size="11" fill="#56647a">切 worktree 自动对齐 / 重建</text>
+              </svg>
+            </div>
+
+            <!-- 右面板：生成的知识库文件夹结构 -->
+            <div class="card">
+              <div class="cap">
+                <div class="eyebrow">产出是什么 · 知识库目录</div>
+                <span class="tagline">~/.agents/skills/aesworld-kb/</span>
+              </div>
+              <div class="kb-tree">
+                <div class="row"><span class="dir">aesworld-kb/</span><span class="note">共享 Skill 根</span></div>
+                <div class="row"><span class="tw">├─</span><span class="file">skill.md · impl.py</span><span class="note">查询入口</span></div>
+                <div class="row"><span class="tw">├─</span><span class="file">registry.db</span><span class="note">分支注册表 + 新鲜度</span></div>
+                <div class="row"><span class="tw">└─</span><span class="dir">variants/</span><span class="note">每分支一份快照</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;├─</span><span class="active-dir">&lt;DEV commit&gt;/</span><span class="badge">● active</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;├─</span><span class="dir">global_index/</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;│&nbsp;&nbsp;├─</span><span class="file">index.db</span><span class="note">SQLite 快查</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;│&nbsp;&nbsp;├─</span><span class="file">class_index.db</span><span class="note">类 500x</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;│&nbsp;&nbsp;├─</span><span class="file">function_index.db</span><span class="note">函数 800x</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;│&nbsp;&nbsp;├─</span><span class="file">enum_index.db</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;│&nbsp;&nbsp;└─</span><span class="file">global_index.pkl</span><span class="note">完整图谱</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;├─</span><span class="dir">module_graphs/</span><span class="note">40 个 .pkl</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;│&nbsp;&nbsp;└─</span><span class="file">AesEarth.pkl · …</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;├─</span><span class="dir">memory/</span><span class="note">memory.sqlite + Obsidian 图谱</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;├─</span><span class="dir">&lt;DEV_1 commit&gt;/</span><span class="note">hardlink 去重</span></div>
+                <div class="row"><span class="tw">&nbsp;&nbsp;&nbsp;└─</span><span class="dir">&lt;DEV_2 commit&gt;/</span><span class="note">hardlink 去重</span></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ③ 底部三栏 -->
+          <section class="grid3">
+            <div class="col pain">
+              <div class="eyebrow">为什么需要它</div>
+              <h2>Agent 卡的不是写代码，是读不懂代码库</h2>
+              <div class="oldchain">grep 满屏噪声 → 分不清 声明/实现/调用 → 几十万行塞不进上下文</div>
+              <div class="verdict">缺的不是算力，是 <b>UE 语义化的索引地图</b>。</div>
+            </div>
+
+            <div class="col">
+              <div class="eyebrow">产出流水线 · 一条 ue5kb init</div>
+              <div class="flow">
+                <div class="step"><span class="n">1</span><span class="cmd">discover</span><span class="desc">扫 .Build.cs</span></div>
+                <div class="step"><span class="n">2</span><span class="cmd">extract</span><span class="desc">依赖/类/函数</span></div>
+                <div class="step"><span class="n">3</span><span class="cmd">analyze</span><span class="desc">继承/调用图</span></div>
+                <div class="step"><span class="n">4</span><span class="cmd">build</span><span class="desc">SQLite 索引</span></div>
+                <div class="step"><span class="n">5</span><span class="cmd">generate</span><span class="desc">生成 Skill</span></div>
+              </div>
+              <div class="entries">
+                <div class="ent"><span class="ec">preflight</span><span class="ed">查询前预检，stale 自动刷新</span></div>
+                <div class="ent"><span class="ec">query_class_info</span><span class="ed">继承链/模块/行号/说明符</span></div>
+                <div class="ent"><span class="ec">get_function_impl</span><span class="ed">直接返回完整实现代码</span></div>
+                <div class="ent"><span class="ec">ensure_fresh</span><span class="ed">按 worktree 对齐快照</span></div>
+              </div>
+            </div>
+
+            <div class="col diff">
+              <div class="eyebrow">和裸 grep 的差异</div>
+              <ul>
+                <li><b>UE 语义化</b>：继承链/依赖/UCLASS 说明符，不止文本匹配</li>
+                <li><b>渐进披露</b>：摘要→详情→源码，80–85% 上下文压缩</li>
+                <li><b>索引快查</b>：类 500x / 函数 800x，毫秒级返回</li>
+                <li><b>带新鲜度</b>：结果标注 fresh/stale，杜绝幻觉</li>
+              </ul>
+              <div class="fine">+ <b>多分支快照</b>：DEV / DEV_1 / DEV_2 并存，去重不占空间</div>
+            </div>
+          </section>
+
+          <footer class="footer">
+            <div class="tri">
+              <span><b>读得准</b> · UE 语义索引</span>
+              <span><b>查得快</b> · 毫秒级返回</span>
+              <span><b>多分支可信</b> · 每分支独立快照</span>
+            </div>
+            <span class="ent-pill">ue5kb init → ~/.agents/skills/</span>
+          </footer>
+
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // 宽高双向等比缩放取较小者，保证 16:9 完整一屏不溢出（对齐 deck.css）
+    (function () {
+      var DESIGN_W = 1600, DESIGN_H = 900;
+      var viewport = document.querySelector('.stage-viewport');
+      function fit() {
+        var availW = window.innerWidth - 64;
+        var availH = window.innerHeight - 40;
+        var scale = Math.min(availW / DESIGN_W, availH / DESIGN_H);
+        document.documentElement.style.setProperty('--stage-scale', scale);
+        viewport.style.setProperty('--stage-scaled-width', (DESIGN_W * scale) + 'px');
+        viewport.style.setProperty('--stage-scaled-height', (DESIGN_H * scale) + 'px');
+      }
+      window.addEventListener('resize', fit);
+      window.addEventListener('load', fit);
+      fit();
+    })();
+  </script>
+</body>
+</html>
