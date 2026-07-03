@@ -164,6 +164,85 @@ def test_query_memory_replay_hash_is_invariant_to_environment_meta(tmp_path):
     assert validation["overall"] == "fresh"
 
 
+def test_query_memory_attach_flow_rejects_fabricated_evidence(tmp_path):
+    """程序化证据校验：AI 无法用假 file:line 混过质量门禁。"""
+    skill_dir = tmp_path / "Skill"
+    source_root = tmp_path / "Source"
+    source_root.mkdir()
+    (source_root / "Real.cpp").write_text("\n".join(f"line{i}" for i in range(1, 21)), encoding="utf-8")
+
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="trace-ev",
+        command="source_slice",
+        args=["Real.cpp", "5"],
+        context=_context(source_root),
+        result={"file": "Real.cpp", "found_count": 1},
+    )
+
+    def runner(command, args):
+        return {"file": args[0], "line_start": int(args[1]), "found_count": 1}
+
+    recorded = record_memory(
+        skill_dir=skill_dir,
+        trace_id="trace-ev",
+        intent="explain_business_flow",
+        seed="EvidenceGate",
+        context=_context(source_root),
+        source_root=source_root,
+        command_runner=runner,
+    )
+
+    # 假文件与越界行号都必须被拒
+    rejected = attach_business_flow(
+        skill_dir=skill_dir,
+        memory_id=recorded["memory_id"],
+        flow={
+            "title": "假证据流程",
+            "nodes": [
+                {"id": "a", "label": "真实节点", "summary": "s", "details": ["d"], "evidence": ["Real.cpp:5"]},
+                {"id": "b", "label": "假文件节点", "summary": "s", "details": ["d"], "evidence": ["Fake.cpp:1"]},
+                {"id": "c", "label": "越界行号节点", "summary": "s", "details": ["d"], "evidence": ["Real.cpp:999"]},
+            ],
+            "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
+        },
+        source_root=source_root,
+    )
+    assert rejected["publication_status"] == "candidate"
+    assert rejected["quality"]["status"] == "evidence_validation_failed"
+    reasons = {item["reason"] for item in rejected["evidence_validation"]["invalid"]}
+    assert reasons == {"file_not_found", "line_out_of_range"}
+
+    # 全真实证据可正常通过校验（不因校验器误伤）
+    accepted = attach_business_flow(
+        skill_dir=skill_dir,
+        memory_id=recorded["memory_id"],
+        flow={
+            "title": "真证据流程",
+            "nodes": [
+                {"id": "a", "label": "节点A", "summary": "s", "details": ["d"], "evidence": ["Real.cpp:5"]},
+                {"id": "b", "label": "节点B", "summary": "s", "details": ["d"], "evidence": ["Real.cpp:10 | 注释"]},
+            ],
+            "edges": [{"source": "a", "target": "b"}],
+        },
+        source_root=source_root,
+    )
+    assert accepted["evidence_validation"]["all_valid"] is True
+    # 校验通过的锚点必须带 anchor_hash 入库
+    import json as _json
+    conn = sqlite3.connect(str(skill_dir / "memory" / "memory.sqlite"))
+    try:
+        flow_json = conn.execute(
+            "SELECT flow_json FROM business_flow_annotations WHERE id=?", (accepted["annotation_id"],)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    stored = _json.loads(flow_json)
+    anchors = [a for node in stored["nodes"] for a in node.get("evidence_anchors", [])]
+    assert len(anchors) == 2
+    assert all(a["anchor_hash"] for a in anchors)
+
+
 def test_query_memory_search_surfaces_unrecorded_audit_trace_fragments(tmp_path):
     skill_dir = tmp_path / "Skill"
     source_root = tmp_path / "Source"

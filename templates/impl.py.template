@@ -30,6 +30,7 @@ from ue5_kb.query.query_memory import (
     snapshot_memory as _query_memory_snapshot,
     validate_memory as _query_memory_validate,
 )
+from ue5_kb.query.memory_site import export_site as _query_memory_render_site
 from ue5_kb.query.runtime_context import preflight as _build_preflight
 from ue5_kb.query.source_slice import slice_source as _slice_source
 
@@ -218,13 +219,18 @@ def query_memory_render_graph(target: str = "all", view: str = "business") -> Di
     return _query_memory_render(skill_dir=SKILL_DIR, target=target, view=view)
 
 
+def query_memory_render_site() -> Dict[str, Any]:
+    """从 memory.sqlite 程序化生成整库交互 wiki（memory/wiki/index.html）。"""
+    return _query_memory_render_site(skill_dir=SKILL_DIR, source_root=SOURCE_ROOT)
+
+
 def query_memory_attach_flow(memory_id: str, flow_json_path: str) -> Dict[str, Any]:
-    """为已有 memory 附加人工/AI 归纳的业务流程图。"""
+    """为已有 memory 附加人工/AI 归纳的业务流程图（证据 file:line 将被程序化校验）。"""
     flow_path = Path(flow_json_path)
     if not flow_path.is_absolute():
         flow_path = SKILL_DIR / flow_path
     flow = json.loads(flow_path.read_text(encoding="utf-8"))
-    return _query_memory_attach_flow(skill_dir=SKILL_DIR, memory_id=memory_id, flow=flow)
+    return _query_memory_attach_flow(skill_dir=SKILL_DIR, memory_id=memory_id, flow=flow, source_root=SOURCE_ROOT)
 
 
 def source_slice(
@@ -2456,7 +2462,7 @@ if __name__ == "__main__":
             "preflight", "query_audit", "query_audit_report", "get_kb_info",
             "query_memory_search", "query_memory_record", "query_memory_promote",
             "query_memory_subjects", "query_memory_negative_hints",
-            "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_attach_flow",
+            "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_render_site", "query_memory_attach_flow",
         }
 
     def _stale_gate_result(command):
@@ -2505,7 +2511,8 @@ if __name__ == "__main__":
         print("  query_memory_snapshot <subject_id|pattern_id> - 保存完整 JSON 历史快照", file=sys.stderr)
         print("  query_memory_render [subject|pattern|all] [view=full] - 生成 Obsidian Markdown/Mermaid", file=sys.stderr)
         print("  query_memory_render_graph [subject|pattern|all] [business|evidence|evolution|query-path] - 生成 graph 视图", file=sys.stderr)
-        print("  query_memory_attach_flow <memory_id> <flow.json> - 为历史路线附加可读业务流程图", file=sys.stderr)
+        print("  query_memory_render_site                   - 生成整库交互 wiki（memory/wiki/index.html 双击即开）", file=sys.stderr)
+        print("  query_memory_attach_flow <memory_id> <flow.json> - 为历史路线附加可读业务流程图（证据程序化校验）", file=sys.stderr)
         print("  Memory store: memory/memory.sqlite; Obsidian view: memory/obsidian/", file=sys.stderr)
         print("  query_callees <function_name> [class_name] [limit] [resolution_state=resolved|all|ambiguous|unresolved] - 查询函数调用目标", file=sys.stderr)
         print("  query_callers <function_name> [class_name] [limit] [resolution_state=resolved|all|ambiguous|unresolved] - 查询调用该函数的位置", file=sys.stderr)
@@ -2680,6 +2687,8 @@ if __name__ == "__main__":
             target = args[0] if args else "all"
             view = args[1] if len(args) > 1 else "business"
             return query_memory_render_graph(target, view)
+        if command == "query_memory_render_site":
+            return query_memory_render_site()
         if command == "query_memory_attach_flow":
             _require(args, 2, "Missing query_memory_attach_flow arguments")
             return query_memory_attach_flow(args[0], args[1])
@@ -2756,7 +2765,7 @@ if __name__ == "__main__":
             "query_memory_search", "query_memory_validate", "query_memory_replay",
             "query_memory_diff", "query_memory_record", "query_memory_promote",
             "query_memory_subjects", "query_memory_negative_hints",
-            "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_attach_flow",
+            "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_render_site", "query_memory_attach_flow",
         } and not no_audit:
             audit_error = result.get("error") if isinstance(result, dict) else None
             resolved_trace_id = _record_query_audit(

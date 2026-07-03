@@ -1223,11 +1223,57 @@ def record_memory(
         conn.close()
 
 
+def _validate_flow_evidence(source_root: Optional[Path], nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """程序化校验 flow 节点证据：file:line 必须真实存在且行号在范围内。
+
+    这是堵住"AI 写假证据混过质量门禁"的机器校验闸：解释层（命名/摘要）可以由
+    AI 提供，但事实层锚点必须现场可证伪。校验通过的锚点当场计算 anchor hash
+    入库，供后续 flow 级新鲜度判定使用。
+    """
+    checked = 0
+    invalid: List[Dict[str, Any]] = []
+    for node in nodes:
+        anchors: List[Dict[str, Any]] = []
+        for ref in node.get("evidence", []):
+            checked += 1
+            # 允许 "path:line | 注释" 形式，仅校验 path:line 核心部分
+            ref_core = str(ref).split("|", 1)[0].strip()
+            path_part, _, line_part = ref_core.rpartition(":")
+            reason = None
+            anchor = None
+            if not path_part or not line_part.isdigit():
+                reason = "malformed_reference"
+            elif source_root is None:
+                reason = "source_root_unavailable"
+            else:
+                target = _relative_file_path(source_root, path_part)
+                if not target.exists() or not target.is_file():
+                    reason = "file_not_found"
+                else:
+                    line_number = int(line_part)
+                    try:
+                        total_lines = len(target.read_text(encoding="utf-8", errors="ignore").splitlines())
+                    except OSError:
+                        total_lines = 0
+                    if line_number < 1 or line_number > total_lines:
+                        reason = "line_out_of_range"
+                    else:
+                        anchor = _anchor_hash(target, line_number)
+            if reason:
+                invalid.append({"node": node.get("id"), "reference": ref, "reason": reason})
+            else:
+                anchors.append({"reference": ref, "anchor_hash": anchor})
+        if anchors:
+            node["evidence_anchors"] = anchors
+    return {"checked": checked, "invalid": invalid, "all_valid": not invalid}
+
+
 def attach_business_flow(
     *,
     skill_dir: Path,
     memory_id: str,
     flow: Dict[str, Any],
+    source_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Attach an evidence-bound business-flow annotation to a recorded memory.
 
@@ -1252,8 +1298,20 @@ def attach_business_flow(
                 "subject_id": subject_id,
                 "error": "flow requires at least one node",
             }
+        effective_source_root = source_root
+        if effective_source_root is None and memory.get("source_root"):
+            effective_source_root = Path(str(memory.get("source_root")))
+        evidence_validation = _validate_flow_evidence(effective_source_root, normalized["nodes"])
+        normalized["evidence_validation"] = evidence_validation
         annotation_id = "flow-" + uuid.uuid4().hex
         quality = normalized.get("quality") if isinstance(normalized.get("quality"), dict) else {}
+        if not evidence_validation["all_valid"]:
+            quality = dict(quality)
+            quality["passed"] = False
+            quality["status"] = "evidence_validation_failed"
+            quality.setdefault("checks", {})
+            quality["checks"]["invalid_evidence"] = evidence_validation["invalid"]
+            normalized["quality"] = quality
         publication_status = "published" if quality.get("passed") else "candidate"
         normalized["publication_status"] = publication_status
         flow_json = stable_json_full(normalized)
@@ -1276,6 +1334,7 @@ def attach_business_flow(
             "edge_count": len(normalized["edges"]),
             "lane_count": len(normalized.get("lanes", [])),
             "quality": normalized.get("quality", {}),
+            "evidence_validation": evidence_validation,
             "publication_status": publication_status,
             "graph_hash": graph_hash,
             "stores_business_flow": True,
