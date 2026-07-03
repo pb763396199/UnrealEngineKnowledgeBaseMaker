@@ -17,6 +17,217 @@ DEFAULT_REPORT_LIMIT = 200
 DEFAULT_BROAD_RESULT_THRESHOLD = 40
 
 
+def memory_db_path(skill_dir: Path) -> Path:
+    return Path(skill_dir) / "memory" / "memory.sqlite"
+
+
+def legacy_memory_db_path(skill_dir: Path) -> Path:
+    return Path(skill_dir) / "runtime" / "query_audit.db"
+
+
+def ensure_memory_store(skill_dir: Path) -> Path:
+    """Return canonical memory DB path and import legacy audit rows if present."""
+    skill_dir = Path(skill_dir)
+    db_path = memory_db_path(skill_dir)
+    legacy_path = legacy_memory_db_path(skill_dir)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not db_path.exists() and legacy_path.exists():
+        import shutil
+
+        shutil.copy2(legacy_path, db_path)
+        return db_path
+    if db_path.exists() and legacy_path.exists():
+        _merge_legacy_audit_rows(db_path, legacy_path)
+    return db_path
+
+
+def _ensure_audit_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS query_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_query_runs_trace_id ON query_runs(trace_id);
+        CREATE TABLE IF NOT EXISTS query_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT,
+            FOREIGN KEY(run_id) REFERENCES query_runs(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_query_steps_trace_id ON query_steps(trace_id);
+        """
+    )
+    for table in ("query_runs", "query_steps"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if "timestamp" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN timestamp TEXT")
+    conn.commit()
+
+
+def _merge_legacy_audit_rows(db_path: Path, legacy_path: Path) -> None:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_audit_schema(conn)
+        conn.execute("ATTACH DATABASE ? AS legacy", (str(legacy_path),))
+        run_exists = conn.execute(
+            "SELECT 1 FROM legacy.sqlite_master WHERE type='table' AND name='query_runs'"
+        ).fetchone()
+        step_exists = conn.execute(
+            "SELECT 1 FROM legacy.sqlite_master WHERE type='table' AND name='query_steps'"
+        ).fetchone()
+        run_id_map: Dict[int, int] = {}
+        if run_exists:
+            legacy_run_columns = {row[1] for row in conn.execute("PRAGMA legacy.table_info(query_runs)").fetchall()}
+            target_run_columns = [
+                column
+                for column in (
+                    "trace_id",
+                    "command",
+                    "args_summary",
+                    "started_at",
+                    "finished_at",
+                    "timestamp",
+                    "duration_ms",
+                    "status",
+                    "data_trust",
+                    "branch",
+                    "source",
+                    "commit_id",
+                    "dirty",
+                    "fingerprint",
+                    "result_count",
+                    "error",
+                    "fallback",
+                )
+                if column in legacy_run_columns
+            ]
+            select_columns = ["id"] + target_run_columns
+            rows = conn.execute(f"SELECT {', '.join(select_columns)} FROM legacy.query_runs ORDER BY id").fetchall()
+            for row in rows:
+                old_id = int(row[0])
+                values = dict(zip(target_run_columns, row[1:]))
+                existing = conn.execute(
+                    """
+                    SELECT id FROM query_runs
+                    WHERE trace_id=? AND command=? AND COALESCE(args_summary,'')=COALESCE(?, '')
+                      AND started_at=? AND finished_at=? AND status=?
+                    """,
+                    (
+                        values.get("trace_id"),
+                        values.get("command"),
+                        values.get("args_summary"),
+                        values.get("started_at"),
+                        values.get("finished_at"),
+                        values.get("status"),
+                    ),
+                ).fetchone()
+                if existing:
+                    run_id_map[old_id] = int(existing[0])
+                    continue
+                placeholders = ", ".join("?" for _ in target_run_columns)
+                cursor = conn.execute(
+                    f"INSERT INTO query_runs ({', '.join(target_run_columns)}) VALUES ({placeholders})",
+                    [values.get(column) for column in target_run_columns],
+                )
+                run_id_map[old_id] = int(cursor.lastrowid)
+        if step_exists:
+            legacy_step_columns = {row[1] for row in conn.execute("PRAGMA legacy.table_info(query_steps)").fetchall()}
+            target_step_columns = [
+                column
+                for column in (
+                    "trace_id",
+                    "command",
+                    "args_summary",
+                    "started_at",
+                    "finished_at",
+                    "timestamp",
+                    "duration_ms",
+                    "status",
+                    "data_trust",
+                    "branch",
+                    "source",
+                    "commit_id",
+                    "dirty",
+                    "fingerprint",
+                    "result_count",
+                    "error",
+                    "fallback",
+                )
+                if column in legacy_step_columns
+            ]
+            select_columns = ["id", "run_id"] + target_step_columns
+            rows = conn.execute(f"SELECT {', '.join(select_columns)} FROM legacy.query_steps ORDER BY id").fetchall()
+            for row in rows:
+                old_run_id = int(row[1])
+                new_run_id = run_id_map.get(old_run_id)
+                if new_run_id is None:
+                    continue
+                values = dict(zip(target_step_columns, row[2:]))
+                existing = conn.execute(
+                    """
+                    SELECT 1 FROM query_steps
+                    WHERE trace_id=? AND command=? AND COALESCE(args_summary,'')=COALESCE(?, '')
+                      AND started_at=? AND finished_at=? AND status=?
+                    """,
+                    (
+                        values.get("trace_id"),
+                        values.get("command"),
+                        values.get("args_summary"),
+                        values.get("started_at"),
+                        values.get("finished_at"),
+                        values.get("status"),
+                    ),
+                ).fetchone()
+                if existing:
+                    continue
+                insert_columns = ["run_id"] + target_step_columns
+                placeholders = ", ".join("?" for _ in insert_columns)
+                conn.execute(
+                    f"INSERT INTO query_steps ({', '.join(insert_columns)}) VALUES ({placeholders})",
+                    [new_run_id] + [values.get(column) for column in target_step_columns],
+                )
+        conn.commit()
+    finally:
+        try:
+            conn.execute("DETACH DATABASE legacy")
+        except Exception:
+            pass
+        conn.close()
+
+
 def resolve_trace_id(explicit_trace_id: Optional[str] = None) -> str:
     """Resolve trace id from CLI, environment, or a generated UUID."""
     if explicit_trace_id:
@@ -121,62 +332,10 @@ class QueryAudit:
 
     @classmethod
     def for_skill(cls, skill_dir: Path) -> "QueryAudit":
-        return cls(Path(skill_dir) / "runtime" / "query_audit.db")
+        return cls(ensure_memory_store(skill_dir))
 
     def _create_schema(self) -> None:
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS query_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trace_id TEXT NOT NULL,
-                command TEXT NOT NULL,
-                args_summary TEXT,
-                started_at REAL NOT NULL,
-                finished_at REAL NOT NULL,
-                timestamp TEXT,
-                duration_ms INTEGER,
-                status TEXT NOT NULL,
-                data_trust TEXT,
-                branch TEXT,
-                source TEXT,
-                commit_id TEXT,
-                dirty INTEGER,
-                fingerprint TEXT,
-                result_count INTEGER,
-                error TEXT,
-                fallback TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_query_runs_trace_id ON query_runs(trace_id);
-            CREATE TABLE IF NOT EXISTS query_steps (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id INTEGER NOT NULL,
-                trace_id TEXT NOT NULL,
-                command TEXT NOT NULL,
-                args_summary TEXT,
-                started_at REAL NOT NULL,
-                finished_at REAL NOT NULL,
-                timestamp TEXT,
-                duration_ms INTEGER,
-                status TEXT NOT NULL,
-                data_trust TEXT,
-                branch TEXT,
-                source TEXT,
-                commit_id TEXT,
-                dirty INTEGER,
-                fingerprint TEXT,
-                result_count INTEGER,
-                error TEXT,
-                fallback TEXT,
-                FOREIGN KEY(run_id) REFERENCES query_runs(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_query_steps_trace_id ON query_steps(trace_id);
-            """
-        )
-        for table in ("query_runs", "query_steps"):
-            columns = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
-            if "timestamp" not in columns:
-                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN timestamp TEXT")
-        self.conn.commit()
+        _ensure_audit_schema(self.conn)
 
     def record(
         self,
@@ -581,13 +740,16 @@ def record_query(
     audit = QueryAudit.for_skill(skill_dir)
     try:
         resolved_trace_id = resolve_trace_id(trace_id)
+        inferred_error = error
+        if inferred_error is None and isinstance(result, dict) and result.get("error"):
+            inferred_error = str(result.get("error"))
         audit.record(
             trace_id=resolved_trace_id,
             command=command,
             args=args,
             context=context,
             result=result,
-            error=error,
+            error=inferred_error,
             started_at=started_at,
             finished_at=finished_at,
         )

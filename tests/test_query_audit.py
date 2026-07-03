@@ -1,6 +1,7 @@
 import sqlite3
 
 from ue5_kb.query.query_audit import QueryAudit, record_query
+from ue5_kb.query.query_memory import _connect as _connect_query_memory
 
 
 def test_query_audit_writes_runs_and_steps_without_result_body(tmp_path):
@@ -29,7 +30,7 @@ def test_query_audit_writes_runs_and_steps_without_result_body(tmp_path):
     )
 
     assert trace_id == "trace-demo"
-    db_path = skill_dir / "runtime" / "query_audit.db"
+    db_path = skill_dir / "memory" / "memory.sqlite"
     conn = sqlite3.connect(str(db_path))
     run_count = conn.execute("SELECT COUNT(*) FROM query_runs").fetchone()[0]
     step_count = conn.execute("SELECT COUNT(*) FROM query_steps").fetchone()[0]
@@ -80,6 +81,332 @@ def test_query_audit_records_failures_and_recent_steps(tmp_path):
     assert recent["steps"][0]["error"] == "parent traversal is not allowed"
 
 
+def test_query_audit_infers_failure_from_result_error(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="trace-result-error",
+        command="query_class_info",
+        args=["Missing"],
+        context={"data_trust": "fresh"},
+        result={"error": "not found"},
+    )
+
+    audit = QueryAudit.for_skill(skill_dir)
+    try:
+        recent = audit.recent("trace-result-error", 10)
+    finally:
+        audit.close()
+
+    assert recent["found_count"] == 1
+    assert recent["steps"][0]["status"] == "error"
+    assert recent["steps"][0]["error"] == "not found"
+
+
+def test_query_audit_migrates_legacy_runtime_db_to_memory_store(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    legacy_dir = skill_dir / "runtime"
+    legacy_dir.mkdir(parents=True)
+    legacy_db = legacy_dir / "query_audit.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.executescript(
+        """
+        CREATE TABLE query_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        CREATE TABLE query_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        INSERT INTO query_runs (
+            trace_id, command, args_summary, started_at, finished_at, status
+        ) VALUES ('legacy-trace', 'query_class_info', '["Legacy"]', 1, 2, 'ok');
+        INSERT INTO query_steps (
+            run_id, trace_id, command, args_summary, started_at, finished_at, status
+        ) VALUES (1, 'legacy-trace', 'query_class_info', '["Legacy"]', 1, 2, 'ok');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    audit = QueryAudit.for_skill(skill_dir)
+    try:
+        recent = audit.recent("legacy-trace", 10)
+    finally:
+        audit.close()
+
+    assert (skill_dir / "memory" / "memory.sqlite").exists()
+    assert recent["found_count"] == 1
+    assert recent["steps"][0]["trace_id"] == "legacy-trace"
+
+
+def test_query_audit_merges_legacy_rows_when_memory_store_already_exists(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="new-trace",
+        command="query_class_info",
+        args=["New"],
+        context={"data_trust": "fresh"},
+        result={"found_count": 1},
+    )
+
+    legacy_dir = skill_dir / "runtime"
+    legacy_dir.mkdir(parents=True)
+    legacy_db = legacy_dir / "query_audit.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.executescript(
+        """
+        CREATE TABLE query_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        CREATE TABLE query_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        INSERT INTO query_runs (
+            id, trace_id, command, args_summary, started_at, finished_at, status
+        ) VALUES (99, 'late-legacy-trace', 'query_class_info', '["Late"]', 1, 2, 'ok');
+        INSERT INTO query_steps (
+            id, run_id, trace_id, command, args_summary, started_at, finished_at, status
+        ) VALUES (99, 99, 'late-legacy-trace', 'query_class_info', '["Late"]', 1, 2, 'ok');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    audit = QueryAudit.for_skill(skill_dir)
+    try:
+        recent = audit.recent("late-legacy-trace", 10)
+    finally:
+        audit.close()
+
+    assert recent["found_count"] == 1
+    assert recent["steps"][0]["trace_id"] == "late-legacy-trace"
+
+
+def test_query_audit_merges_legacy_rows_with_colliding_autoincrement_ids(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="canonical-trace",
+        command="query_class_info",
+        args=["Canonical"],
+        context={"data_trust": "fresh"},
+        result={"found_count": 1},
+    )
+
+    legacy_dir = skill_dir / "runtime"
+    legacy_dir.mkdir(parents=True)
+    legacy_db = legacy_dir / "query_audit.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.executescript(
+        """
+        CREATE TABLE query_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        CREATE TABLE query_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        INSERT INTO query_runs (
+            id, trace_id, command, args_summary, started_at, finished_at, status
+        ) VALUES (1, 'legacy-collide', 'query_class_info', '["Legacy"]', 10, 11, 'ok');
+        INSERT INTO query_steps (
+            id, run_id, trace_id, command, args_summary, started_at, finished_at, status
+        ) VALUES (1, 1, 'legacy-collide', 'query_class_info', '["Legacy"]', 10, 11, 'ok');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    audit = QueryAudit.for_skill(skill_dir)
+    try:
+        legacy_recent = audit.recent("legacy-collide", 10)
+        canonical_recent = audit.recent("canonical-trace", 10)
+    finally:
+        audit.close()
+
+    assert legacy_recent["found_count"] == 1
+    assert canonical_recent["found_count"] == 1
+    assert legacy_recent["steps"][0]["trace_id"] == "legacy-collide"
+
+
+def test_query_audit_merges_legacy_rows_when_canonical_has_only_memory_schema(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    memory_conn = _connect_query_memory(skill_dir)
+    memory_conn.close()
+
+    legacy_dir = skill_dir / "runtime"
+    legacy_dir.mkdir(parents=True)
+    legacy_db = legacy_dir / "query_audit.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.executescript(
+        """
+        CREATE TABLE query_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        CREATE TABLE query_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            trace_id TEXT NOT NULL,
+            command TEXT NOT NULL,
+            args_summary TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL NOT NULL,
+            timestamp TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            data_trust TEXT,
+            branch TEXT,
+            source TEXT,
+            commit_id TEXT,
+            dirty INTEGER,
+            fingerprint TEXT,
+            result_count INTEGER,
+            error TEXT,
+            fallback TEXT
+        );
+        INSERT INTO query_runs (
+            id, trace_id, command, args_summary, started_at, finished_at, status
+        ) VALUES (7, 'legacy-lost', 'query_class_info', '["LegacyOnly"]', 1, 2, 'ok');
+        INSERT INTO query_steps (
+            id, run_id, trace_id, command, args_summary, started_at, finished_at, status
+        ) VALUES (7, 7, 'legacy-lost', 'query_class_info', '["LegacyOnly"]', 1, 2, 'ok');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    audit = QueryAudit.for_skill(skill_dir)
+    try:
+        recent = audit.recent("legacy-lost", 10)
+    finally:
+        audit.close()
+
+    assert recent["found_count"] == 1
+    assert recent["steps"][0]["trace_id"] == "legacy-lost"
+
+
 def test_query_audit_can_record_multiple_steps_for_one_trace_and_run(tmp_path):
     skill_dir = tmp_path / "Skill"
     audit = QueryAudit.for_skill(skill_dir)
@@ -114,7 +441,7 @@ def test_query_audit_can_record_multiple_steps_for_one_trace_and_run(tmp_path):
     finally:
         audit.close()
 
-    conn = sqlite3.connect(str(skill_dir / "runtime" / "query_audit.db"))
+    conn = sqlite3.connect(str(skill_dir / "memory" / "memory.sqlite"))
     steps = conn.execute(
         "SELECT run_id, trace_id, command, result_count FROM query_steps ORDER BY id"
     ).fetchall()
