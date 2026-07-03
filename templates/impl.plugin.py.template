@@ -2238,11 +2238,12 @@ def _domain_focus_edges(edges: List[Dict[str, Any]], domain_terms: List[str], se
 
 def _evidence_category_markers(evidence_slices: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     markers = {{"loads": [], "lifecycle": [], "depends_on": [], "entry": []}}
+    # 仅使用插件无关的通用 UE/工程词汇，禁止业务专名 token（通用性红线）
     token_map = {{
-        "loads": ["load", "tryload", "asyncload", "loadasset", "loadprefab", "assetlibrary"],
-        "lifecycle": ["beginplay", "endplay", "tick", "refresh", "update", "destroy", "unload", "finalize", "registerpayloadentryproducers"],
-        "depends_on": ["dependency", "dependent", "streamingmanager", "cachemanager", "changeset", "datalayerprovider"],
-        "entry": ["create", "registerpayloadentryproducers", "addmarkerproducer", "addmarkerdatalayer"],
+        "loads": ["load", "tryload", "asyncload", "loadasset", "assetlibrary", "streamablemanager"],
+        "lifecycle": ["beginplay", "endplay", "tick", "refresh", "update", "destroy", "unload", "finalize", "shutdown", "deinitialize"],
+        "depends_on": ["dependency", "dependent", "streamingmanager", "cachemanager", "changeset", "subsystem", "provider"],
+        "entry": ["create", "register", "spawn", "initialize", "startup"],
     }}
     for item in evidence_slices:
         source_slice = item.get("source_slice") or {{}}

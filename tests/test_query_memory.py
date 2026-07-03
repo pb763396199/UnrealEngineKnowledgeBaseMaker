@@ -106,6 +106,64 @@ def test_query_memory_records_route_without_source_body_and_validates_fresh(tmp_
     assert b"CURRENT_BODY" not in all_bytes
 
 
+def test_query_memory_replay_hash_is_invariant_to_environment_meta(tmp_path):
+    """回归：_meta/_audit 是环境元数据（cwd 解析、freshness 快照），
+    不得参与 result hash，否则换个 cwd 调用 validate 会全量误报 changed。"""
+    skill_dir = tmp_path / "Skill"
+    source_root = tmp_path / "Source"
+    source_root.mkdir()
+    (source_root / "Feature.cpp").write_text("void Feature() {}\n", encoding="utf-8")
+
+    payload = {"seed": "Feature", "resolution_state": "function", "candidate_count": 1}
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="trace-meta",
+        command="resolve_seed",
+        args=["Feature"],
+        context=_context(source_root),
+        result={
+            **payload,
+            "_meta": {"current_source": "C:/cwd-a", "freshness": {"fresh": True}},
+            # 大体量嵌套子结果：内部 _meta 也必须被剔除而不是被 str() 截断带进哈希
+            "seed_resolution": {
+                "_meta": {"current_source": "C:/cwd-a"},
+                "candidates": [{"symbol": f"Sym{i}", "note": "x" * 50} for i in range(80)],
+            },
+        },
+    )
+
+    def runner_with_other_meta(command, args):
+        assert command == "resolve_seed"
+        return {
+            **payload,
+            "_meta": {"current_source": "D:/cwd-b", "freshness": {"fresh": True, "extra": 1}},
+            "_audit": {"trace_id": "x"},
+            "seed_resolution": {
+                "_meta": {"current_source": "D:/cwd-b"},
+                "candidates": [{"symbol": f"Sym{i}", "note": "x" * 50} for i in range(80)],
+            },
+        }
+
+    recorded = record_memory(
+        skill_dir=skill_dir,
+        trace_id="trace-meta",
+        intent="explain_business_flow",
+        seed="Feature",
+        context=_context(source_root),
+        source_root=source_root,
+        command_runner=runner_with_other_meta,
+    )
+    validation = validate_memory(
+        skill_dir=skill_dir,
+        memory_id=recorded["memory_id"],
+        context=_context(source_root),
+        source_root=source_root,
+        command_runner=runner_with_other_meta,
+    )
+    assert validation["freshness"]["commands"] == "same"
+    assert validation["overall"] == "fresh"
+
+
 def test_query_memory_search_surfaces_unrecorded_audit_trace_fragments(tmp_path):
     skill_dir = tmp_path / "Skill"
     source_root = tmp_path / "Source"

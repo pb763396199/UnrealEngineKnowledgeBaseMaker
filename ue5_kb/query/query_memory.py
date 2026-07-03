@@ -43,15 +43,25 @@ def stable_hash_full(value: Any) -> str:
 
 
 def _sanitize(value: Any) -> Any:
-    """Drop fields that can contain large source bodies before hashing/storing."""
+    """Drop fields that can contain large source bodies before hashing/storing.
+
+    `_audit` and `_meta` are execution-environment metadata (trace ids, cwd-sensitive
+    source resolution, freshness snapshots). They must never participate in result
+    hashing: environment drift is judged by the dedicated freshness/provenance
+    channels, while result hashes must only reflect the query payload itself.
+    """
     if isinstance(value, dict):
         result: Dict[str, Any] = {}
         for key, item in value.items():
             lowered = str(key).lower()
-            if lowered in {"_audit"}:
+            if lowered in {"_audit", "_meta"}:
                 continue
             if lowered in {"content", "file_content", "block_content", "block_content_full"}:
                 result[key] = {"_omitted": True, "sha256": hashlib.sha256(str(item).encode("utf-8", "ignore")).hexdigest()}
+            elif isinstance(item, (dict, list)):
+                # 容器必须先递归清洗再考虑体量；直接 str() 截断会把嵌套 _meta/_audit
+                # 以字符串形式带进哈希，绕过键名过滤（cwd 敏感字段污染 result hash）。
+                result[key] = _sanitize(item)
             elif len(str(item)) > MAX_TEXT and lowered not in {"path", "file", "symbol"}:
                 result[key] = str(item)[:MAX_TEXT]
             else:
