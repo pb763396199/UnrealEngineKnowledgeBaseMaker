@@ -84,6 +84,15 @@ def test_export_site_generates_single_file_wiki_from_sqlite_only(tmp_path):
     assert 'href="vendor/github-markdown.css"' in text
     assert "function compute" not in text  # 布局计算在 Python 端完成，前端不包含布局算法
     assert "routeEdgePath" in text  # 前端仅做拖拽时的边重绘，不做全局布局
+    # 面板可拖拽调整 + 代码可切换换行 + 滚动条统一样式
+    assert 'id="resizer-nav"' in text
+    assert 'id="resizer-detail"' in text
+    assert 'id="graph-resize"' in text
+    assert "function makeResizer" in text
+    assert "function toggleWrap" in text
+    assert "::-webkit-scrollbar" in text
+    # 拖拽性能修复：图重建前必须先清理上一次的窗口级事件监听，否则多次切换 subject 会累积泄漏
+    assert "_graphTeardown" in text
     assert result["stats"]["subject_count"] == 1
     assert result["stats"]["memory_count"] == 1
     assert result["generated_programmatically"] is True

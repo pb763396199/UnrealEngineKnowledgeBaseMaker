@@ -374,7 +374,7 @@ header h1{font-size:16px;font-weight:600}
 header .meta{color:var(--dim);font-size:12px}
 #search{margin-left:auto;background:var(--card);border:1px solid var(--line);color:var(--text);padding:6px 12px;border-radius:6px;width:280px}
 main{flex:1;display:flex;min-height:0}
-nav{width:250px;background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:10px}
+nav{width:250px;min-width:160px;max-width:480px;background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:10px;flex:none}
 nav h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin:12px 8px 4px}
 nav a{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:6px;color:var(--text);text-decoration:none;font-size:13px}
 nav a:hover,nav a.active{background:var(--card)}
@@ -382,9 +382,19 @@ nav a:hover,nav a.active{background:var(--card)}
 .b-active,.b-fresh,.b-published{background:var(--ok)}
 .b-changed,.b-unknown,.b-candidate{background:var(--warn)}
 .b-broken,.b-failed{background:var(--bad)}
-#content{flex:1;overflow:auto;padding:18px;position:relative}
-#detail{width:0;transition:width .15s;background:var(--panel);border-left:1px solid var(--line);overflow-y:auto;flex:none}
+.resizer{flex:none;background:var(--line);position:relative;z-index:5}
+.resizer:hover,.resizer.active{background:var(--accent)}
+.resizer-x{width:5px;cursor:col-resize}
+.resizer-y{height:5px;cursor:row-resize}
+#content{flex:1;overflow:auto;padding:18px;position:relative;min-width:0}
+#detail{width:0;overflow-y:auto;flex:none;background:var(--panel);border-left:1px solid var(--line)}
 #detail.open{width:460px;padding:16px}
+/* 滚动条统一样式（Firefox + WebKit） */
+nav,#content,#detail,pre.snippet{scrollbar-width:thin;scrollbar-color:var(--line) var(--panel)}
+nav::-webkit-scrollbar,#content::-webkit-scrollbar,#detail::-webkit-scrollbar,pre.snippet::-webkit-scrollbar{width:9px;height:9px}
+nav::-webkit-scrollbar-track,#content::-webkit-scrollbar-track,#detail::-webkit-scrollbar-track,pre.snippet::-webkit-scrollbar-track{background:var(--panel)}
+nav::-webkit-scrollbar-thumb,#content::-webkit-scrollbar-thumb,#detail::-webkit-scrollbar-thumb,pre.snippet::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px;border:2px solid var(--panel)}
+nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#detail::-webkit-scrollbar-thumb:hover,pre.snippet::-webkit-scrollbar-thumb:hover{background:var(--accent)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;cursor:pointer}
 .card:hover{border-color:var(--accent)}
@@ -392,14 +402,15 @@ nav a:hover,nav a.active{background:var(--card)}
 .card .sub{color:var(--dim);font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .chip{background:var(--chip);border-radius:10px;padding:1px 8px;font-size:11px;color:var(--dim)}
-#graph-wrap{border:1px solid var(--line);border-radius:8px;background:#0d0f14;margin-bottom:6px;overflow:hidden}
+#graph-wrap{border:1px solid var(--line);border-radius:8px;background:#0d0f14;margin-bottom:6px;overflow:hidden;display:flex;flex-direction:column}
 .graph-toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
 .graph-toolbar button{background:var(--chip);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer}
 .graph-toolbar button:hover{border-color:var(--accent)}
 .graph-toolbar .hint{margin-left:auto;color:var(--dim);font-size:11px}
-#graph{height:540px;cursor:grab}
+#graph{height:540px;min-height:220px;cursor:grab;flex:none}
 #graph:active{cursor:grabbing}
 #graph svg{display:block;width:100%;height:100%}
+#graph-resize{margin:0}
 .flow-node{cursor:grab}
 .flow-node:active{cursor:grabbing}
 .flow-node .node-mask{fill:#000;opacity:0.35;transform:translate(2px,3px)}
@@ -430,9 +441,13 @@ nav a:hover,nav a.active{background:var(--card)}
 table{border-collapse:collapse;width:100%;font-size:12px}
 td,th{border:1px solid var(--line);padding:5px 8px;text-align:left}
 th{color:var(--dim);background:var(--panel)}
-pre.snippet{background:#0d0f14;border:1px solid var(--line);border-radius:6px;padding:8px;font:12px/1.5 Consolas,monospace;overflow-x:auto;margin:6px 0}
+pre.snippet{background:#0d0f14;border:1px solid var(--line);border-radius:6px;padding:8px;font:12px/1.5 Consolas,monospace;overflow-x:auto;margin:0;white-space:pre}
+pre.snippet.wrap{white-space:pre-wrap;word-break:break-all;overflow-x:hidden}
 pre.snippet .focus{background:#2b3a55;display:block}
 pre.snippet .ln{color:#525b73;user-select:none;display:inline-block;width:44px}
+.snippet-wrap{margin:6px 0}
+.snippet-toolbar{display:flex;justify-content:flex-end;margin-bottom:4px}
+.wrap-toggle{font-size:11px;padding:2px 8px}
 .btn{display:inline-block;background:var(--accent);color:#fff;border-radius:5px;padding:3px 10px;font-size:12px;text-decoration:none;margin:2px 4px 2px 0}
 .btn.ghost{background:var(--chip);color:var(--dim)}
 details.tech{margin-top:10px;color:var(--dim);font-size:12px}
@@ -456,7 +471,9 @@ details.tech code{word-break:break-all}
 </header>
 <main>
   <nav id="nav"></nav>
+  <div class="resizer resizer-x" id="resizer-nav" title="拖动调整侧栏宽度"></div>
   <div id="content"></div>
+  <div class="resizer resizer-x" id="resizer-detail" title="拖动调整详情面板宽度"></div>
   <aside id="detail"></aside>
 </main>
 <script id="data" type="application/json">__DATA__</script>
@@ -486,13 +503,25 @@ function navRender() {
     <a href="#hints" data-route="hints">⚠️ 避坑记录 (${DATA.negative_hints.length})</a>`;
 }
 
+let _snippetSeq = 0;
 function snippetHtml(sn) {
   if (!sn) return '<div class="chip">源码片段不可用（生成时未能读取源文件）</div>';
-  return '<pre class="snippet">' + sn.lines.map((line, i) => {
+  const body = sn.lines.map((line, i) => {
     const no = sn.start + i;
-    const body = `<span class="ln">${no}</span>${esc(line)}`;
-    return no === sn.focus ? `<span class="focus">${body}</span>` : body;
-  }).join('\\n') + '</pre>';
+    const text = `<span class="ln">${no}</span>${esc(line)}`;
+    return no === sn.focus ? `<span class="focus">${text}</span>` : text;
+  }).join('\\n');
+  const id = 'snip-' + (++_snippetSeq);
+  return `<div class="snippet-wrap">
+    <div class="snippet-toolbar"><button class="btn ghost wrap-toggle" type="button" onclick="toggleWrap('${id}', this)">⤸ 自动换行</button></div>
+    <pre class="snippet" id="${id}">${body}</pre>
+  </div>`;
+}
+function toggleWrap(id, btn) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const wrapped = el.classList.toggle('wrap');
+  btn.textContent = wrapped ? '⤸ 取消换行' : '⤸ 自动换行';
 }
 
 function evidenceHtml(ev) {
@@ -507,25 +536,17 @@ function evidenceHtml(ev) {
 function routeEdgePath(a, b) {
   const x1 = a.x + a.w / 2, y1 = a.y + a.h;
   const x2 = b.x + b.w / 2, y2 = b.y;
-  if (Math.abs(x1 - x2) < 1 || y2 <= y1) return `M ${x1} ${y1} L ${x2} ${y2}`;
+  if (Math.abs(x1 - x2) < 1 || y2 <= y1) return { path: `M ${x1} ${y1} L ${x2} ${y2}`, lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 - 4 };
   const mid = (y1 + y2) / 2, r = 10, sign = x2 > x1 ? 1 : -1;
-  return `M ${x1} ${y1} L ${x1} ${mid - r} Q ${x1} ${mid} ${x1 + sign * r} ${mid} `
+  const path = `M ${x1} ${y1} L ${x1} ${mid - r} Q ${x1} ${mid} ${x1 + sign * r} ${mid} `
        + `L ${x2 - sign * r} ${mid} Q ${x2} ${mid} ${x2} ${mid + r} L ${x2} ${y2}`;
+  return { path, lx: (x1 + x2) / 2, ly: mid - 4 };
 }
 
-function updateConnectedEdges(container, flow, nodeId, nx, ny) {
-  const moved = { x: nx, y: ny, w: flow.layout.nodes[nodeId].w, h: flow.layout.nodes[nodeId].h };
-  container.querySelectorAll(`path.flow-edge[data-from="${cssEsc(nodeId)}"]`).forEach(p => {
-    const b = flow.layout.nodes[p.dataset.to];
-    if (b) p.setAttribute('d', routeEdgePath(moved, b));
-  });
-  container.querySelectorAll(`path.flow-edge[data-to="${cssEsc(nodeId)}"]`).forEach(p => {
-    const a = flow.layout.nodes[p.dataset.from];
-    if (a) p.setAttribute('d', routeEdgePath(a, moved));
-  });
-}
+let _graphTeardown = null;
 
 function renderFlowGraph(container, flow) {
+  if (_graphTeardown) { _graphTeardown(); _graphTeardown = null; }
   const layout = flow.layout;
   if (!layout) { container.innerHTML = '<div class="chip">缺少静态布局数据</div>'; return null; }
   if (!flow._layoutSnapshot) flow._layoutSnapshot = JSON.parse(JSON.stringify(layout));
@@ -542,10 +563,11 @@ function renderFlowGraph(container, flow) {
     const dashed = !!e.condition;
     const label = e.condition || e.label;
     const a = layout.nodes[e.source], b = layout.nodes[e.target];
-    const lx = a && b ? (a.x + a.w / 2 + b.x + b.w / 2) / 2 : 0;
-    const ly = a && b ? (a.y + a.h + b.y) / 2 - 4 : 0;
-    return `<path class="flow-edge${dashed ? ' dashed' : ''}" d="${e.path}" data-from="${esc(e.source)}" data-to="${esc(e.target)}" marker-end="url(#${dashed ? 'arr-dashed' : 'arr-solid'})"></path>`
-      + (label ? `<text class="edge-label${dashed ? ' dashed' : ''}" x="${lx.toFixed(1)}" y="${ly.toFixed(1)}">${esc(label)}</text>` : '');
+    const geom = a && b ? routeEdgePath(a, b) : { path: e.path, lx: 0, ly: 0 };
+    return `<g class="flow-edge-group" data-from="${esc(e.source)}" data-to="${esc(e.target)}">`
+      + `<path class="flow-edge${dashed ? ' dashed' : ''}" d="${geom.path}" marker-end="url(#${dashed ? 'arr-dashed' : 'arr-solid'})"></path>`
+      + (label ? `<text class="edge-label${dashed ? ' dashed' : ''}" x="${geom.lx.toFixed(1)}" y="${geom.ly.toFixed(1)}">${esc(label)}</text>` : '')
+      + `</g>`;
   }).join('');
   const nodeSvg = Object.keys(layout.nodes || {}).map(id => {
     const pos = layout.nodes[id];
@@ -572,40 +594,62 @@ function renderFlowGraph(container, flow) {
   let view = { x: 0, y: 0, w: layout.width, h: layout.height };
   const applyView = () => svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
 
-  svg.addEventListener('wheel', ev => {
+  const onWheel = ev => {
     ev.preventDefault();
     const rect = svg.getBoundingClientRect();
     const scale = view.w / rect.width;
     const cx = view.x + (ev.clientX - rect.left) * scale;
     const cy = view.y + (ev.clientY - rect.top) * scale;
-    const factor = ev.deltaY > 0 ? 1.1 : 0.9;
+    const factor = ev.deltaY > 0 ? 1.12 : 1 / 1.12;
     view.x = cx - (cx - view.x) * factor;
     view.y = cy - (cy - view.y) * factor;
     view.w *= factor; view.h *= factor;
     applyView();
-  }, { passive: false });
+  };
+  svg.addEventListener('wheel', onWheel, { passive: false });
 
+  // 拖拽状态：连接边在 mousedown 时一次性缓存好（不在 mousemove 里反复查询 DOM）。
+  // 直接同步更新 DOM（不经 requestAnimationFrame）：实测 rAF 合帧在部分环境下（后台/非
+  // 焦点标签页、自动化测试）可能被浏览器节流甚至不触发，导致拖拽视觉更新滞后或丢帧；
+  // 直接更新在节点数量级（几十个）下足够快，且响应最即时、最"动态"。
   let dragNode = null, dragMoved = false, panState = null;
-  svg.addEventListener('mousedown', ev => {
+  const onMouseDown = ev => {
+    if (ev.button !== 0) return;
     const nodeEl = ev.target.closest ? ev.target.closest('.flow-node') : null;
     const rect = svg.getBoundingClientRect();
     const scale = view.w / rect.width;
     if (nodeEl) {
-      dragNode = { id: nodeEl.dataset.id, el: nodeEl, startX: ev.clientX, startY: ev.clientY, scale };
+      const id = nodeEl.dataset.id;
+      const connected = Array.from(container.querySelectorAll(
+        `.flow-edge-group[data-from="${cssEsc(id)}"],.flow-edge-group[data-to="${cssEsc(id)}"]`
+      )).map(g => ({
+        group: g,
+        path: g.querySelector('path.flow-edge'),
+        label: g.querySelector('text.edge-label'),
+        otherId: g.dataset.from === id ? g.dataset.to : g.dataset.from,
+        isSource: g.dataset.from === id,
+      }));
+      dragNode = { id, el: nodeEl, startX: ev.clientX, startY: ev.clientY, scale, connected, base: { ...flow.layout.nodes[id] } };
       dragMoved = false;
     } else {
       panState = { startX: ev.clientX, startY: ev.clientY, ox: view.x, oy: view.y, scale };
     }
-  });
-  const onMove = ev => {
+  };
+  const onMouseMove = ev => {
     if (dragNode) {
-      const dx = (ev.clientX - dragNode.startX) * dragNode.scale;
-      const dy = (ev.clientY - dragNode.startY) * dragNode.scale;
-      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragMoved = true;
-      const base = flow.layout.nodes[dragNode.id];
-      const nx = base.x + dx, ny = base.y + dy;
+      const dx0 = ev.clientX - dragNode.startX, dy0 = ev.clientY - dragNode.startY;
+      if (!dragMoved && (Math.abs(dx0) > 2 || Math.abs(dy0) > 2)) dragMoved = true;
+      const dx = dx0 * dragNode.scale, dy = dy0 * dragNode.scale;
+      const nx = dragNode.base.x + dx, ny = dragNode.base.y + dy;
+      const moved = { x: nx, y: ny, w: dragNode.base.w, h: dragNode.base.h };
       dragNode.el.setAttribute('transform', `translate(${nx},${ny})`);
-      updateConnectedEdges(container, flow, dragNode.id, nx, ny);
+      for (const c of dragNode.connected) {
+        const other = flow.layout.nodes[c.otherId];
+        if (!other) continue;
+        const geom = c.isSource ? routeEdgePath(moved, other) : routeEdgePath(other, moved);
+        c.path.setAttribute('d', geom.path);
+        if (c.label) { c.label.setAttribute('x', geom.lx.toFixed(1)); c.label.setAttribute('y', geom.ly.toFixed(1)); }
+      }
     } else if (panState) {
       const dx = (ev.clientX - panState.startX) * panState.scale;
       const dy = (ev.clientY - panState.startY) * panState.scale;
@@ -613,25 +657,34 @@ function renderFlowGraph(container, flow) {
       applyView();
     }
   };
-  const onUp = ev => {
+  const onMouseUp = ev => {
     if (dragNode) {
       if (!dragMoved) {
         nodeDetail(flow, dragNode.id);
       } else {
-        const base = flow.layout.nodes[dragNode.id];
-        base.x += (ev.clientX - dragNode.startX) * dragNode.scale;
-        base.y += (ev.clientY - dragNode.startY) * dragNode.scale;
+        const dx = (ev.clientX - dragNode.startX) * dragNode.scale;
+        const dy = (ev.clientY - dragNode.startY) * dragNode.scale;
+        const target = flow.layout.nodes[dragNode.id];
+        target.x = dragNode.base.x + dx;
+        target.y = dragNode.base.y + dy;
       }
       dragNode = null;
     }
     panState = null;
   };
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', onUp);
+  svg.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+  _graphTeardown = () => {
+    svg.removeEventListener('wheel', onWheel);
+    svg.removeEventListener('mousedown', onMouseDown);
+    window.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup', onMouseUp);
+  };
   applyView();
   return {
     fit: () => { view = { x: 0, y: 0, w: layout.width, h: layout.height }; applyView(); },
-    reset: () => { flow.layout = JSON.parse(JSON.stringify(flow._layoutSnapshot)); renderFlowGraph(container, flow); },
+    reset: () => { flow.layout = JSON.parse(JSON.stringify(flow._layoutSnapshot)); return renderFlowGraph(container, flow); },
   };
 }
 
@@ -648,8 +701,7 @@ function subjectView(s) {
           <button id="btn-reset" type="button">重置布局</button>
           <span class="hint">服务端一次性静态分层布局，加载后不会自动移动</span>
         </div>
-        <div id="graph"></div>
-        <div id="legend">${legend}</div>
+        <div id="graph"></div>        <div class="resizer resizer-y" id="graph-resize" title="拖动调整图高度"></div>        <div id="legend">${legend}</div>
       </div>
     </div>`;
   } else {
@@ -669,13 +721,18 @@ function subjectView(s) {
   </details>`;
   $('#content').innerHTML = body;
   if (s.flow) {
-    const graph = renderFlowGraph($('#graph'), s.flow);
+    let graph = renderFlowGraph($('#graph'), s.flow);
+    const bindToolbar = g => {
+      $('#btn-fit').onclick = () => g.fit();
+      $('#btn-reset').onclick = () => { graph = g.reset(); bindToolbar(graph); };
+    };
     if (graph) {
-      $('#btn-fit').onclick = () => graph.fit();
-      $('#btn-reset').onclick = () => {
-        const g2 = graph.reset();
-        $('#btn-fit').onclick = () => g2.fit();
-      };
+      bindToolbar(graph);
+      makeResizer($('#graph-resize'), 'y', 1, {
+        getSize: () => $('#graph').getBoundingClientRect().height,
+        setSize: h => { $('#graph').style.height = h + 'px'; },
+        min: 220, max: 1400,
+      });
     }
   }
 }
@@ -701,6 +758,7 @@ function nodeDetail(flow, nodeId) {
 }
 function closeDetail() {
   $('#detail').classList.remove('open');
+  $('#detail').style.width = '';
   $('#detail').innerHTML = '';
   document.querySelectorAll('.flow-node.sel').forEach(g => g.classList.remove('sel'));
 }
@@ -747,6 +805,36 @@ function current() {
   return kind === 'subject' ? DATA.subjects.find(s => s.id === id) : null;
 }
 
+// 通用面板拖拽分隔条：axis='x' 左右拖动改宽度，axis='y' 上下拖动改高度。
+// sign=1 表示朝正方向拖动增大尺寸（如左侧栏右边界、图表下边界）；
+// sign=-1 表示朝负方向拖动增大尺寸（如右侧详情栏的左边界）。
+function makeResizer(handle, axis, sign, { getSize, setSize, min, max }) {
+  if (!handle) return;
+  let startPos = 0, startSize = 0;
+  const onMove = ev => {
+    const pos = axis === 'x' ? ev.clientX : ev.clientY;
+    const delta = (pos - startPos) * sign;
+    setSize(Math.min(max, Math.max(min, startSize + delta)));
+  };
+  const onUp = () => {
+    handle.classList.remove('active');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+  handle.addEventListener('mousedown', ev => {
+    ev.preventDefault();
+    startPos = axis === 'x' ? ev.clientX : ev.clientY;
+    startSize = getSize();
+    handle.classList.add('active');
+    document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+}
+
 function route() {
   closeDetail();
   const hash = location.hash.slice(1) || 'map';
@@ -768,6 +856,17 @@ $('#search').addEventListener('keydown', e => {
     (s.evidence || []).some(ev => (ev.file || '').toLowerCase().includes(q) || (ev.symbol || '').toLowerCase().includes(q)) ||
     ((s.flow && s.flow.nodes) || []).some(n => (n.label || '').toLowerCase().includes(q)));
   if (hit) location.hash = 'subject/' + hit.id;
+});
+
+makeResizer($('#resizer-nav'), 'x', 1, {
+  getSize: () => $('#nav').getBoundingClientRect().width,
+  setSize: w => { $('#nav').style.width = w + 'px'; },
+  min: 160, max: 480,
+});
+makeResizer($('#resizer-detail'), 'x', -1, {
+  getSize: () => $('#detail').getBoundingClientRect().width,
+  setSize: w => { $('#detail').style.width = w + 'px'; },
+  min: 280, max: 900,
 });
 
 $('#meta').textContent = `生成于 ${fmtTime(DATA.generated_at)} · 主题 ${DATA.stats.subject_count} · 路线 ${DATA.stats.memory_count} · 证据 ${DATA.stats.evidence_count} · 数据源 memory.sqlite（本页面为程序化生成产物）`;
