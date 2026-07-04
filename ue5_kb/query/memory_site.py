@@ -5,13 +5,14 @@
 2. 纯代码生成，AI 不参与渲染；删除后可随时重新生成，输出确定性。
 3. 渐进式披露：业务地图 -> 主题泳道板 -> 节点侧栏 -> 证据片段 + vscode:// 深链。
 4. 哈希/ID 等机器数据全部折叠进"技术详情"，默认不打扰人。
-5. 单页面交互站（index.html + vendor/），依赖业界成熟开源库并离线 vendor（vis-network 图引擎 + github-markdown-css 排版），
-   不接 CDN、不需 npm/构建步骤，双击即开。详见仓库根目录 wiki_vendor/VENDOR.md。
+5. 单页面交互站（index.html + vendor/），仅 github-markdown-css 排版离线 vendor，不接 CDN、
+   不需 npm/构建步骤，双击即开。详见仓库根目录 wiki_vendor/VENDOR.md。
 
-图引擎选型（专家组评审）：vis-network（dbt docs 同款方案）—分层自动布局消重叠 + 原生拖拽，
-单文件集成无需构建。cytoscape.js+dagre 为候选道; React Flow / Facebook astryx 因强依赖 React 构建链不适用。
-
-形态对标 dbt docs：构建产物 -> 静态交互站（DAG + 详情侧栏 + 搜索）。
+图引擎选型（实战迭代结论）：初版用 vis-network 运行时物理引擎，实机反馈"一直在动来动去"不可接受。
+参考 F:\\AiProject\\DecisionReview 项目多轮真实用户迭代：力导向物理图被反复否定，最终收敛到 Archify
+的 architecture 渲染风格——服务端一次性计算好的静态 SVG（矩形节点 + 泳道分组框 + 直角走线），
+加载后完全不动，只有用户主动拖拽才会移动。本模块用纯 Python 复刻这一布局算法（不引入
+Node/Archify 依赖，见 compute_static_layout），前端仅负责渲染与交互，不再跑任何运行时布局/物理模拟。
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from .query_memory import _connect
 SNIPPET_RADIUS = 6
 # 与 templates/ 同级（ue5_kb/query/memory_site.py 向上三级到仓库根），与 generate.py 定位 templates 目录的约定一致
 VENDOR_DIR = Path(__file__).parent.parent.parent / "wiki_vendor"
-VENDOR_ASSETS = ("vis-network.min.js", "github-markdown.css")
+VENDOR_ASSETS = ("github-markdown.css",)
 
 
 def _read_snippet(source_root: Optional[Path], file_value: str, line_number: int) -> Optional[Dict[str, Any]]:
@@ -78,6 +79,125 @@ def _latest_published_flow(conn: sqlite3.Connection, subject_id: str) -> Optiona
     flow["_graph_hash"] = row[1]
     flow["_created_at"] = row[2]
     return flow
+
+
+# --- 静态分层布局（取代运行时物理引擎） ---------------------------------------
+#
+# 参考 DecisionReview 项目（F:\AiProject\DecisionReview）的调研结论：多轮真实用户反馈
+# 反复否定了力导向物理图（一直在动、可读性差），最终收敛到 Archify 的 architecture
+# 渲染风格——服务端一次性计算好的静态 SVG（矩形节点 + 泳道分组框 + 直角走线），加载后
+# 完全不动，只有用户主动拖拽才会移动。本模块用纯 Python 复刻这一布局算法（不引入
+# Node/Archify 依赖），坐标在生成时一次性算好、写入数据，前端只负责渲染与响应交互。
+NODE_W, NODE_H = 200, 56
+_LAYOUT_COL_GAP, _LAYOUT_LANE_GAP, _LAYOUT_LANE_PAD, _LAYOUT_LABEL_H, _LAYOUT_MARGIN = 24, 46, 14, 20, 24
+
+
+def _order_nodes_by_barycenter(lanes: List[str], nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """按 barycenter 启发式对每条泳道内的节点重新排序，减少跨泳道连线交叉（Sugiyama 风格两遍扫描）。"""
+    by_lane: Dict[str, List[str]] = {lane: [] for lane in lanes}
+    for node in nodes:
+        lane = node.get("lane") if node.get("lane") in by_lane else (lanes[0] if lanes else "默认")
+        by_lane.setdefault(lane, []).append(node.get("id"))
+    preds: Dict[str, List[str]] = {}
+    succs: Dict[str, List[str]] = {}
+    for edge in edges:
+        succs.setdefault(edge.get("source"), []).append(edge.get("target"))
+        preds.setdefault(edge.get("target"), []).append(edge.get("source"))
+
+    def pos_index(lane: str) -> Dict[str, int]:
+        return {node_id: idx for idx, node_id in enumerate(by_lane.get(lane, []))}
+
+    for _ in range(2):
+        for i in range(1, len(lanes)):
+            prev_pos = pos_index(lanes[i - 1])
+            cur_pos = pos_index(lanes[i])
+
+            def bary_down(node_id: str, _prev_pos=prev_pos, _cur_pos=cur_pos) -> float:
+                refs = [_prev_pos[p] for p in preds.get(node_id, []) if p in _prev_pos]
+                return (sum(refs) / len(refs)) if refs else float(_cur_pos.get(node_id, 0))
+
+            by_lane[lanes[i]] = sorted(by_lane.get(lanes[i], []), key=bary_down)
+        for i in range(len(lanes) - 2, -1, -1):
+            next_pos = pos_index(lanes[i + 1])
+            cur_pos = pos_index(lanes[i])
+
+            def bary_up(node_id: str, _next_pos=next_pos, _cur_pos=cur_pos) -> float:
+                refs = [_next_pos[s] for s in succs.get(node_id, []) if s in _next_pos]
+                return (sum(refs) / len(refs)) if refs else float(_cur_pos.get(node_id, 0))
+
+            by_lane[lanes[i]] = sorted(by_lane.get(lanes[i], []), key=bary_up)
+    return by_lane
+
+
+def compute_static_layout(flow: Dict[str, Any]) -> Dict[str, Any]:
+    """纯函数、确定性计算：给定 flow(lanes/nodes/edges) 返回节点坐标、泳道边框、直角走线路径。
+
+    不依赖 DOM 测量、不依赖物理模拟，同样的输入永远得到同样的输出（可单测）。
+    """
+    nodes = flow.get("nodes") or []
+    edges = flow.get("edges") or []
+    lanes = list(flow.get("lanes") or [])
+    if not lanes:
+        seen: List[str] = []
+        for node in nodes:
+            lane = node.get("lane") or "默认"
+            if lane not in seen:
+                seen.append(lane)
+        lanes = seen or ["默认"]
+
+    order = _order_nodes_by_barycenter(lanes, nodes, edges)
+    row_widths = {
+        lane: len(order.get(lane, [])) * NODE_W + max(0, len(order.get(lane, [])) - 1) * _LAYOUT_COL_GAP
+        for lane in lanes
+    }
+    max_width = max(row_widths.values()) if row_widths else NODE_W
+    canvas_width = max_width + 2 * (_LAYOUT_MARGIN + _LAYOUT_LANE_PAD)
+
+    positions: Dict[str, Dict[str, float]] = {}
+    lane_rects: List[Dict[str, Any]] = []
+    y = float(_LAYOUT_MARGIN)
+    for lane in lanes:
+        band_h = _LAYOUT_LABEL_H + NODE_H + 2 * _LAYOUT_LANE_PAD
+        row_w = row_widths.get(lane, 0)
+        row_left = _LAYOUT_MARGIN + _LAYOUT_LANE_PAD + (max_width - row_w) / 2
+        for idx, node_id in enumerate(order.get(lane, [])):
+            x = row_left + idx * (NODE_W + _LAYOUT_COL_GAP)
+            node_y = y + _LAYOUT_LABEL_H + _LAYOUT_LANE_PAD
+            positions[node_id] = {"x": x, "y": node_y, "w": NODE_W, "h": NODE_H}
+        lane_rects.append({"name": lane, "x": float(_LAYOUT_MARGIN), "y": y, "w": canvas_width - 2 * _LAYOUT_MARGIN, "h": band_h})
+        y += band_h + _LAYOUT_LANE_GAP
+    canvas_height = y - _LAYOUT_LANE_GAP + _LAYOUT_MARGIN
+
+    edge_paths: List[Dict[str, Any]] = []
+    corner_r = 10.0
+    for edge in edges:
+        a = positions.get(edge.get("source"))
+        b = positions.get(edge.get("target"))
+        if not a or not b:
+            continue
+        x1, y1 = a["x"] + a["w"] / 2, a["y"] + a["h"]
+        x2, y2 = b["x"] + b["w"] / 2, b["y"]
+        if abs(x1 - x2) < 1 or y2 <= y1:
+            path = f"M {x1:.1f} {y1:.1f} L {x2:.1f} {y2:.1f}"
+        else:
+            mid = (y1 + y2) / 2
+            sign = 1 if x2 > x1 else -1
+            path = (
+                f"M {x1:.1f} {y1:.1f} L {x1:.1f} {mid - corner_r:.1f} "
+                f"Q {x1:.1f} {mid:.1f} {x1 + sign * corner_r:.1f} {mid:.1f} "
+                f"L {x2 - sign * corner_r:.1f} {mid:.1f} "
+                f"Q {x2:.1f} {mid:.1f} {x2:.1f} {mid + corner_r:.1f} "
+                f"L {x2:.1f} {y2:.1f}"
+            )
+        edge_paths.append({
+            "source": edge.get("source"),
+            "target": edge.get("target"),
+            "path": path,
+            "label": edge.get("label") or "",
+            "condition": edge.get("condition") or "",
+        })
+
+    return {"nodes": positions, "lanes": lane_rects, "edges": edge_paths, "width": canvas_width, "height": canvas_height}
 
 
 def _collect_payload(conn: sqlite3.Connection, source_root: Optional[Path]) -> Dict[str, Any]:
@@ -147,6 +267,9 @@ def _collect_payload(conn: sqlite3.Connection, source_root: Optional[Path]) -> D
                         "vscode": _vscode_url(source_root, path_part, line_no),
                     })
                 node["evidence_view"] = enriched
+        if flow:
+            # 服务端一次性算好静态布局坐标；前端不再做任何自动排布，加载后不会移动
+            flow["layout"] = compute_static_layout(flow)
         relations = [
             {"target": row["target_subject_id"], "type": row["relation_type"], "status": row["status"]}
             for row in conn.execute(
@@ -237,7 +360,7 @@ generated_by: UE5_KnowledgeBaseMaker query_memory_render_site
 data_source: memory/memory.sqlite
 markdown_is_authoritative: false
 本文件为程序化生成产物，可随时删除并重新生成；事实以 sqlite + validate/replay 为准。
-graph_engine: vis-network (vendor/vis-network.min.js, MIT/Apache-2.0, 离线 vendor)
+graph_engine: 服务端确定性静态分层布局（纯 Python compute_static_layout，无运行时物理引擎、无 vendor 依赖）
 typography: github-markdown-css (vendor/github-markdown.css, MIT, 离线 vendor)
 -->
 <link rel="stylesheet" href="vendor/github-markdown.css">
@@ -274,7 +397,24 @@ nav a:hover,nav a.active{background:var(--card)}
 .graph-toolbar button{background:var(--chip);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer}
 .graph-toolbar button:hover{border-color:var(--accent)}
 .graph-toolbar .hint{margin-left:auto;color:var(--dim);font-size:11px}
-#graph{height:540px}
+#graph{height:540px;cursor:grab}
+#graph:active{cursor:grabbing}
+#graph svg{display:block;width:100%;height:100%}
+.flow-node{cursor:grab}
+.flow-node:active{cursor:grabbing}
+.flow-node .node-mask{fill:#000;opacity:0.35;transform:translate(2px,3px)}
+.flow-node .node-box{fill:#232735;stroke-width:1.6}
+.flow-node:hover .node-box{stroke-width:2.2}
+.flow-node.sel .node-box{stroke:#5b9dff;stroke-width:2.6;filter:drop-shadow(0 0 4px rgba(91,157,255,.6))}
+.flow-node .node-title{fill:#e6e9f2;font-size:12px;font-weight:600;font-family:"Segoe UI",sans-serif}
+.flow-node .node-sub{fill:#9aa3b8;font-size:10px;font-family:"Segoe UI",sans-serif}
+.flow-node .node-badge{fill:#3fbf7f;font-size:10px;font-family:"Segoe UI",sans-serif}
+.lane-rect{fill:rgba(91,157,255,0.03)}
+.lane-label{font-size:10px;font-weight:600;font-family:"Segoe UI",sans-serif}
+.flow-edge{stroke:#3a4055;stroke-width:1.5;fill:none}
+.flow-edge.dashed{stroke:#e5b458;stroke-dasharray:5,4}
+.edge-label{font-size:10px;fill:#9aa3b8;font-family:"Segoe UI",sans-serif;text-anchor:middle}
+.edge-label.dashed{fill:#e5b458}
 #legend{display:flex;flex-wrap:wrap;gap:10px;padding:8px 10px;font-size:11px;color:var(--dim);border-top:1px solid var(--line)}
 #legend .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
 /* markdown-body 默认跟随系统浅/深色偏好；页面自身固定深色，此处强制复用官方 dark 变量不跟系统切换 */
@@ -320,15 +460,14 @@ details.tech code{word-break:break-all}
   <aside id="detail"></aside>
 </main>
 <script id="data" type="application/json">__DATA__</script>
-<script src="vendor/vis-network.min.js"></script>
 <script>
 const DATA = JSON.parse(document.getElementById('data').textContent);
 const $ = (sel, el) => (el || document).querySelector(sel);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const cssEsc = s => String(s).replace(/["\\\\]/g, '\\\\$&');
 const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString('zh-CN') : '—';
 const badge = st => `<span class="badge b-${esc(st || 'unknown')}"></span>`;
 const LANE_PALETTE = ['#5b9dff','#3fbf7f','#e5b458','#e0626b','#a56bf0','#38b6c9','#f08a5d','#7ac2ff','#c792ea','#8bd450'];
-let currentNetwork = null;
 function laneColor(lanes, lane) {
   const idx = Math.max(0, lanes.indexOf(lane));
   return LANE_PALETTE[idx % LANE_PALETTE.length];
@@ -363,51 +502,137 @@ function evidenceHtml(ev) {
     ${snippetHtml(ev.snippet)}</div>`;
 }
 
+// 静态分层布局（坐标由 Python compute_static_layout 一次性算好，随数据下发）。
+// 前端只画图 + 响应交互，加载后完全静止，不存在任何自动布局/物理模拟/持续动画。
+function routeEdgePath(a, b) {
+  const x1 = a.x + a.w / 2, y1 = a.y + a.h;
+  const x2 = b.x + b.w / 2, y2 = b.y;
+  if (Math.abs(x1 - x2) < 1 || y2 <= y1) return `M ${x1} ${y1} L ${x2} ${y2}`;
+  const mid = (y1 + y2) / 2, r = 10, sign = x2 > x1 ? 1 : -1;
+  return `M ${x1} ${y1} L ${x1} ${mid - r} Q ${x1} ${mid} ${x1 + sign * r} ${mid} `
+       + `L ${x2 - sign * r} ${mid} Q ${x2} ${mid} ${x2} ${mid + r} L ${x2} ${y2}`;
+}
+
+function updateConnectedEdges(container, flow, nodeId, nx, ny) {
+  const moved = { x: nx, y: ny, w: flow.layout.nodes[nodeId].w, h: flow.layout.nodes[nodeId].h };
+  container.querySelectorAll(`path.flow-edge[data-from="${cssEsc(nodeId)}"]`).forEach(p => {
+    const b = flow.layout.nodes[p.dataset.to];
+    if (b) p.setAttribute('d', routeEdgePath(moved, b));
+  });
+  container.querySelectorAll(`path.flow-edge[data-to="${cssEsc(nodeId)}"]`).forEach(p => {
+    const a = flow.layout.nodes[p.dataset.from];
+    if (a) p.setAttribute('d', routeEdgePath(a, moved));
+  });
+}
+
 function renderFlowGraph(container, flow) {
-  if (currentNetwork) { currentNetwork.destroy(); currentNetwork = null; }
+  const layout = flow.layout;
+  if (!layout) { container.innerHTML = '<div class="chip">缺少静态布局数据</div>'; return null; }
+  if (!flow._layoutSnapshot) flow._layoutSnapshot = JSON.parse(JSON.stringify(layout));
   const lanes = flow.lanes || [];
-  const nodes = (flow.nodes || []).map(n => ({
-    id: n.id,
-    label: n.label.length > 26 ? n.label.slice(0, 25) + '…' : n.label,
-    title: n.summary || '',
-    level: Math.max(0, lanes.indexOf(n.lane)),
-    shape: 'box',
-    margin: 10,
-    widthConstraint: { maximum: 220 },
-    color: { background: '#232735', border: laneColor(lanes, n.lane), highlight: { background: '#2c3143', border: '#5b9dff' } },
-    font: { color: '#e6e9f2', size: 12, face: 'Segoe UI, sans-serif' },
-    borderWidth: 2,
-    shapeProperties: { borderRadius: 6 },
-  }));
-  const edges = (flow.edges || []).map(e => ({
-    from: e.source, to: e.target,
-    label: e.condition || e.label || '',
-    dashes: !!e.condition,
-    arrows: 'to',
-    color: { color: e.condition ? '#e5b458' : '#3a4055', highlight: '#5b9dff' },
-    font: { color: '#9aa3b8', size: 10, strokeWidth: 0, align: 'top' },
-    smooth: { type: 'cubicBezier', forceDirection: 'vertical', roundness: 0.45 },
-  }));
-  const network = new vis.Network(container, { nodes, edges }, {
-    layout: { hierarchical: {
-      enabled: true, direction: 'UD', sortMethod: 'directed',
-      levelSeparation: 130, nodeSpacing: 150, treeSpacing: 200,
-      blockShifting: true, edgeMinimization: true,
-    } },
-    physics: { hierarchicalRepulsion: { nodeDistance: 140, springLength: 130 }, stabilization: { iterations: 300 } },
-    interaction: { hover: true, dragNodes: true, dragView: true, zoomView: true, tooltipDelay: 150 },
+  const nodeMap = {};
+  (flow.nodes || []).forEach(n => { nodeMap[n.id] = n; });
+
+  const defs = `<marker id="arr-solid" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5b9dff"/></marker>
+    <marker id="arr-dashed" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#e5b458"/></marker>`;
+  const laneSvg = (layout.lanes || []).map(l => `
+    <rect class="lane-rect" x="${l.x}" y="${l.y}" width="${l.w}" height="${l.h}" rx="8" stroke="${laneColor(lanes, l.name)}" stroke-dasharray="6,5" stroke-width="1"></rect>
+    <text class="lane-label" x="${l.x + 10}" y="${l.y + 14}" fill="${laneColor(lanes, l.name)}">${esc(l.name)}</text>`).join('');
+  const edgeSvg = (layout.edges || []).map(e => {
+    const dashed = !!e.condition;
+    const label = e.condition || e.label;
+    const a = layout.nodes[e.source], b = layout.nodes[e.target];
+    const lx = a && b ? (a.x + a.w / 2 + b.x + b.w / 2) / 2 : 0;
+    const ly = a && b ? (a.y + a.h + b.y) / 2 - 4 : 0;
+    return `<path class="flow-edge${dashed ? ' dashed' : ''}" d="${e.path}" data-from="${esc(e.source)}" data-to="${esc(e.target)}" marker-end="url(#${dashed ? 'arr-dashed' : 'arr-solid'})"></path>`
+      + (label ? `<text class="edge-label${dashed ? ' dashed' : ''}" x="${lx.toFixed(1)}" y="${ly.toFixed(1)}">${esc(label)}</text>` : '');
+  }).join('');
+  const nodeSvg = Object.keys(layout.nodes || {}).map(id => {
+    const pos = layout.nodes[id];
+    const n = nodeMap[id];
+    if (!n) return '';
+    const label = (n.label || '').length > 24 ? n.label.slice(0, 23) + '…' : (n.label || '');
+    const sub = (n.summary || '').length > 30 ? n.summary.slice(0, 29) + '…' : (n.summary || '');
+    const evCount = (n.evidence || []).length;
+    return `<g class="flow-node" data-id="${esc(id)}" transform="translate(${pos.x},${pos.y})">
+      <rect class="node-mask" width="${pos.w}" height="${pos.h}" rx="6"></rect>
+      <rect class="node-box" width="${pos.w}" height="${pos.h}" rx="6" style="stroke:${laneColor(lanes, n.lane)}"></rect>
+      <text class="node-title" x="10" y="20">${esc(label)}</text>
+      <text class="node-sub" x="10" y="38">${esc(sub)}</text>
+      <text class="node-badge" x="${pos.w - 10}" y="${pos.h - 10}" text-anchor="end">📎${evCount}</text>
+    </g>`;
+  }).join('');
+
+  container.innerHTML = `<svg id="flow-svg" viewBox="0 0 ${layout.width} ${layout.height}">
+    <defs>${defs}</defs>
+    <g id="flow-viewport">${laneSvg}${edgeSvg}${nodeSvg}</g>
+  </svg>`;
+
+  const svg = container.querySelector('#flow-svg');
+  let view = { x: 0, y: 0, w: layout.width, h: layout.height };
+  const applyView = () => svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
+
+  svg.addEventListener('wheel', ev => {
+    ev.preventDefault();
+    const rect = svg.getBoundingClientRect();
+    const scale = view.w / rect.width;
+    const cx = view.x + (ev.clientX - rect.left) * scale;
+    const cy = view.y + (ev.clientY - rect.top) * scale;
+    const factor = ev.deltaY > 0 ? 1.1 : 0.9;
+    view.x = cx - (cx - view.x) * factor;
+    view.y = cy - (cy - view.y) * factor;
+    view.w *= factor; view.h *= factor;
+    applyView();
+  }, { passive: false });
+
+  let dragNode = null, dragMoved = false, panState = null;
+  svg.addEventListener('mousedown', ev => {
+    const nodeEl = ev.target.closest ? ev.target.closest('.flow-node') : null;
+    const rect = svg.getBoundingClientRect();
+    const scale = view.w / rect.width;
+    if (nodeEl) {
+      dragNode = { id: nodeEl.dataset.id, el: nodeEl, startX: ev.clientX, startY: ev.clientY, scale };
+      dragMoved = false;
+    } else {
+      panState = { startX: ev.clientX, startY: ev.clientY, ox: view.x, oy: view.y, scale };
+    }
   });
-  network.once('stabilizationIterationsDone', () => {
-    // 先用 hierarchical 得到无重叠的初始泳道排列，稳定后关闭 physics 与 hierarchical，
-    // 节点保持当前位置不跳变，但从此可在 x/y 两个方向自由拖拽（实测验证：关闭 hierarchical 前只能沿同一层水平拖动）。
-    network.setOptions({ physics: false, layout: { hierarchical: false } });
-  });
-  network.on('click', params => {
-    if (params.nodes.length) nodeDetail(flow, params.nodes[0]);
-    else closeDetail();
-  });
-  currentNetwork = network;
-  return network;
+  const onMove = ev => {
+    if (dragNode) {
+      const dx = (ev.clientX - dragNode.startX) * dragNode.scale;
+      const dy = (ev.clientY - dragNode.startY) * dragNode.scale;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragMoved = true;
+      const base = flow.layout.nodes[dragNode.id];
+      const nx = base.x + dx, ny = base.y + dy;
+      dragNode.el.setAttribute('transform', `translate(${nx},${ny})`);
+      updateConnectedEdges(container, flow, dragNode.id, nx, ny);
+    } else if (panState) {
+      const dx = (ev.clientX - panState.startX) * panState.scale;
+      const dy = (ev.clientY - panState.startY) * panState.scale;
+      view.x = panState.ox - dx; view.y = panState.oy - dy;
+      applyView();
+    }
+  };
+  const onUp = ev => {
+    if (dragNode) {
+      if (!dragMoved) {
+        nodeDetail(flow, dragNode.id);
+      } else {
+        const base = flow.layout.nodes[dragNode.id];
+        base.x += (ev.clientX - dragNode.startX) * dragNode.scale;
+        base.y += (ev.clientY - dragNode.startY) * dragNode.scale;
+      }
+      dragNode = null;
+    }
+    panState = null;
+  };
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+  applyView();
+  return {
+    fit: () => { view = { x: 0, y: 0, w: layout.width, h: layout.height }; applyView(); },
+    reset: () => { flow.layout = JSON.parse(JSON.stringify(flow._layoutSnapshot)); renderFlowGraph(container, flow); },
+  };
 }
 
 function subjectView(s) {
@@ -416,12 +641,12 @@ function subjectView(s) {
   if (s.flow) {
     const lanes = s.flow.lanes || [];
     const legend = lanes.map(l => `<span><span class="sw" style="background:${laneColor(lanes, l)}"></span>${esc(l)}</span>`).join('');
-    body += `<div class="section"><h2>业务流程（可拖拽 / 滞轮缩放 / 点节点看证据）</h2>
+    body += `<div class="section"><h2>业务流程（静态布局，点节点看证据 / 滚轮缩放 / 拖动空白处平移 / 拖动节点手动微调）</h2>
       <div id="graph-wrap">
         <div class="graph-toolbar">
           <button id="btn-fit" type="button">适应窗口</button>
-          <button id="btn-restack" type="button">重新布局</button>
-          <span class="hint">vis-network 自动分层，节点不重叠且可自由拖动</span>
+          <button id="btn-reset" type="button">重置布局</button>
+          <span class="hint">服务端一次性静态分层布局，加载后不会自动移动</span>
         </div>
         <div id="graph"></div>
         <div id="legend">${legend}</div>
@@ -444,17 +669,14 @@ function subjectView(s) {
   </details>`;
   $('#content').innerHTML = body;
   if (s.flow) {
-    const network = renderFlowGraph($('#graph'), s.flow);
-    $('#btn-fit').onclick = () => network.fit({ animation: true });
-    $('#btn-restack').onclick = () => {
-      // 重新跑一次 hierarchical 分层，结束后再关闭 physics/hierarchical，恢复自由拖拽
-      network.setOptions({
-        physics: { hierarchicalRepulsion: { nodeDistance: 140, springLength: 130 }, stabilization: { iterations: 300 } },
-        layout: { hierarchical: { enabled: true, direction: 'UD', sortMethod: 'directed', levelSeparation: 130, nodeSpacing: 150, treeSpacing: 200 } },
-      });
-      network.once('stabilizationIterationsDone', () => network.setOptions({ physics: false, layout: { hierarchical: false } }));
-      network.stabilize();
-    };
+    const graph = renderFlowGraph($('#graph'), s.flow);
+    if (graph) {
+      $('#btn-fit').onclick = () => graph.fit();
+      $('#btn-reset').onclick = () => {
+        const g2 = graph.reset();
+        $('#btn-fit').onclick = () => g2.fit();
+      };
+    }
   }
 }
 
@@ -473,13 +695,16 @@ function nodeDetail(flow, nodeId) {
       ${(n.evidence_anchors || []).map(a => `<p><code>${esc(a.reference)}</code><br>anchor: <code>${esc(a.anchor_hash)}</code></p>`).join('') || '<p>无锚点哈希</p>'}
     </details>`;
   $('#detail').classList.add('open');
-  if (currentNetwork) currentNetwork.selectNodes([nodeId]);
+  document.querySelectorAll('.flow-node.sel').forEach(g => g.classList.remove('sel'));
+  const g = document.querySelector(`.flow-node[data-id="${cssEsc(nodeId)}"]`);
+  if (g) g.classList.add('sel');
 }
 function closeDetail() {
   $('#detail').classList.remove('open');
   $('#detail').innerHTML = '';
-  if (currentNetwork) currentNetwork.unselectAll();
+  document.querySelectorAll('.flow-node.sel').forEach(g => g.classList.remove('sel'));
 }
+
 
 function mapView() {
   const cards = DATA.subjects.map(s => {
@@ -547,7 +772,7 @@ $('#search').addEventListener('keydown', e => {
 
 $('#meta').textContent = `生成于 ${fmtTime(DATA.generated_at)} · 主题 ${DATA.stats.subject_count} · 路线 ${DATA.stats.memory_count} · 证据 ${DATA.stats.evidence_count} · 数据源 memory.sqlite（本页面为程序化生成产物）`;
 window.addEventListener('hashchange', route);
-window.addEventListener('resize', () => { if (currentNetwork) currentNetwork.fit(); });
+window.addEventListener('resize', () => { const btn = $('#btn-fit'); if (btn) btn.onclick && btn.onclick(); });
 navRender();
 route();
 </script>
