@@ -5,7 +5,11 @@
 2. 纯代码生成，AI 不参与渲染；删除后可随时重新生成，输出确定性。
 3. 渐进式披露：业务地图 -> 主题泳道板 -> 节点侧栏 -> 证据片段 + vscode:// 深链。
 4. 哈希/ID 等机器数据全部折叠进"技术详情"，默认不打扰人。
-5. 单文件 HTML，零外部依赖（无 npm/CDN/vendored 大库），离线双击即开。
+5. 单页面交互站（index.html + vendor/），依赖业界成熟开源库并离线 vendor（vis-network 图引擎 + github-markdown-css 排版），
+   不接 CDN、不需 npm/构建步骤，双击即开。详见仓库根目录 wiki_vendor/VENDOR.md。
+
+图引擎选型（专家组评审）：vis-network（dbt docs 同款方案）—分层自动布局消重叠 + 原生拖拽，
+单文件集成无需构建。cytoscape.js+dagre 为候选道; React Flow / Facebook astryx 因强依赖 React 构建链不适用。
 
 形态对标 dbt docs：构建产物 -> 静态交互站（DAG + 详情侧栏 + 搜索）。
 """
@@ -14,6 +18,7 @@ from __future__ import annotations
 
 import html
 import json
+import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -22,6 +27,9 @@ from typing import Any, Dict, List, Optional
 from .query_memory import _connect
 
 SNIPPET_RADIUS = 6
+# 与 templates/ 同级（ue5_kb/query/memory_site.py 向上三级到仓库根），与 generate.py 定位 templates 目录的约定一致
+VENDOR_DIR = Path(__file__).parent.parent.parent / "wiki_vendor"
+VENDOR_ASSETS = ("vis-network.min.js", "github-markdown.css")
 
 
 def _read_snippet(source_root: Optional[Path], file_value: str, line_number: int) -> Optional[Dict[str, Any]]:
@@ -229,7 +237,10 @@ generated_by: UE5_KnowledgeBaseMaker query_memory_render_site
 data_source: memory/memory.sqlite
 markdown_is_authoritative: false
 本文件为程序化生成产物，可随时删除并重新生成；事实以 sqlite + validate/replay 为准。
+graph_engine: vis-network (vendor/vis-network.min.js, MIT/Apache-2.0, 离线 vendor)
+typography: github-markdown-css (vendor/github-markdown.css, MIT, 离线 vendor)
 -->
+<link rel="stylesheet" href="vendor/github-markdown.css">
 <style>
 :root{--bg:#12141a;--panel:#1b1e27;--card:#232735;--line:#3a4055;--text:#e6e9f2;--dim:#9aa3b8;
 --accent:#5b9dff;--ok:#3fbf7f;--warn:#e5b458;--bad:#e0626b;--chip:#2c3143;}
@@ -258,18 +269,22 @@ nav a:hover,nav a.active{background:var(--card)}
 .card .sub{color:var(--dim);font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .chip{background:var(--chip);border-radius:10px;padding:1px 8px;font-size:11px;color:var(--dim)}
-.lane{margin-bottom:14px}
-.lane>h3{font-size:12px;color:var(--dim);border-bottom:1px solid var(--line);padding-bottom:4px;margin-bottom:8px}
-.lane .nodes{display:flex;flex-wrap:wrap;gap:10px}
-.node{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px;max-width:320px;cursor:pointer;position:relative;z-index:2}
-.node:hover,.node.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
-.node .t{font-size:13px;font-weight:600}
-.node .s{font-size:12px;color:var(--dim);margin-top:2px}
-.node .ev{font-size:11px;color:var(--ok);margin-top:4px}
-#edges{position:absolute;top:0;left:0;pointer-events:none;z-index:1}
-#edges path{stroke:var(--line);stroke-width:1.5;fill:none;marker-end:url(#arr)}
-#edges text{fill:var(--dim);font-size:10px}
-#edges .cond{fill:var(--warn)}
+#graph-wrap{border:1px solid var(--line);border-radius:8px;background:#0d0f14;margin-bottom:6px;overflow:hidden}
+.graph-toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+.graph-toolbar button{background:var(--chip);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer}
+.graph-toolbar button:hover{border-color:var(--accent)}
+.graph-toolbar .hint{margin-left:auto;color:var(--dim);font-size:11px}
+#graph{height:540px}
+#legend{display:flex;flex-wrap:wrap;gap:10px;padding:8px 10px;font-size:11px;color:var(--dim);border-top:1px solid var(--line)}
+#legend .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
+/* markdown-body 默认跟随系统浅/深色偏好；页面自身固定深色，此处强制复用官方 dark 变量不跟系统切换 */
+.markdown-body{
+  color-scheme:dark;background:transparent;font-size:13px;
+  --fgColor-accent:#4493f8;--bgColor-default:#161b22;--bgColor-muted:#151b23;--bgColor-neutral-muted:#656c7633;
+  --borderColor-accent-emphasis:#1f6feb;--borderColor-default:#3d444d;--borderColor-muted:#3d444db3;
+  --fgColor-default:#e6e9f2;--fgColor-muted:#9198a1;--fgColor-danger:#f85149;--fgColor-success:#3fb950;
+}
+.markdown-body table{width:100%;display:table}
 .section{margin-bottom:20px}
 .section>h2{font-size:15px;margin-bottom:10px;border-left:3px solid var(--accent);padding-left:8px}
 table{border-collapse:collapse;width:100%;font-size:12px}
@@ -305,12 +320,19 @@ details.tech code{word-break:break-all}
   <aside id="detail"></aside>
 </main>
 <script id="data" type="application/json">__DATA__</script>
+<script src="vendor/vis-network.min.js"></script>
 <script>
 const DATA = JSON.parse(document.getElementById('data').textContent);
 const $ = (sel, el) => (el || document).querySelector(sel);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString('zh-CN') : '—';
 const badge = st => `<span class="badge b-${esc(st || 'unknown')}"></span>`;
+const LANE_PALETTE = ['#5b9dff','#3fbf7f','#e5b458','#e0626b','#a56bf0','#38b6c9','#f08a5d','#7ac2ff','#c792ea','#8bd450'];
+let currentNetwork = null;
+function laneColor(lanes, lane) {
+  const idx = Math.max(0, lanes.indexOf(lane));
+  return LANE_PALETTE[idx % LANE_PALETTE.length];
+}
 
 function navRender() {
   const subj = DATA.subjects.map(s =>
@@ -341,34 +363,51 @@ function evidenceHtml(ev) {
     ${snippetHtml(ev.snippet)}</div>`;
 }
 
-function drawEdges(flow) {
-  const svg = $('#edges');
-  if (!svg || !flow) return;
-  const content = $('#content');
-  svg.setAttribute('width', content.scrollWidth);
-  svg.setAttribute('height', content.scrollHeight);
-  const base = content.getBoundingClientRect();
-  const pos = {};
-  content.querySelectorAll('.node').forEach(el => {
-    const r = el.getBoundingClientRect();
-    pos[el.dataset.id] = {
-      x: r.left - base.left + content.scrollLeft + r.width / 2,
-      top: r.top - base.top + content.scrollTop,
-      bottom: r.top - base.top + content.scrollTop + r.height,
-    };
+function renderFlowGraph(container, flow) {
+  if (currentNetwork) { currentNetwork.destroy(); currentNetwork = null; }
+  const lanes = flow.lanes || [];
+  const nodes = (flow.nodes || []).map(n => ({
+    id: n.id,
+    label: n.label.length > 26 ? n.label.slice(0, 25) + '…' : n.label,
+    title: n.summary || '',
+    level: Math.max(0, lanes.indexOf(n.lane)),
+    shape: 'box',
+    margin: 10,
+    widthConstraint: { maximum: 220 },
+    color: { background: '#232735', border: laneColor(lanes, n.lane), highlight: { background: '#2c3143', border: '#5b9dff' } },
+    font: { color: '#e6e9f2', size: 12, face: 'Segoe UI, sans-serif' },
+    borderWidth: 2,
+    shapeProperties: { borderRadius: 6 },
+  }));
+  const edges = (flow.edges || []).map(e => ({
+    from: e.source, to: e.target,
+    label: e.condition || e.label || '',
+    dashes: !!e.condition,
+    arrows: 'to',
+    color: { color: e.condition ? '#e5b458' : '#3a4055', highlight: '#5b9dff' },
+    font: { color: '#9aa3b8', size: 10, strokeWidth: 0, align: 'top' },
+    smooth: { type: 'cubicBezier', forceDirection: 'vertical', roundness: 0.45 },
+  }));
+  const network = new vis.Network(container, { nodes, edges }, {
+    layout: { hierarchical: {
+      enabled: true, direction: 'UD', sortMethod: 'directed',
+      levelSeparation: 130, nodeSpacing: 150, treeSpacing: 200,
+      blockShifting: true, edgeMinimization: true,
+    } },
+    physics: { hierarchicalRepulsion: { nodeDistance: 140, springLength: 130 }, stabilization: { iterations: 300 } },
+    interaction: { hover: true, dragNodes: true, dragView: true, zoomView: true, tooltipDelay: 150 },
   });
-  let paths = '<defs><marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5b9dff"/></marker></defs>';
-  for (const e of flow.edges || []) {
-    const a = pos[e.source], b = pos[e.target];
-    if (!a || !b) continue;
-    const down = b.top >= a.bottom;
-    const y1 = down ? a.bottom : a.top, y2 = down ? b.top : b.bottom;
-    const my = (y1 + y2) / 2;
-    paths += `<path d="M${a.x},${y1} C${a.x},${my} ${b.x},${my} ${b.x},${y2}"/>`;
-    const label = e.condition || e.label;
-    if (label) paths += `<text x="${(a.x + b.x) / 2 + 4}" y="${my - 3}" class="${e.condition ? 'cond' : ''}">${esc(label)}</text>`;
-  }
-  svg.innerHTML = paths;
+  network.once('stabilizationIterationsDone', () => {
+    // 先用 hierarchical 得到无重叠的初始泳道排列，稳定后关闭 physics 与 hierarchical，
+    // 节点保持当前位置不跳变，但从此可在 x/y 两个方向自由拖拽（实测验证：关闭 hierarchical 前只能沿同一层水平拖动）。
+    network.setOptions({ physics: false, layout: { hierarchical: false } });
+  });
+  network.on('click', params => {
+    if (params.nodes.length) nodeDetail(flow, params.nodes[0]);
+    else closeDetail();
+  });
+  currentNetwork = network;
+  return network;
 }
 
 function subjectView(s) {
@@ -376,20 +415,22 @@ function subjectView(s) {
     <div class="chips">${(s.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div></div>`;
   if (s.flow) {
     const lanes = s.flow.lanes || [];
-    body += `<svg id="edges"></svg><div class="section"><h2>业务流程（点节点看证据）</h2>`;
-    for (const lane of lanes) {
-      const nodes = (s.flow.nodes || []).filter(n => n.lane === lane);
-      if (!nodes.length) continue;
-      body += `<div class="lane"><h3>${esc(lane)}</h3><div class="nodes">` + nodes.map(n =>
-        `<div class="node" data-id="${esc(n.id)}"><div class="t">${esc(n.label)}</div>
-         <div class="s">${esc(n.summary || '')}</div>
-         <div class="ev">📎 证据 ${(n.evidence || []).length} 条</div></div>`).join('') + '</div></div>';
-    }
-    body += '</div>';
+    const legend = lanes.map(l => `<span><span class="sw" style="background:${laneColor(lanes, l)}"></span>${esc(l)}</span>`).join('');
+    body += `<div class="section"><h2>业务流程（可拖拽 / 滞轮缩放 / 点节点看证据）</h2>
+      <div id="graph-wrap">
+        <div class="graph-toolbar">
+          <button id="btn-fit" type="button">适应窗口</button>
+          <button id="btn-restack" type="button">重新布局</button>
+          <span class="hint">vis-network 自动分层，节点不重叠且可自由拖动</span>
+        </div>
+        <div id="graph"></div>
+        <div id="legend">${legend}</div>
+      </div>
+    </div>`;
   } else {
     body += `<div class="section"><h2>业务流程</h2><div class="chip">尚无通过质量门禁的流程附注</div></div>`;
   }
-  body += `<div class="section"><h2>路线记忆（${s.memories.length} 次查询累积）</h2>
+  body += `<div class="section markdown-body"><h2>路线记忆（${s.memories.length} 次查询累积）</h2>
     <table><tr><th></th><th>意图</th><th>步数</th><th>记录时间</th><th>最近校验</th></tr>` +
     s.memories.map(m => `<tr><td>${badge(m.status)}</td><td>${esc(m.intent)}</td><td>${m.step_count}</td>
       <td>${fmtTime(m.created_at)}</td><td>${fmtTime(m.last_validated_at)}</td></tr>`).join('') + '</table></div>';
@@ -403,17 +444,22 @@ function subjectView(s) {
   </details>`;
   $('#content').innerHTML = body;
   if (s.flow) {
-    const redraw = () => drawEdges(s.flow);
-    requestAnimationFrame(redraw);
-    setTimeout(redraw, 120); // 字体/布局稳定后二次重绘兑底
-    $('#content').querySelectorAll('.node').forEach(el => el.onclick = () => nodeDetail(s, el.dataset.id, el));
+    const network = renderFlowGraph($('#graph'), s.flow);
+    $('#btn-fit').onclick = () => network.fit({ animation: true });
+    $('#btn-restack').onclick = () => {
+      // 重新跑一次 hierarchical 分层，结束后再关闭 physics/hierarchical，恢复自由拖拽
+      network.setOptions({
+        physics: { hierarchicalRepulsion: { nodeDistance: 140, springLength: 130 }, stabilization: { iterations: 300 } },
+        layout: { hierarchical: { enabled: true, direction: 'UD', sortMethod: 'directed', levelSeparation: 130, nodeSpacing: 150, treeSpacing: 200 } },
+      });
+      network.once('stabilizationIterationsDone', () => network.setOptions({ physics: false, layout: { hierarchical: false } }));
+      network.stabilize();
+    };
   }
 }
 
-function nodeDetail(s, nodeId, el) {
-  document.querySelectorAll('.node.sel').forEach(n => n.classList.remove('sel'));
-  el.classList.add('sel');
-  const n = (s.flow.nodes || []).find(x => x.id === nodeId);
+function nodeDetail(flow, nodeId) {
+  const n = (flow.nodes || []).find(x => x.id === nodeId);
   if (!n) return;
   const evs = (n.evidence_view && n.evidence_view.length) ? n.evidence_view
     : (n.evidence || []).map(ref => ({ ref }));
@@ -427,13 +473,12 @@ function nodeDetail(s, nodeId, el) {
       ${(n.evidence_anchors || []).map(a => `<p><code>${esc(a.reference)}</code><br>anchor: <code>${esc(a.anchor_hash)}</code></p>`).join('') || '<p>无锚点哈希</p>'}
     </details>`;
   $('#detail').classList.add('open');
-  requestAnimationFrame(() => drawEdges(s.flow));
+  if (currentNetwork) currentNetwork.selectNodes([nodeId]);
 }
 function closeDetail() {
   $('#detail').classList.remove('open');
   $('#detail').innerHTML = '';
-  const s = current();
-  if (s && s.flow) requestAnimationFrame(() => drawEdges(s.flow));
+  if (currentNetwork) currentNetwork.unselectAll();
 }
 
 function mapView() {
@@ -454,7 +499,7 @@ function mapView() {
 
 function patternView(p) {
   $('#content').innerHTML = `<div class="section"><h2>${esc(p.name)} ${badge(p.status)}</h2></div>
-    <div class="section"><h2>阶段</h2><table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
+    <div class="section markdown-body"><h2>阶段</h2><table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
     ${p.stages.map(st => `<tr><td>${st.index}</td><td>${esc(st.name)}</td><td>${badge(st.status)} ${esc(st.status)}</td></tr>`).join('')}</table></div>
     <div class="section"><h2>支撑主题</h2><div class="grid">
     ${p.members.map(id => `<div class="card" onclick="location.hash='subject/${esc(id)}'"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div></div>
@@ -462,7 +507,7 @@ function patternView(p) {
 }
 
 function hintsView() {
-  $('#content').innerHTML = `<div class="section"><h2>避坑记录（失败被自动隔离，不污染成功路线）</h2>
+  $('#content').innerHTML = `<div class="section markdown-body"><h2>避坑记录（失败被自动隔离，不污染成功路线）</h2>
     <table><tr><th>命令</th><th>参数</th><th>失败类型</th><th>错误摘要</th><th>时间</th></tr>
     ${DATA.negative_hints.map(h => `<tr><td><code>${esc(h.command)}</code></td><td><code>${esc(h.args || '')}</code></td>
       <td>${esc(h.failure_type)}</td><td>${esc(h.error || '')}</td><td>${fmtTime(h.created_at)}</td></tr>`).join('')}</table></div>`;
@@ -502,7 +547,7 @@ $('#search').addEventListener('keydown', e => {
 
 $('#meta').textContent = `生成于 ${fmtTime(DATA.generated_at)} · 主题 ${DATA.stats.subject_count} · 路线 ${DATA.stats.memory_count} · 证据 ${DATA.stats.evidence_count} · 数据源 memory.sqlite（本页面为程序化生成产物）`;
 window.addEventListener('hashchange', route);
-window.addEventListener('resize', () => { const s = current(); if (s && s.flow) drawEdges(s.flow); });
+window.addEventListener('resize', () => { if (currentNetwork) currentNetwork.fit(); });
 navRender();
 route();
 </script>
@@ -526,10 +571,20 @@ def export_site(*, skill_dir: Path, source_root: Optional[Path] = None) -> Dict[
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "index.html"
     out_file.write_text(page, encoding="utf-8")
+    vendor_out = out_dir / "vendor"
+    vendor_out.mkdir(parents=True, exist_ok=True)
+    vendor_copied = []
+    for name in VENDOR_ASSETS:
+        source = VENDOR_DIR / name
+        if source.is_file():
+            shutil.copy2(source, vendor_out / name)
+            vendor_copied.append(name)
     return {
         "schema": "query-memory-render-site/v1",
         "site_file": str(out_file),
         "size_bytes": out_file.stat().st_size,
+        "vendor_dir": str(vendor_out),
+        "vendor_assets": vendor_copied,
         "stats": payload["stats"],
         "generated_programmatically": True,
         "markdown_is_authoritative": False,

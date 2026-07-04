@@ -78,10 +78,21 @@ def test_export_site_generates_single_file_wiki_from_sqlite_only(tmp_path):
     assert "vscode://file/" in text
     # </script> 不得提前终结数据块
     assert "</script> 转义" not in text
+    # 图引擎/排版改为成熟开源库离线 vendor，而非手写 SVG/纯自定义 CSS
+    assert 'src="vendor/vis-network.min.js"' in text
+    assert 'href="vendor/github-markdown.css"' in text
+    assert "new vis.Network(" in text
     assert result["stats"]["subject_count"] == 1
     assert result["stats"]["memory_count"] == 1
     assert result["generated_programmatically"] is True
 
+    # vendor 资产随生成物一起落盘（离线可用，不依赖 CDN）
+    assert set(result["vendor_assets"]) == {"vis-network.min.js", "github-markdown.css"}
+    vendor_dir = Path(result["vendor_dir"])
+    assert (vendor_dir / "vis-network.min.js").stat().st_size > 100_000
+    assert (vendor_dir / "github-markdown.css").stat().st_size > 10_000
+
     # 幂等：重新生成字节级一致（generated_at 除外的确定性由数据决定，允许时间戳差异）
     again = export_site(skill_dir=skill_dir, source_root=source_root)
     assert Path(again["site_file"]).exists()
+    assert (Path(again["vendor_dir"]) / "vis-network.min.js").exists()
