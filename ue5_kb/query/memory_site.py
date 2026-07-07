@@ -89,7 +89,8 @@ def _latest_published_flow(conn: sqlite3.Connection, subject_id: str) -> Optiona
 # 完全不动，只有用户主动拖拽才会移动。本模块用纯 Python 复刻这一布局算法（不引入
 # Node/Archify 依赖），坐标在生成时一次性算好、写入数据，前端只负责渲染与响应交互。
 NODE_W, NODE_H = 200, 56
-_LAYOUT_COL_GAP, _LAYOUT_LANE_GAP, _LAYOUT_LANE_PAD, _LAYOUT_LABEL_H, _LAYOUT_MARGIN = 24, 46, 14, 20, 24
+_LAYOUT_COL_GAP, _LAYOUT_ROW_GAP, _LAYOUT_LANE_GAP, _LAYOUT_LANE_PAD, _LAYOUT_LABEL_H, _LAYOUT_MARGIN = 24, 18, 46, 14, 20, 24
+_LAYOUT_MAX_COLS = 3  # 同一泳道内节点按依赖顺序换行排布，而不是强行挤成一整行
 
 
 def _order_nodes_by_barycenter(lanes: List[str], nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, List[str]]:
@@ -126,13 +127,109 @@ def _order_nodes_by_barycenter(lanes: List[str], nodes: List[Dict[str, Any]], ed
                 return (sum(refs) / len(refs)) if refs else float(_cur_pos.get(node_id, 0))
 
             by_lane[lanes[i]] = sorted(by_lane.get(lanes[i], []), key=bary_up)
+    for lane in lanes:
+        by_lane[lane] = _apply_intra_lane_order(by_lane.get(lane, []), edges)
     return by_lane
+
+
+def _apply_intra_lane_order(lane_ids: List[str], edges: List[Dict[str, Any]]) -> List[str]:
+    """同一泳道内若存在直接依赖边 A->B，保证 A 在阅读顺序（先左后右、先上后下）上排在 B 前面。"""
+    id_set = set(lane_ids)
+    order = list(lane_ids)
+    local_edges = [(e.get("source"), e.get("target")) for e in edges
+                   if e.get("source") in id_set and e.get("target") in id_set and e.get("source") != e.get("target")]
+    if not local_edges:
+        return order
+    for _ in range(len(order)):
+        index = {node_id: i for i, node_id in enumerate(order)}
+        violation = next(((s, t) for s, t in local_edges if index[s] > index[t]), None)
+        if not violation:
+            break
+        s, t = violation
+        order.remove(t)
+        order.insert(index[s], t)
+    return order
+
+
+def _wrap_into_rows(ids: List[str], max_cols: int) -> List[List[str]]:
+    """按阅读顺序（依赖顺序）把节点换行分组，避免同一大步骤的节点被硬挤成一整行。"""
+    if not ids:
+        return []
+    cols = max(1, min(max_cols, len(ids)))
+    return [ids[i:i + cols] for i in range(0, len(ids), cols)]
+
+
+_MIN_JOG = 14.0  # 折线拐点与两端端点之间至少留出的距离，保证圆角与箭头有地方画
+
+
+def _elbow_vertical(x1: float, y1: float, x2: float, y2: float, r: float) -> Any:
+    """竖直方向的直角折线：从 (x1,y1) 竖直出发，中途横向拐一次，竖直进入 (x2,y2)。"""
+    if abs(x1 - x2) < 1:
+        return f"M {x1:.1f} {y1:.1f} L {x2:.1f} {y2:.1f}", (x1 + x2) / 2, (y1 + y2) / 2 - 4
+    mid = (y1 + y2) / 2
+    rr = min(r, max(2.0, abs(y2 - y1) / 2 - _MIN_JOG))
+    sign = 1 if x2 > x1 else -1
+    path = (
+        f"M {x1:.1f} {y1:.1f} L {x1:.1f} {mid - rr:.1f} "
+        f"Q {x1:.1f} {mid:.1f} {x1 + sign * rr:.1f} {mid:.1f} "
+        f"L {x2 - sign * rr:.1f} {mid:.1f} "
+        f"Q {x2:.1f} {mid:.1f} {x2:.1f} {mid + rr:.1f} "
+        f"L {x2:.1f} {y2:.1f}"
+    )
+    return path, (x1 + x2) / 2, mid - 4
+
+
+def _elbow_horizontal(x1: float, y1: float, x2: float, y2: float, r: float) -> Any:
+    """水平方向的直角折线：从 (x1,y1) 横向出发，中途竖向拐一次，横向进入 (x2,y2)。"""
+    if abs(y1 - y2) < 1:
+        return f"M {x1:.1f} {y1:.1f} L {x2:.1f} {y2:.1f}", (x1 + x2) / 2, (y1 + y2) / 2 - 4
+    mid = (x1 + x2) / 2
+    rr = min(r, max(2.0, abs(x2 - x1) / 2 - _MIN_JOG))
+    sign = 1 if y2 > y1 else -1
+    path = (
+        f"M {x1:.1f} {y1:.1f} L {mid - rr:.1f} {y1:.1f} "
+        f"Q {mid:.1f} {y1:.1f} {mid:.1f} {y1 + sign * rr:.1f} "
+        f"L {mid:.1f} {y2 - sign * rr:.1f} "
+        f"Q {mid:.1f} {y2:.1f} {mid + rr:.1f} {y2:.1f} "
+        f"L {x2:.1f} {y2:.1f}"
+    )
+    return path, mid, (y1 + y2) / 2 - 4
+
+
+def _route_edge(a: Dict[str, float], b: Dict[str, float], corner_r: float = 10.0) -> Dict[str, Any]:
+    """始终返回直角折线路径（不出现斜线）。按目标相对源的位置分三种情形：
+
+    - 目标严格在下方：从源底部出、从目标顶部入，竖直折线（原来唯一支持的情形）。
+    - 目标严格在上方（逆向/回边）：从源顶部出、从目标底部入，同样走竖直折线。
+    - 两者纵向有重叠（同排/侧向边）：从source/target彼此靠近的左右两侧出入，走水平折线。
+    以前"目标在上方或同排"时会退化成一条斜线直连，这里统一改为始终走直角折线。
+    """
+    ax, ay, aw, ah = a["x"], a["y"], a["w"], a["h"]
+    bx, by, bw, bh = b["x"], b["y"], b["w"], b["h"]
+    a_cx, a_cy = ax + aw / 2, ay + ah / 2
+    b_cx, b_cy = bx + bw / 2, by + bh / 2
+
+    if by >= ay + ah:
+        path, lx, ly = _elbow_vertical(a_cx, ay + ah, b_cx, by, corner_r)
+    elif by + bh <= ay:
+        path, lx, ly = _elbow_vertical(a_cx, ay, b_cx, by + bh, corner_r)
+    else:
+        if bx >= ax + aw:
+            x1, y1, x2, y2 = ax + aw, a_cy, bx, b_cy
+        elif bx + bw <= ax:
+            x1, y1, x2, y2 = ax, a_cy, bx + bw, b_cy
+        else:
+            x1, y1, x2, y2 = a_cx, a_cy, b_cx, b_cy
+        path, lx, ly = _elbow_horizontal(x1, y1, x2, y2, corner_r)
+    return {"path": path, "lx": lx, "ly": ly}
 
 
 def compute_static_layout(flow: Dict[str, Any]) -> Dict[str, Any]:
     """纯函数、确定性计算：给定 flow(lanes/nodes/edges) 返回节点坐标、泳道边框、直角走线路径。
 
     不依赖 DOM 测量、不依赖物理模拟，同样的输入永远得到同样的输出（可单测）。
+    泳道内节点按依赖顺序换行排布（而非强行挤成一整行），泳道边框是其成员节点的
+    紧致包围盒（而非预先固定的整行宽度），与前端拖拽时的动态包围盒更新语义一致。
     """
     nodes = flow.get("nodes") or []
     edges = flow.get("edges") or []
@@ -146,9 +243,10 @@ def compute_static_layout(flow: Dict[str, Any]) -> Dict[str, Any]:
         lanes = seen or ["默认"]
 
     order = _order_nodes_by_barycenter(lanes, nodes, edges)
+    rows_by_lane = {lane: _wrap_into_rows(order.get(lane, []), _LAYOUT_MAX_COLS) for lane in lanes}
     row_widths = {
-        lane: len(order.get(lane, [])) * NODE_W + max(0, len(order.get(lane, [])) - 1) * _LAYOUT_COL_GAP
-        for lane in lanes
+        lane: max((len(row) * NODE_W + max(0, len(row) - 1) * _LAYOUT_COL_GAP for row in rows), default=NODE_W)
+        for lane, rows in rows_by_lane.items()
     }
     max_width = max(row_widths.values()) if row_widths else NODE_W
     canvas_width = max_width + 2 * (_LAYOUT_MARGIN + _LAYOUT_LANE_PAD)
@@ -157,42 +255,31 @@ def compute_static_layout(flow: Dict[str, Any]) -> Dict[str, Any]:
     lane_rects: List[Dict[str, Any]] = []
     y = float(_LAYOUT_MARGIN)
     for lane in lanes:
-        band_h = _LAYOUT_LABEL_H + NODE_H + 2 * _LAYOUT_LANE_PAD
-        row_w = row_widths.get(lane, 0)
+        rows = rows_by_lane.get(lane, [])
+        row_w = row_widths.get(lane, NODE_W)
         row_left = _LAYOUT_MARGIN + _LAYOUT_LANE_PAD + (max_width - row_w) / 2
-        for idx, node_id in enumerate(order.get(lane, [])):
-            x = row_left + idx * (NODE_W + _LAYOUT_COL_GAP)
-            node_y = y + _LAYOUT_LABEL_H + _LAYOUT_LANE_PAD
-            positions[node_id] = {"x": x, "y": node_y, "w": NODE_W, "h": NODE_H}
+        content_top = y + _LAYOUT_LABEL_H + _LAYOUT_LANE_PAD
+        for row_idx, row in enumerate(rows):
+            node_y = content_top + row_idx * (NODE_H + _LAYOUT_ROW_GAP)
+            for col_idx, node_id in enumerate(row):
+                positions[node_id] = {"x": row_left + col_idx * (NODE_W + _LAYOUT_COL_GAP), "y": node_y, "w": NODE_W, "h": NODE_H}
+        row_count = max(1, len(rows))
+        band_h = _LAYOUT_LABEL_H + row_count * NODE_H + max(0, row_count - 1) * _LAYOUT_ROW_GAP + 2 * _LAYOUT_LANE_PAD
         lane_rects.append({"name": lane, "x": float(_LAYOUT_MARGIN), "y": y, "w": canvas_width - 2 * _LAYOUT_MARGIN, "h": band_h})
         y += band_h + _LAYOUT_LANE_GAP
     canvas_height = y - _LAYOUT_LANE_GAP + _LAYOUT_MARGIN
 
     edge_paths: List[Dict[str, Any]] = []
-    corner_r = 10.0
     for edge in edges:
         a = positions.get(edge.get("source"))
         b = positions.get(edge.get("target"))
         if not a or not b:
             continue
-        x1, y1 = a["x"] + a["w"] / 2, a["y"] + a["h"]
-        x2, y2 = b["x"] + b["w"] / 2, b["y"]
-        if abs(x1 - x2) < 1 or y2 <= y1:
-            path = f"M {x1:.1f} {y1:.1f} L {x2:.1f} {y2:.1f}"
-        else:
-            mid = (y1 + y2) / 2
-            sign = 1 if x2 > x1 else -1
-            path = (
-                f"M {x1:.1f} {y1:.1f} L {x1:.1f} {mid - corner_r:.1f} "
-                f"Q {x1:.1f} {mid:.1f} {x1 + sign * corner_r:.1f} {mid:.1f} "
-                f"L {x2 - sign * corner_r:.1f} {mid:.1f} "
-                f"Q {x2:.1f} {mid:.1f} {x2:.1f} {mid + corner_r:.1f} "
-                f"L {x2:.1f} {y2:.1f}"
-            )
+        geom = _route_edge(a, b)
         edge_paths.append({
             "source": edge.get("source"),
             "target": edge.get("target"),
-            "path": path,
+            "path": geom["path"],
             "label": edge.get("label") or "",
             "condition": edge.get("condition") or "",
         })
@@ -407,7 +494,8 @@ nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#deta
 .graph-toolbar button{background:var(--chip);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer}
 .graph-toolbar button:hover{border-color:var(--accent)}
 .graph-toolbar .hint{margin-left:auto;color:var(--dim);font-size:11px}
-#graph{height:540px;min-height:220px;cursor:grab;flex:none}
+#graph{height:540px;min-height:220px;cursor:grab;flex:none;user-select:none}
+#graph svg text{user-select:none}
 #graph:active{cursor:grabbing}
 #graph svg{display:block;width:100%;height:100%}
 #graph-resize{margin:0}
@@ -490,17 +578,26 @@ function laneColor(lanes, lane) {
   return LANE_PALETTE[idx % LANE_PALETTE.length];
 }
 
+// 站内导航统一走 navigateTo()，用 history.pushState 而不是 location.hash / <a href> 默认跳转：
+// 某些外部预览容器（如浏览器扩展、嵌入式 webview）会把 hash 变化当成一次"真正的导航"
+// 处理并整页刷新/开新页，pushState 是唯一在所有宿主环境下都不会触发导航语义的方式。
+function navigateTo(hash) {
+  if (location.hash.slice(1) !== hash) {
+    history.pushState(null, '', '#' + hash);
+  }
+  route();
+}
 function navRender() {
   const subj = DATA.subjects.map(s =>
-    `<a href="#subject/${esc(s.id)}" data-route="subject/${esc(s.id)}">${badge(s.status)}${esc(s.name)}</a>`).join('');
+    `<a href="#subject/${esc(s.id)}" data-route="subject/${esc(s.id)}" onclick="event.preventDefault();navigateTo('subject/${esc(s.id)}')">${badge(s.status)}${esc(s.name)}</a>`).join('');
   const pat = DATA.patterns.map(p =>
-    `<a href="#pattern/${esc(p.id)}" data-route="pattern/${esc(p.id)}">${badge(p.status)}${esc(p.name)}</a>`).join('');
+    `<a href="#pattern/${esc(p.id)}" data-route="pattern/${esc(p.id)}" onclick="event.preventDefault();navigateTo('pattern/${esc(p.id)}')">${badge(p.status)}${esc(p.name)}</a>`).join('');
   $('#nav').innerHTML = `
-    <a href="#map" data-route="map">🗺️ 业务地图</a>
+    <a href="#map" data-route="map" onclick="event.preventDefault();navigateTo('map')">🗺️ 业务地图</a>
     <h2>业务主题 (${DATA.subjects.length})</h2>${subj}
     <h2>业务模式 (${DATA.patterns.length})</h2>${pat}
     <h2>其他</h2>
-    <a href="#hints" data-route="hints">⚠️ 避坑记录 (${DATA.negative_hints.length})</a>`;
+    <a href="#hints" data-route="hints" onclick="event.preventDefault();navigateTo('hints')">⚠️ 避坑记录 (${DATA.negative_hints.length})</a>`;
 }
 
 let _snippetSeq = 0;
@@ -533,14 +630,41 @@ function evidenceHtml(ev) {
 
 // 静态分层布局（坐标由 Python compute_static_layout 一次性算好，随数据下发）。
 // 前端只画图 + 响应交互，加载后完全静止，不存在任何自动布局/物理模拟/持续动画。
-function routeEdgePath(a, b) {
-  const x1 = a.x + a.w / 2, y1 = a.y + a.h;
-  const x2 = b.x + b.w / 2, y2 = b.y;
-  if (Math.abs(x1 - x2) < 1 || y2 <= y1) return { path: `M ${x1} ${y1} L ${x2} ${y2}`, lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 - 4 };
-  const mid = (y1 + y2) / 2, r = 10, sign = x2 > x1 ? 1 : -1;
-  const path = `M ${x1} ${y1} L ${x1} ${mid - r} Q ${x1} ${mid} ${x1 + sign * r} ${mid} `
-       + `L ${x2 - sign * r} ${mid} Q ${x2} ${mid} ${x2} ${mid + r} L ${x2} ${y2}`;
+// 下面这套折线路由逻辑必须与 Python 端 _route_edge/_elbow_vertical/_elbow_horizontal
+// 保持一致：任何情形都要走直角折线，不能退化成斜线直连。
+function elbowVertical(x1, y1, x2, y2, r) {
+  if (Math.abs(x1 - x2) < 1) return { path: `M ${x1} ${y1} L ${x2} ${y2}`, lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 - 4 };
+  const mid = (y1 + y2) / 2;
+  const rr = Math.min(r, Math.max(2, Math.abs(y2 - y1) / 2 - 14));
+  const sign = x2 > x1 ? 1 : -1;
+  const path = `M ${x1} ${y1} L ${x1} ${mid - rr} Q ${x1} ${mid} ${x1 + sign * rr} ${mid} `
+    + `L ${x2 - sign * rr} ${mid} Q ${x2} ${mid} ${x2} ${mid + rr} L ${x2} ${y2}`;
   return { path, lx: (x1 + x2) / 2, ly: mid - 4 };
+}
+function elbowHorizontal(x1, y1, x2, y2, r) {
+  if (Math.abs(y1 - y2) < 1) return { path: `M ${x1} ${y1} L ${x2} ${y2}`, lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 - 4 };
+  const mid = (x1 + x2) / 2;
+  const rr = Math.min(r, Math.max(2, Math.abs(x2 - x1) / 2 - 14));
+  const sign = y2 > y1 ? 1 : -1;
+  const path = `M ${x1} ${y1} L ${mid - rr} ${y1} Q ${mid} ${y1} ${mid} ${y1 + sign * rr} `
+    + `L ${mid} ${y2 - sign * rr} Q ${mid} ${y2} ${mid + rr} ${y2} L ${x2} ${y2}`;
+  return { path, lx: mid, ly: (y1 + y2) / 2 - 4 };
+}
+function routeEdgePath(a, b, r) {
+  r = r || 10;
+  const aCx = a.x + a.w / 2, aCy = a.y + a.h / 2;
+  const bCx = b.x + b.w / 2, bCy = b.y + b.h / 2;
+  if (b.y >= a.y + a.h) {
+    return elbowVertical(aCx, a.y + a.h, bCx, b.y, r);
+  }
+  if (b.y + b.h <= a.y) {
+    return elbowVertical(aCx, a.y, bCx, b.y + b.h, r);
+  }
+  let x1, y1, x2, y2;
+  if (b.x >= a.x + a.w) { x1 = a.x + a.w; y1 = aCy; x2 = b.x; y2 = bCy; }
+  else if (b.x + b.w <= a.x) { x1 = a.x; y1 = aCy; x2 = b.x + b.w; y2 = bCy; }
+  else { x1 = aCx; y1 = aCy; x2 = bCx; y2 = bCy; }
+  return elbowHorizontal(x1, y1, x2, y2, r);
 }
 
 let _graphTeardown = null;
@@ -557,8 +681,8 @@ function renderFlowGraph(container, flow) {
   const defs = `<marker id="arr-solid" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5b9dff"/></marker>
     <marker id="arr-dashed" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#e5b458"/></marker>`;
   const laneSvg = (layout.lanes || []).map(l => `
-    <rect class="lane-rect" x="${l.x}" y="${l.y}" width="${l.w}" height="${l.h}" rx="8" stroke="${laneColor(lanes, l.name)}" stroke-dasharray="6,5" stroke-width="1"></rect>
-    <text class="lane-label" x="${l.x + 10}" y="${l.y + 14}" fill="${laneColor(lanes, l.name)}">${esc(l.name)}</text>`).join('');
+    <rect class="lane-rect" data-lane="${esc(l.name)}" x="${l.x}" y="${l.y}" width="${l.w}" height="${l.h}" rx="8" stroke="${laneColor(lanes, l.name)}" stroke-dasharray="6,5" stroke-width="1"></rect>
+    <text class="lane-label" data-lane="${esc(l.name)}" x="${l.x + 10}" y="${l.y + 14}" fill="${laneColor(lanes, l.name)}">${esc(l.name)}</text>`).join('');
   const edgeSvg = (layout.edges || []).map(e => {
     const dashed = !!e.condition;
     const label = e.condition || e.label;
@@ -594,9 +718,69 @@ function renderFlowGraph(container, flow) {
   let view = { x: 0, y: 0, w: layout.width, h: layout.height };
   const applyView = () => svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
 
+  // 泳道边框跟随其成员节点当前位置动态收缩/扩张（初始值已由 Python 端算好，
+  // 拖拽节点后这里重新计算包围盒，而不是让边框停留在旧的静态位置）。
+  const LANE_PAD = 14, LABEL_H = 20;
+  // 碰撞检测的最小间距：节点间距同时也是 edge/label 的最小可绘制留白。
+  const NODE_PAD = 20, LANE_MIN_GAP = 18;
+  const laneOrder = flow.lanes || [];
+  const laneMembers = {};
+  (flow.nodes || []).forEach(n => { (laneMembers[n.lane] || (laneMembers[n.lane] = [])).push(n.id); });
+
+  // 计算某条泳道当前的紧致包围盒；overrideId/overrideRect 用于"假设某节点已经
+  // 移动到候选位置"时的试算，供拖拽时的碰撞检测使用，不会真的改动数据。
+  const laneBBox = (laneName, overrideId, overrideRect) => {
+    const ids = laneMembers[laneName];
+    if (!ids || !ids.length) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of ids) {
+      const p = (overrideId && id === overrideId) ? overrideRect : flow.layout.nodes[id];
+      if (!p) continue;
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + p.w); maxY = Math.max(maxY, p.y + p.h);
+    }
+    if (minX === Infinity) return null;
+    return { x: minX - LANE_PAD, y: minY - LABEL_H - LANE_PAD, w: (maxX - minX) + LANE_PAD * 2, h: (maxY - minY) + LABEL_H + LANE_PAD * 2 };
+  };
+  const updateLaneBounds = laneName => {
+    const bbox = laneBBox(laneName);
+    if (!bbox) return;
+    const rectEl = container.querySelector(`.lane-rect[data-lane="${cssEsc(laneName)}"]`);
+    const labelEl = container.querySelector(`.lane-label[data-lane="${cssEsc(laneName)}"]`);
+    if (rectEl) { rectEl.setAttribute('x', bbox.x); rectEl.setAttribute('y', bbox.y); rectEl.setAttribute('width', bbox.w); rectEl.setAttribute('height', bbox.h); }
+    if (labelEl) { labelEl.setAttribute('x', bbox.x + 10); labelEl.setAttribute('y', bbox.y + 14); }
+  };
+  // AABB 碰撞测试，pad 是两个矩形之间必须留出的最小间距（不是零间距才算碰撞）。
+  const rectsOverlap = (p, q, pad) => !(
+    p.x + p.w + pad <= q.x || q.x + q.w + pad <= p.x ||
+    p.y + p.h + pad <= q.y || q.y + q.h + pad <= p.y
+  );
+  // 节点拖到候选位置 candidate 是否会造成：①与任意其他节点重叠（含跨泳道）；
+  // ②所在泳道的动态包围盒与相邻（上一条/下一条）泳道重叠。任一命中都视为碰撞，
+  // 拖拽时应"撞墙"式停止在最后一个不冲突的位置，而不是继续穿透。
+  const wouldCollide = (nodeId, candidate) => {
+    for (const id in flow.layout.nodes) {
+      if (id === nodeId) continue;
+      if (rectsOverlap(candidate, flow.layout.nodes[id], NODE_PAD)) return true;
+    }
+    const node = (flow.nodes || []).find(n => n.id === nodeId);
+    if (node && node.lane) {
+      const idx = laneOrder.indexOf(node.lane);
+      const bbox = laneBBox(node.lane, nodeId, candidate);
+      if (bbox) {
+        const prevBBox = idx > 0 ? laneBBox(laneOrder[idx - 1]) : null;
+        const nextBBox = idx >= 0 && idx < laneOrder.length - 1 ? laneBBox(laneOrder[idx + 1]) : null;
+        if (prevBBox && rectsOverlap(bbox, prevBBox, LANE_MIN_GAP)) return true;
+        if (nextBBox && rectsOverlap(bbox, nextBBox, LANE_MIN_GAP)) return true;
+      }
+    }
+    return false;
+  };
+
   const onWheel = ev => {
     ev.preventDefault();
     const rect = svg.getBoundingClientRect();
+    if (!(rect.width > 0)) return;
     const scale = view.w / rect.width;
     const cx = view.x + (ev.clientX - rect.left) * scale;
     const cy = view.y + (ev.clientY - rect.top) * scale;
@@ -615,11 +799,16 @@ function renderFlowGraph(container, flow) {
   let dragNode = null, dragMoved = false, panState = null;
   const onMouseDown = ev => {
     if (ev.button !== 0) return;
+    // 必须阻止默认行为，否则浏览器会在拖拽画布/节点时触发原生文字选中/框选（实测复现）。
+    ev.preventDefault();
     const nodeEl = ev.target.closest ? ev.target.closest('.flow-node') : null;
     const rect = svg.getBoundingClientRect();
+    if (!(rect.width > 0)) return; // 容器尚未布局完成时 width 可能为 0，避免 scale 变 Infinity 污染坐标
     const scale = view.w / rect.width;
+    document.body.style.userSelect = 'none';
     if (nodeEl) {
       const id = nodeEl.dataset.id;
+      const node = (flow.nodes || []).find(n => n.id === id);
       const connected = Array.from(container.querySelectorAll(
         `.flow-edge-group[data-from="${cssEsc(id)}"],.flow-edge-group[data-to="${cssEsc(id)}"]`
       )).map(g => ({
@@ -629,7 +818,7 @@ function renderFlowGraph(container, flow) {
         otherId: g.dataset.from === id ? g.dataset.to : g.dataset.from,
         isSource: g.dataset.from === id,
       }));
-      dragNode = { id, el: nodeEl, startX: ev.clientX, startY: ev.clientY, scale, connected, base: { ...flow.layout.nodes[id] } };
+      dragNode = { id, el: nodeEl, lane: node ? node.lane : null, startX: ev.clientX, startY: ev.clientY, scale, connected, base: { ...flow.layout.nodes[id] } };
       dragMoved = false;
     } else {
       panState = { startX: ev.clientX, startY: ev.clientY, ox: view.x, oy: view.y, scale };
@@ -639,9 +828,12 @@ function renderFlowGraph(container, flow) {
     if (dragNode) {
       const dx0 = ev.clientX - dragNode.startX, dy0 = ev.clientY - dragNode.startY;
       if (!dragMoved && (Math.abs(dx0) > 2 || Math.abs(dy0) > 2)) dragMoved = true;
+      if (!dragMoved) return;
       const dx = dx0 * dragNode.scale, dy = dy0 * dragNode.scale;
       const nx = dragNode.base.x + dx, ny = dragNode.base.y + dy;
       const moved = { x: nx, y: ny, w: dragNode.base.w, h: dragNode.base.h };
+      // 碰撞检测：会与其他节点或相邻泳道包围盒重叠就"撞墙"停在原地，不继续穿透。
+      if (wouldCollide(dragNode.id, moved)) return;
       dragNode.el.setAttribute('transform', `translate(${nx},${ny})`);
       for (const c of dragNode.connected) {
         const other = flow.layout.nodes[c.otherId];
@@ -650,6 +842,8 @@ function renderFlowGraph(container, flow) {
         c.path.setAttribute('d', geom.path);
         if (c.label) { c.label.setAttribute('x', geom.lx.toFixed(1)); c.label.setAttribute('y', geom.ly.toFixed(1)); }
       }
+      flow.layout.nodes[dragNode.id] = moved;
+      if (dragNode.lane) updateLaneBounds(dragNode.lane);
     } else if (panState) {
       const dx = (ev.clientX - panState.startX) * panState.scale;
       const dy = (ev.clientY - panState.startY) * panState.scale;
@@ -657,17 +851,12 @@ function renderFlowGraph(container, flow) {
       applyView();
     }
   };
-  const onMouseUp = ev => {
+  const onMouseUp = () => {
+    document.body.style.userSelect = '';
     if (dragNode) {
-      if (!dragMoved) {
-        nodeDetail(flow, dragNode.id);
-      } else {
-        const dx = (ev.clientX - dragNode.startX) * dragNode.scale;
-        const dy = (ev.clientY - dragNode.startY) * dragNode.scale;
-        const target = flow.layout.nodes[dragNode.id];
-        target.x = dragNode.base.x + dx;
-        target.y = dragNode.base.y + dy;
-      }
+      // 位置在 onMouseMove 里已做过碰撞校验并直接写入 flow.layout.nodes，这里不
+      // 再根据原始鼠标位移重算一次——那样会绕过碰撞检测，把被拒绝的越界位置写回去。
+      if (!dragMoved) nodeDetail(flow, dragNode.id);
       dragNode = null;
     }
     panState = null;
@@ -767,12 +956,12 @@ function closeDetail() {
 function mapView() {
   const cards = DATA.subjects.map(s => {
     const rel = (s.relations || []).map(r => `<span class="chip">${esc(r.type)} → ${esc(nameOf(r.target))}</span>`).join('');
-    return `<div class="card" onclick="location.hash='subject/${esc(s.id)}'">
+    return `<div class="card" onclick="navigateTo('subject/${esc(s.id)}')">
       <h3>${badge(s.status)} ${esc(s.name)}</h3>
       <div class="sub">路线 ${s.memories.length} · 证据 ${s.evidence.length} · ${s.flow ? '✅ 有业务流程图' : '尚无流程图'}</div>
       <div class="chips">${rel}</div></div>`;
   }).join('');
-  const pats = DATA.patterns.map(p => `<div class="card" onclick="location.hash='pattern/${esc(p.id)}'">
+  const pats = DATA.patterns.map(p => `<div class="card" onclick="navigateTo('pattern/${esc(p.id)}')">
       <h3>${badge(p.status)} ${esc(p.name)}</h3>
       <div class="sub">阶段 ${p.stages.length} · 支撑主题 ${p.members.length}</div></div>`).join('');
   $('#content').innerHTML = `
@@ -785,7 +974,7 @@ function patternView(p) {
     <div class="section markdown-body"><h2>阶段</h2><table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
     ${p.stages.map(st => `<tr><td>${st.index}</td><td>${esc(st.name)}</td><td>${badge(st.status)} ${esc(st.status)}</td></tr>`).join('')}</table></div>
     <div class="section"><h2>支撑主题</h2><div class="grid">
-    ${p.members.map(id => `<div class="card" onclick="location.hash='subject/${esc(id)}'"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div></div>
+    ${p.members.map(id => `<div class="card" onclick="navigateTo('subject/${esc(id)}')"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div></div>
     <details class="tech"><summary>技术详情</summary><p>pattern_id: <code>${esc(p.id)}</code></p></details>`;
 }
 
@@ -855,7 +1044,7 @@ $('#search').addEventListener('keydown', e => {
     (s.aliases || []).some(a => a.toLowerCase().includes(q)) ||
     (s.evidence || []).some(ev => (ev.file || '').toLowerCase().includes(q) || (ev.symbol || '').toLowerCase().includes(q)) ||
     ((s.flow && s.flow.nodes) || []).some(n => (n.label || '').toLowerCase().includes(q)));
-  if (hit) location.hash = 'subject/' + hit.id;
+  if (hit) navigateTo('subject/' + hit.id);
 });
 
 makeResizer($('#resizer-nav'), 'x', 1, {
@@ -870,6 +1059,9 @@ makeResizer($('#resizer-detail'), 'x', -1, {
 });
 
 $('#meta').textContent = `生成于 ${fmtTime(DATA.generated_at)} · 主题 ${DATA.stats.subject_count} · 路线 ${DATA.stats.memory_count} · 证据 ${DATA.stats.evidence_count} · 数据源 memory.sqlite（本页面为程序化生成产物）`;
+// popstate 处理浏览器前进/后退（pushState 产生的历史记录）；hashchange 作为兜底
+// （例如用户直接编辑地址栏 # 片段），二者都指向同一个 route() 不会重复触发副作用。
+window.addEventListener('popstate', route);
 window.addEventListener('hashchange', route);
 window.addEventListener('resize', () => { const btn = $('#btn-fit'); if (btn) btn.onclick && btn.onclick(); });
 navRender();
