@@ -770,6 +770,27 @@ function renderFlowGraph(container, flow) {
   container.querySelectorAll('text.edge-label').forEach(refreshLabelBg);
   let view = { x: 0, y: 0, w: layout.width, h: layout.height };
   const applyView = () => svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
+  // SVG 没有设置 preserveAspectRatio，默认是 "xMidYMid meet"：当容器宽高比和
+  // viewBox 宽高比不一致时（这里几乎总是如此——业务流程图通常又窄又长，容器却是
+  // 宽而矮），浏览器会按"更紧的那根轴"统一缩放并居中，另一根轴上会有留白
+  // （letterbox）。之前直接用 `view.w / rect.width` 当缩放系数，在宽度不是约束轴
+  // 的情况下完全算错（经实测偏差可达约 10 倍），导致拖拽/滚轮缩放的位移量和鼠标
+  // 实际移动的距离对不上，表现为"不跟手、很沉重"。这里统一算出真实的渲染缩放
+  // 比例（px/单位）和留白偏移量，所有坐标换算都必须走这个函数，不能再直接拿
+  // rect.width/rect.height 当缩放系数用。
+  const svgMetrics = () => {
+    const rect = svg.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return null;
+    const pxPerUnit = Math.min(rect.width / view.w, rect.height / view.h);
+    const renderedW = view.w * pxPerUnit, renderedH = view.h * pxPerUnit;
+    return {
+      rect,
+      pxPerUnit,
+      unitsPerPx: 1 / pxPerUnit,
+      offsetX: rect.left + (rect.width - renderedW) / 2,
+      offsetY: rect.top + (rect.height - renderedH) / 2,
+    };
+  };
 
   // 泳道边框跟随其成员节点当前位置动态收缩/扩张（初始值已由 Python 端算好，
   // 拖拽节点后这里重新计算包围盒，而不是让边框停留在旧的静态位置）。
@@ -919,11 +940,10 @@ function renderFlowGraph(container, flow) {
 
   const onWheel = ev => {
     ev.preventDefault();
-    const rect = svg.getBoundingClientRect();
-    if (!(rect.width > 0)) return;
-    const scale = view.w / rect.width;
-    const cx = view.x + (ev.clientX - rect.left) * scale;
-    const cy = view.y + (ev.clientY - rect.top) * scale;
+    const m = svgMetrics();
+    if (!m) return;
+    const cx = view.x + (ev.clientX - m.offsetX) * m.unitsPerPx;
+    const cy = view.y + (ev.clientY - m.offsetY) * m.unitsPerPx;
     const factor = ev.deltaY > 0 ? 1.12 : 1 / 1.12;
     view.x = cx - (cx - view.x) * factor;
     view.y = cy - (cy - view.y) * factor;
@@ -942,9 +962,9 @@ function renderFlowGraph(container, flow) {
     ev.preventDefault();
     const nodeEl = ev.target.closest ? ev.target.closest('.flow-node') : null;
     const laneEl = !nodeEl && ev.target.closest ? ev.target.closest('.lane-rect,.lane-label') : null;
-    const rect = svg.getBoundingClientRect();
-    if (!(rect.width > 0)) return; // 容器尚未布局完成时 width 可能为 0，避免 scale 变 Infinity 污染坐标
-    const scale = view.w / rect.width;
+    const m = svgMetrics();
+    if (!m) return; // 容器尚未布局完成时尺寸可能为 0，避免缩放系数变 Infinity 污染坐标
+    const scale = m.unitsPerPx;
     document.body.style.userSelect = 'none';
     if (nodeEl) {
       const id = nodeEl.dataset.id;
