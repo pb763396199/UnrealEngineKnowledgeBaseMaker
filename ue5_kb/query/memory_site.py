@@ -776,7 +776,6 @@ function renderFlowGraph(container, flow) {
   const LANE_PAD = 14, LABEL_H = 20;
   // 节点/泳道之间必须保留的最小间距：既是"挤开"求解的阈值，也是 edge/label 的最小可绘制留白。
   const NODE_PAD = 20, LANE_MIN_GAP = 18;
-  const MAX_RESOLVE_PASSES = 8; // 一次拖拽只做有限次"一次性推挤求解"，不是持续物理模拟，不会抖动
   const laneOrder = flow.lanes || [];
   const laneMembers = {};
   const nodeLaneOf = {};
@@ -784,6 +783,9 @@ function renderFlowGraph(container, flow) {
     (laneMembers[n.lane] || (laneMembers[n.lane] = [])).push(n.id);
     nodeLaneOf[n.id] = n.lane;
   });
+  // 一次拖拽只做有限次"一次性推挤求解"，不是持续物理模拟，不会抖动；泳道级联推挤
+  // 最坏情况下需要沿泳道链条传播 laneOrder.length 步，节点级推挤同理，按数量放宽轮次上限。
+  const MAX_RESOLVE_PASSES = Math.max(16, laneOrder.length * 2, (flow.nodes || []).length);
 
   // 建立"节点 id -> 与它相连的边分组元素"索引：拖拽推挤可能牵动很多节点，需要
   // 批量刷新这些节点各自关联的边，而不仅仅是被直接拖拽的那一个节点。
@@ -827,52 +829,60 @@ function renderFlowGraph(container, flow) {
       ? { dx: qcx >= pcx ? overlapX : -overlapX, dy: 0 }
       : { dx: 0, dy: qcy >= pcy ? overlapY : -overlapY };
   };
-  // 把节点的候选位置（就地）钳制在其所属泳道与相邻泳道之间的可用间隙内：不允许
-  // 任何节点越过相邻泳道的边界。这是防止"泳道整体被撑爆/被弹飞"的关键——旧实现
-  // 曾经用"重叠了就把下一整条泳道所有节点批量搬走 dy"的方式来处理泳道碰撞，一旦
-  // 某个节点被拖出很远，dy 会被算出一个极大的值，导致其余泳道被瞬间弹飞到极远处
-  // （复现为一张被拉伸得极其狭长的图）。改为钳制单个节点自身的位置后，任何一次
-  // 调整的幅度都有界（不超过相邻泳道当前的间隙差），不会再出现这种量级失控的跳变。
-  const clampToLaneGap = (nodeId, rect) => {
-    const lane = nodeLaneOf[nodeId];
-    if (!lane) return;
-    const idx = laneOrder.indexOf(lane);
-    if (idx > 0) {
-      const prevBBox = laneBBox(laneOrder[idx - 1]);
-      if (prevBBox) rect.y = Math.max(rect.y, prevBBox.y + prevBBox.h + LANE_MIN_GAP);
-    }
-    if (idx >= 0 && idx < laneOrder.length - 1) {
-      const nextBBox = laneBBox(laneOrder[idx + 1]);
-      if (nextBBox) rect.y = Math.min(rect.y, nextBBox.y - LANE_MIN_GAP - rect.h);
-    }
-  };
-  // 被拖拽的节点自身永远自由移动、不被阻挡；与它冲突的其他节点会被"挤开"，而不是
-  // 像之前那样直接拒绝这次拖拽。每个被挤开的节点同样会被钳制在所属泳道的间隙内，
-  // 防止链式推挤把某个节点顶出泳道范围。这是有限次的一次性位置求解（每次 mousemove
-  // 独立计算，不依赖上一帧速度/弹簧），不是持续物理模拟，因此不会有 vis-network
-  // 那种抖动、一直在动的问题。
-  const resolveCollisions = draggedId => {
-    const changed = new Set([draggedId]);
+  // 正在被拖拽的这一批节点（单个节点拖拽时只有它自己；整条泳道拖拽时是它全部
+  // 成员）永远自由移动、严格跟手，不被推挤/钳制；与它们冲突的其他节点/泳道会被
+  // "挤开"——泳道扩张侵犯到相邻泳道时，直接把相邻泳道的所有成员整体移开，而不是
+  // 限制扩张的一方，这正是用户要的"泳道内节点撑大 bounds 时，其它泳道跟着让开"。
+  // 这是有限次的一次性位置求解（每次 mousemove 独立计算，不依赖上一帧速度/弹簧），
+  // 不是持续物理模拟，因此不会有 vis-network 那种抖动、一直在动的问题。
+  const resolveCollisions = freeIds => {
+    const changed = new Set(freeIds);
+    const shiftLane = (laneName, dy) => {
+      (laneMembers[laneName] || []).forEach(id => {
+        const p = flow.layout.nodes[id];
+        flow.layout.nodes[id] = { x: p.x, y: p.y + dy, w: p.w, h: p.h };
+        changed.add(id);
+      });
+    };
     for (let pass = 0; pass < MAX_RESOLVE_PASSES; pass++) {
       let touched = false;
       const ids = Object.keys(flow.layout.nodes);
       for (let i = 0; i < ids.length; i++) {
         for (let j = i + 1; j < ids.length; j++) {
           const idA = ids[i], idB = ids[j];
-          // 两个节点都不是被拖拽节点时，固定推开后者，保证结果确定、不会来回震荡；
-          // 只要有一方是被拖拽节点，就以它为参照物推开另一方。
-          const mover = idA === draggedId ? idA : (idB === draggedId ? idB : idA);
+          const aFree = freeIds.has(idA), bFree = freeIds.has(idB);
+          if (aFree && bFree) continue; // 同一批被拖拽的节点（比如同一条泳道内部）不互相推挤
+          // 两者都不是本次拖拽主体时，固定推开后者，保证结果确定、不会来回震荡；
+          // 只要有一方是本次拖拽主体，就以它为参照物推开另一方（主体永不被推）。
+          const mover = aFree ? idA : (bFree ? idB : idA);
           const other = mover === idA ? idB : idA;
           const push = resolveOverlap(flow.layout.nodes[mover], flow.layout.nodes[other], NODE_PAD);
           if (push) {
             const o = flow.layout.nodes[other];
-            const moved = { x: o.x + push.dx, y: o.y + push.dy, w: o.w, h: o.h };
-            clampToLaneGap(other, moved);
-            flow.layout.nodes[other] = moved;
+            flow.layout.nodes[other] = { x: o.x + push.dx, y: o.y + push.dy, w: o.w, h: o.h };
             changed.add(other);
             touched = true;
           }
         }
+      }
+      // 泳道级联推挤：相邻两条泳道的动态包围盒若挨得太近，把其中一条整体移开消除
+      // 重叠。谁是"本次拖拽主体所在的泳道"就固定不动，推开对面那一条；如果两条都
+      // 不是拖拽主体（级联传递到更远的泳道），默认推下面那条，规则确定、不会震荡。
+      for (let li = 0; li < laneOrder.length - 1; li++) {
+        const laneA = laneOrder[li], laneB = laneOrder[li + 1];
+        const bboxA = laneBBox(laneA), bboxB = laneBBox(laneB);
+        if (!bboxA || !bboxB) continue;
+        const gap = bboxB.y - (bboxA.y + bboxA.h);
+        if (gap >= LANE_MIN_GAP) continue;
+        const need = LANE_MIN_GAP - gap;
+        const aFree = (laneMembers[laneA] || []).some(id => freeIds.has(id));
+        const bFree = (laneMembers[laneB] || []).some(id => freeIds.has(id));
+        if (bFree && !aFree) {
+          shiftLane(laneA, -need);
+        } else {
+          shiftLane(laneB, need);
+        }
+        touched = true;
       }
       if (!touched) break;
     }
@@ -885,7 +895,7 @@ function renderFlowGraph(container, flow) {
     const dirtyLanes = new Set();
     changed.forEach(id => {
       const p = flow.layout.nodes[id];
-      const nodeEl = id === draggedId ? draggedEl : container.querySelector(`.flow-node[data-id="${cssEsc(id)}"]`);
+      const nodeEl = (id === draggedId && draggedEl) ? draggedEl : container.querySelector(`.flow-node[data-id="${cssEsc(id)}"]`);
       if (nodeEl && p) nodeEl.setAttribute('transform', `translate(${p.x},${p.y})`);
       (edgeGroupsByNode[id] || []).forEach(g => dirtyEdgeGroups.add(g));
       if (nodeLaneOf[id]) dirtyLanes.add(nodeLaneOf[id]);
@@ -925,12 +935,13 @@ function renderFlowGraph(container, flow) {
   // 拖拽状态：直接同步更新 DOM（不经 requestAnimationFrame）：实测 rAF 合帧在部分
   // 环境下（后台/非焦点标签页、自动化测试）可能被浏览器节流甚至不触发，导致拖拽
   // 视觉更新滞后或丢帧；直接更新在节点数量级（几十个）下足够快，且响应最即时。
-  let dragNode = null, dragMoved = false, panState = null;
+  let dragNode = null, dragLane = null, dragMoved = false, panState = null;
   const onMouseDown = ev => {
     if (ev.button !== 0) return;
     // 必须阻止默认行为，否则浏览器会在拖拽画布/节点时触发原生文字选中/框选（实测复现）。
     ev.preventDefault();
     const nodeEl = ev.target.closest ? ev.target.closest('.flow-node') : null;
+    const laneEl = !nodeEl && ev.target.closest ? ev.target.closest('.lane-rect,.lane-label') : null;
     const rect = svg.getBoundingClientRect();
     if (!(rect.width > 0)) return; // 容器尚未布局完成时 width 可能为 0，避免 scale 变 Infinity 污染坐标
     const scale = view.w / rect.width;
@@ -938,6 +949,15 @@ function renderFlowGraph(container, flow) {
     if (nodeEl) {
       const id = nodeEl.dataset.id;
       dragNode = { id, el: nodeEl, startX: ev.clientX, startY: ev.clientY, scale, base: { ...flow.layout.nodes[id] } };
+      dragMoved = false;
+    } else if (laneEl) {
+      // 拖动泳道边框/标题本身：整条泳道的所有成员节点整体平移，严格跟手，同样会
+      // 把扩张路径上冲突的其他节点/相邻泳道挤开。
+      const laneName = laneEl.dataset.lane;
+      const ids = laneMembers[laneName] || [];
+      const bases = {};
+      ids.forEach(id => { bases[id] = { ...flow.layout.nodes[id] }; });
+      dragLane = { name: laneName, ids, startX: ev.clientX, startY: ev.clientY, scale, bases };
       dragMoved = false;
     } else {
       panState = { startX: ev.clientX, startY: ev.clientY, ox: view.x, oy: view.y, scale };
@@ -951,11 +971,23 @@ function renderFlowGraph(container, flow) {
       const dx = dx0 * dragNode.scale, dy = dy0 * dragNode.scale;
       const moved = { x: dragNode.base.x + dx, y: dragNode.base.y + dy, w: dragNode.base.w, h: dragNode.base.h };
       // 被拖拽节点严格按鼠标位移量 1:1 移动，不做任何钳制/阻挡（本身完全跟手）；
-      // resolveCollisions 会把与它冲突的其他节点"挤开"（并把挤开的结果钳制在各自
-      // 泳道的间隙内，不会越界），applyChanges 统一把受影响的节点/边/泳道刷新到 DOM。
+      // resolveCollisions 会把与它冲突的其他节点/泳道"挤开"，applyChanges 统一把
+      // 受影响的节点/边/泳道刷新到 DOM。
       flow.layout.nodes[dragNode.id] = moved;
-      const changed = resolveCollisions(dragNode.id);
+      const changed = resolveCollisions(new Set([dragNode.id]));
       applyChanges(changed, dragNode.el, dragNode.id);
+    } else if (dragLane) {
+      const dx0 = ev.clientX - dragLane.startX, dy0 = ev.clientY - dragLane.startY;
+      if (!dragMoved && (Math.abs(dx0) > 2 || Math.abs(dy0) > 2)) dragMoved = true;
+      if (!dragMoved) return;
+      const dx = dx0 * dragLane.scale, dy = dy0 * dragLane.scale;
+      // 整条泳道的所有成员严格按同一个位移量整体平移，保持彼此相对位置不变、严格跟手。
+      dragLane.ids.forEach(id => {
+        const b = dragLane.bases[id];
+        flow.layout.nodes[id] = { x: b.x + dx, y: b.y + dy, w: b.w, h: b.h };
+      });
+      const changed = resolveCollisions(new Set(dragLane.ids));
+      applyChanges(changed, null, null);
     } else if (panState) {
       const dx = (ev.clientX - panState.startX) * panState.scale;
       const dy = (ev.clientY - panState.startY) * panState.scale;
@@ -969,6 +1001,7 @@ function renderFlowGraph(container, flow) {
       if (!dragMoved) nodeDetail(flow, dragNode.id);
       dragNode = null;
     }
+    dragLane = null;
     panState = null;
   };
   svg.addEventListener('mousedown', onMouseDown);
