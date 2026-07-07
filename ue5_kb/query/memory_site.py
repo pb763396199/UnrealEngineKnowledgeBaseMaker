@@ -524,8 +524,7 @@ nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#deta
 .card .sub{color:var(--dim);font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .chip{background:var(--chip);border-radius:10px;padding:1px 8px;font-size:11px;color:var(--dim)}
-#graph-wrap{border:1px solid var(--line);border-radius:8px;background:#0d0f14;margin-bottom:6px;overflow:hidden;display:flex;flex-direction:column}
-.graph-toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+#graph-wrap{display:flex;flex-direction:column}
 .graph-toolbar button{background:var(--chip);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer}
 .graph-toolbar button:hover{border-color:var(--accent)}
 .graph-toolbar .hint{margin-left:auto;color:var(--dim);font-size:11px}
@@ -560,8 +559,18 @@ nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#deta
   --fgColor-default:#e6e9f2;--fgColor-muted:#9198a1;--fgColor-danger:#f85149;--fgColor-success:#3fb950;
 }
 .markdown-body table{width:100%;display:table}
-.section{margin-bottom:20px}
-.section>h2{font-size:15px;margin-bottom:10px;border-left:3px solid var(--accent);padding-left:8px}
+/* 面板/窗口通用组件：对齐 Unreal Editor 停靠窗口的观感——每块内容都是一个带
+   标题栏的独立“窗口”（边框+圆角+标题栏背景区分于正文），而不是无边界地铺在
+   页面上。业务流程图沿用同一套外壳（.panel + .panel-header），但内容区不加
+   padding（视口需要满铺），其余面板用 .panel-body 承载有内边距的正文。 */
+.panel{border:1px solid var(--line);border-radius:8px;background:#171a22;margin-bottom:14px;overflow:hidden}
+.panel-header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--panel)}
+.panel-header h2{font-size:13px;font-weight:600;margin:0;padding:0;border:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.panel-header .hint{margin-left:auto;color:var(--dim);font-size:11px}
+.panel-toolbar{display:flex;align-items:center;gap:8px;margin-left:8px}
+.panel-body{padding:12px}
+.panel .tech{margin:0;padding:12px}
+.evidence-card{margin-bottom:14px}
 table{border-collapse:collapse;width:100%;font-size:12px}
 td,th{border:1px solid var(--line);padding:5px 8px;text-align:left}
 th{color:var(--dim);background:var(--panel)}
@@ -708,7 +717,7 @@ function toggleWrap(id, btn) {
 
 function evidenceHtml(ev) {
   const open = ev.vscode ? `<a class="btn" href="${esc(ev.vscode)}">在 VS Code 打开</a>` : '';
-  return `<div class="section">
+  return `<div class="evidence-card">
     <div><code>${esc(ev.ref || (ev.file + ':' + ev.line))}</code> ${open}</div>
     ${snippetHtml(ev.snippet)}</div>`;
 }
@@ -1090,36 +1099,37 @@ function renderFlowGraph(container, flow) {
 }
 
 function subjectView(s) {
-  let body = `<div class="section"><h2>${esc(s.name)} ${badge(s.status)}</h2>
-    <div class="chips">${(s.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div></div>`;
+  let body = `<div class="panel"><div class="panel-header"><h2>${esc(s.name)} ${badge(s.status)}</h2></div>
+    <div class="panel-body"><div class="chips">${(s.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div></div></div>`;
   if (s.flow) {
     const lanes = s.flow.lanes || [];
     const legend = lanes.map(l => `<span><span class="sw" style="background:${laneColor(lanes, l)}"></span>${esc(l)}</span>`).join('');
-    body += `<div class="section"><h2>业务流程（静态布局，点节点看证据 / 滚轮缩放 / 拖动空白处平移 / 拖动节点手动微调）</h2>
-      <div id="graph-wrap">
-        <div class="graph-toolbar">
-          <button id="btn-fit" type="button">适应窗口</button>
-          <button id="btn-reset" type="button">重置布局</button>
-          <span class="hint">服务端一次性静态分层布局，加载后不会自动移动</span>
+    body += `<div class="panel" id="graph-wrap">
+        <div class="panel-header graph-toolbar">
+          <h2>业务流程图</h2>
+          <div class="panel-toolbar">
+            <button id="btn-fit" type="button">适应窗口</button>
+            <button id="btn-reset" type="button">重置布局</button>
+          </div>
+          <span class="hint">点节点看证据 / 滚轮缩放 / 拖动空白处平移 / 拖动节点或泳道手动微调（服务端一次性静态分层布局，加载后不会自动移动）</span>
         </div>
         <div id="graph"></div>        <div class="resizer resizer-y" id="graph-resize" title="拖动调整图高度"></div>        <div id="legend">${legend}</div>
-      </div>
-    </div>`;
+      </div>`;
   } else {
-    body += `<div class="section"><h2>业务流程</h2><div class="chip">尚无通过质量门禁的流程附注</div></div>`;
+    body += `<div class="panel"><div class="panel-header"><h2>业务流程图</h2></div><div class="panel-body"><div class="chip">尚无通过质量门禁的流程附注</div></div></div>`;
   }
-  body += `<div class="section markdown-body"><h2>路线记忆（${s.memories.length} 次查询累积）</h2>
-    <table><tr><th></th><th>意图</th><th>步数</th><th>记录时间</th><th>最近校验</th></tr>` +
+  body += `<div class="panel"><div class="panel-header"><h2>路线记忆（${s.memories.length} 次查询累积）</h2></div>
+    <div class="panel-body markdown-body"><table><tr><th></th><th>意图</th><th>步数</th><th>记录时间</th><th>最近校验</th></tr>` +
     s.memories.map(m => `<tr><td>${badge(m.status)}</td><td>${esc(m.intent)}</td><td>${m.step_count}</td>
-      <td>${fmtTime(m.created_at)}</td><td>${fmtTime(m.last_validated_at)}</td></tr>`).join('') + '</table></div>';
+      <td>${fmtTime(m.created_at)}</td><td>${fmtTime(m.last_validated_at)}</td></tr>`).join('') + '</table></div></div>';
   if (s.evolution.length) {
-    body += `<div class="section"><h2>演进史</h2><ul class="timeline">` + s.evolution.map(ev =>
-      `<li>${fmtTime(ev.created_at)} · ${ev.kind === 'flow' ? '流程附注' : '快照'} ${badge(ev.status)} ${esc(ev.status)}</li>`).join('') + '</ul></div>';
+    body += `<div class="panel"><div class="panel-header"><h2>演进史</h2></div><div class="panel-body"><ul class="timeline">` + s.evolution.map(ev =>
+      `<li>${fmtTime(ev.created_at)} · ${ev.kind === 'flow' ? '流程附注' : '快照'} ${badge(ev.status)} ${esc(ev.status)}</li>`).join('') + '</ul></div></div>';
   }
-  body += `<details class="tech"><summary>技术详情（机器数据）</summary>
+  body += `<div class="panel"><details class="tech"><summary>技术详情（机器数据）</summary>
     <p>subject_id: <code>${esc(s.id)}</code></p>
     ${s.memories.map(m => `<p>memory <code>${esc(m.id)}</code> @ ${esc(m.branch || '')} ${esc(m.commit || '')}</p>`).join('')}
-  </details>`;
+  </details></div>`;
   $('#content').innerHTML = body;
   if (s.flow) {
     let graph = renderFlowGraph($('#graph'), s.flow);
@@ -1177,24 +1187,24 @@ function mapView() {
       <h3>${badge(p.status)} ${esc(p.name)}</h3>
       <div class="sub">阶段 ${p.stages.length} · 支撑主题 ${p.members.length}</div></div>`).join('');
   $('#content').innerHTML = `
-    <div class="section"><h2>业务主题地图</h2><div class="grid">${cards}</div></div>
-    <div class="section"><h2>业务模式（跨主题归纳）</h2><div class="grid">${pats || '<span class="chip">暂无</span>'}</div></div>`;
+    <div class="panel"><div class="panel-header"><h2>业务主题地图</h2></div><div class="panel-body"><div class="grid">${cards}</div></div></div>
+    <div class="panel"><div class="panel-header"><h2>业务模式（跨主题归纳）</h2></div><div class="panel-body"><div class="grid">${pats || '<span class="chip">暂无</span>'}</div></div></div>`;
 }
 
 function patternView(p) {
-  $('#content').innerHTML = `<div class="section"><h2>${esc(p.name)} ${badge(p.status)}</h2></div>
-    <div class="section markdown-body"><h2>阶段</h2><table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
-    ${p.stages.map(st => `<tr><td>${st.index}</td><td>${esc(st.name)}</td><td>${badge(st.status)} ${esc(st.status)}</td></tr>`).join('')}</table></div>
-    <div class="section"><h2>支撑主题</h2><div class="grid">
-    ${p.members.map(id => `<div class="card" onclick="navigateTo('subject/${esc(id)}')"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div></div>
-    <details class="tech"><summary>技术详情</summary><p>pattern_id: <code>${esc(p.id)}</code></p></details>`;
+  $('#content').innerHTML = `<div class="panel"><div class="panel-header"><h2>${esc(p.name)} ${badge(p.status)}</h2></div></div>
+    <div class="panel"><div class="panel-header"><h2>阶段</h2></div><div class="panel-body markdown-body"><table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
+    ${p.stages.map(st => `<tr><td>${st.index}</td><td>${esc(st.name)}</td><td>${badge(st.status)} ${esc(st.status)}</td></tr>`).join('')}</table></div></div>
+    <div class="panel"><div class="panel-header"><h2>支撑主题</h2></div><div class="panel-body"><div class="grid">
+    ${p.members.map(id => `<div class="card" onclick="navigateTo('subject/${esc(id)}')"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div></div></div>
+    <div class="panel"><details class="tech"><summary>技术详情</summary><p>pattern_id: <code>${esc(p.id)}</code></p></details></div>`;
 }
 
 function hintsView() {
-  $('#content').innerHTML = `<div class="section markdown-body"><h2>避坑记录（失败被自动隔离，不污染成功路线）</h2>
-    <table><tr><th>命令</th><th>参数</th><th>失败类型</th><th>错误摘要</th><th>时间</th></tr>
+  $('#content').innerHTML = `<div class="panel"><div class="panel-header"><h2>避坑记录（失败被自动隔离，不污染成功路线）</h2></div>
+    <div class="panel-body markdown-body"><table><tr><th>命令</th><th>参数</th><th>失败类型</th><th>错误摘要</th><th>时间</th></tr>
     ${DATA.negative_hints.map(h => `<tr><td><code>${esc(h.command)}</code></td><td><code>${esc(h.args || '')}</code></td>
-      <td>${esc(h.failure_type)}</td><td>${esc(h.error || '')}</td><td>${fmtTime(h.created_at)}</td></tr>`).join('')}</table></div>`;
+      <td>${esc(h.failure_type)}</td><td>${esc(h.error || '')}</td><td>${fmtTime(h.created_at)}</td></tr>`).join('')}</table></div></div>`;
 }
 
 function nameOf(subjectId) {
