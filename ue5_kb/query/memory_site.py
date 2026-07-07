@@ -569,6 +569,13 @@ pre.snippet{background:#0d0f14;border:1px solid var(--line);border-radius:6px;pa
 pre.snippet.wrap{white-space:pre-wrap;word-break:break-all;overflow-x:hidden}
 pre.snippet .focus{background:#2b3a55;display:block}
 pre.snippet .ln{color:#525b73;user-select:none;display:inline-block;width:44px}
+pre.snippet .tok-keyword{color:#c586c0}
+pre.snippet .tok-type{color:#4ec9b0}
+pre.snippet .tok-string{color:#ce9178}
+pre.snippet .tok-number{color:#b5cea8}
+pre.snippet .tok-comment{color:#6a9955;font-style:italic}
+pre.snippet .tok-preproc{color:#e5b458}
+pre.snippet .tok-macro{color:#dcdcaa}
 .snippet-wrap{margin:6px 0}
 .snippet-toolbar{display:flex;justify-content:flex-end;margin-bottom:4px}
 .wrap-toggle{font-size:11px;padding:2px 8px}
@@ -636,12 +643,54 @@ function navRender() {
     <a href="#hints" data-route="hints" onclick="event.preventDefault();navigateTo('hints')">⚠️ 避坑记录 (${DATA.negative_hints.length})</a>`;
 }
 
+// 轻量级 C++ / HLSL 语法高亮：不引入外部高亮库（保持单文件 wiki 的自包含设计），
+// 用一个简单的逐行 token 正则识别注释/字符串/预处理指令/数字/关键字/UE 命名类型，
+// 足够覆盖引擎源码片段的可读性需求。按行独立处理（不跨行），换行由外层按行渲染，
+// 因此正则里不需要处理多行的块注释延续（极少见，且不影响正确性/安全性，只是
+// 换行位置上的注释着色不会跨行延续）。
+const CPP_KEYWORDS = new Set(['alignas','alignof','and','asm','auto','bitand','bitor','bool','break','case','catch','char','char8_t','char16_t','char32_t','class','compl','concept','const','consteval','constexpr','constinit','const_cast','continue','co_await','co_return','co_yield','decltype','default','delete','do','double','dynamic_cast','else','enum','explicit','export','extern','false','final','float','for','friend','goto','if','inline','int','long','mutable','namespace','new','noexcept','nullptr','operator','override','private','protected','public','register','reinterpret_cast','requires','return','short','signed','sizeof','static','static_assert','static_cast','struct','switch','template','this','thread_local','throw','true','try','typedef','typeid','typename','union','unsigned','using','virtual','void','volatile','wchar_t','while',
+  'technique','technique10','technique11','pass','cbuffer','tbuffer','uniform','groupshared','numthreads','row_major','column_major','packoffset','discard','in','out','inout',
+  'float','float1','float2','float3','float4','float1x1','float2x2','float3x3','float4x4','half','half2','half3','half4','double2','double3','double4',
+  'int1','int2','int3','int4','uint','uint1','uint2','uint3','uint4','bool1','bool2','bool3','bool4','matrix','vector',
+  'Texture1D','Texture2D','Texture3D','TextureCube','Texture1DArray','Texture2DArray','TextureCubeArray','Texture2DMS',
+  'RWTexture1D','RWTexture2D','RWTexture3D','RWStructuredBuffer','StructuredBuffer','AppendStructuredBuffer','ConsumeStructuredBuffer',
+  'ByteAddressBuffer','RWByteAddressBuffer','SamplerState','SamplerComparisonState']);
+const UE_MACROS = new Set(['UPROPERTY','UFUNCTION','UCLASS','USTRUCT','UENUM','UINTERFACE','UMETA','GENERATED_BODY','GENERATED_UCLASS_BODY','GENERATED_USTRUCT_BODY','GENERATED_IINTERFACE_BODY','TEXT','LOCTEXT','NSLOCTEXT','check','checkf','checkSlow','ensure','ensureMsgf','ensureAlways','verify','verifyf','UE_LOG',
+  'SV_Target','SV_Position','SV_DispatchThreadID','SV_GroupID','SV_GroupThreadID','SV_GroupIndex','SV_VertexID','SV_InstanceID','SV_IsFrontFace','SV_Depth']);
+const UE_TYPE_RE = /^[FUAEIT][A-Z]\\w*$/;
+const CODE_TOKEN_RE = /(\\/\\/.*)|("[^"]*"?)|('[^']*'?)|(#\\w+)|(\\d[\\w.]*)|([A-Za-z_]\\w*)/g;
+function highlightLine(line) {
+  let out = '';
+  let last = 0;
+  let m;
+  CODE_TOKEN_RE.lastIndex = 0;
+  while ((m = CODE_TOKEN_RE.exec(line))) {
+    if (m.index > last) out += esc(line.slice(last, m.index));
+    if (m[1] !== undefined) out += `<span class="tok-comment">${esc(m[1])}</span>`;
+    else if (m[2] !== undefined) out += `<span class="tok-string">${esc(m[2])}</span>`;
+    else if (m[3] !== undefined) out += `<span class="tok-string">${esc(m[3])}</span>`;
+    else if (m[4] !== undefined) out += `<span class="tok-preproc">${esc(m[4])}</span>`;
+    else if (m[5] !== undefined) out += `<span class="tok-number">${esc(m[5])}</span>`;
+    else if (m[6] !== undefined) {
+      const word = m[6];
+      let cls = null;
+      if (CPP_KEYWORDS.has(word)) cls = 'tok-keyword';
+      else if (UE_MACROS.has(word)) cls = 'tok-macro';
+      else if (UE_TYPE_RE.test(word)) cls = 'tok-type';
+      out += cls ? `<span class="${cls}">${esc(word)}</span>` : esc(word);
+    }
+    last = CODE_TOKEN_RE.lastIndex;
+  }
+  if (last < line.length) out += esc(line.slice(last));
+  return out;
+}
+
 let _snippetSeq = 0;
 function snippetHtml(sn) {
   if (!sn) return '<div class="chip">源码片段不可用（生成时未能读取源文件）</div>';
   const body = sn.lines.map((line, i) => {
     const no = sn.start + i;
-    const text = `<span class="ln">${no}</span>${esc(line)}`;
+    const text = `<span class="ln">${no}</span>${highlightLine(line)}`;
     return no === sn.focus ? `<span class="focus">${text}</span>` : text;
   }).join('\\n');
   const id = 'snip-' + (++_snippetSeq);
