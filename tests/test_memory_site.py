@@ -158,29 +158,33 @@ def test_compute_static_layout_is_deterministic_and_overlap_free():
 
 
 def test_compute_static_layout_wraps_large_lane_into_rows_and_respects_intra_lane_order():
-    """同一大步骤（泳道）节点数超过每行上限时应换行，而不是被硬挤成一整行；
-    且泳道内若存在直接依赖边，阅读顺序（先左后右、先上后下）必须尊重该依赖方向。"""
+    """同一大步骤（泳道）节点数超过每行上限、且存在跨节点的依赖链时，应按依赖关系
+    分层换行——独立节点（无泳道内依赖关系的 n2/n3/n4）可以和 n1 同层并排，超过每行
+    上限时按顺序换行；而依赖 n1 的 n5 必须被分到独立的新一层（新的一行），不能和
+    n1 同排，阅读顺序（先左后右、先上后下）必须尊重该依赖方向。"""
     flow = {
         "lanes": ["step"],
         "nodes": [{"id": f"n{i}", "lane": "step"} for i in range(1, 6)],
-        # n5 依赖 n1（必须排在 n1 之后），特意把 n5 放在原始列表最前面制造违反顺序的输入
+        # n5 依赖 n1（必须排在 n1 之后，且必须换到独立的一行，而不是和 n1 同排）
         "edges": [{"source": "n1", "target": "n5"}],
     }
     layout = compute_static_layout(flow)
     positions = layout["nodes"]
 
-    # 5 个节点、每行上限 3 -> 应换行为 2 行（3 + 2），不是硬挤成一整行
+    # n1/n2/n3/n4 互相之间没有依赖，属于同一层，超过每行上限 3 才换行 -> [3, 1]；
+    # n5 依赖 n1，必须落在独立的下一层（第三行），总计 3 行：[3, 1, 1]
     rows = sorted({p["y"] for p in positions.values()})
-    assert len(rows) == 2
+    assert len(rows) == 3
     row_counts = {}
     for p in positions.values():
         row_counts[p["y"]] = row_counts.get(p["y"], 0) + 1
-    assert sorted(row_counts.values()) == [2, 3]
+    assert sorted(row_counts.values()) == [1, 1, 3]
 
-    # 依赖顺序尊重：n1 的阅读顺序（行优先、同行按 x）必须早于 n5
+    # 依赖顺序尊重：n1 的阅读顺序（行优先、同行按 x）必须早于 n5，且二者不同行
     def reading_order(pos):
         return (pos["y"], pos["x"])
     assert reading_order(positions["n1"]) < reading_order(positions["n5"])
+    assert positions["n1"]["y"] != positions["n5"]["y"]
 
     # 泳道边框必须是其成员节点的紧致包围盒（而不是无视换行的整行宽度）
     lane_rect = layout["lanes"][0]
@@ -192,6 +196,44 @@ def test_compute_static_layout_wraps_large_lane_into_rows_and_respects_intra_lan
     assert lane_rect["y"] <= min(ys)
     assert lane_rect["x"] + lane_rect["w"] >= max(max_xs)
     assert lane_rect["y"] + lane_rect["h"] >= max(max_ys)
+
+
+def test_compute_static_layout_keeps_independent_nodes_side_by_side_without_any_edges():
+    """完全没有依赖边的一组节点（纯并行），只应按每行上限做数量换行，不应被强行
+    拆成单节点一行——验证分层算法在"无依赖"这个基础场景下退化为原来的按数量换行。"""
+    flow = {
+        "lanes": ["step"],
+        "nodes": [{"id": f"n{i}", "lane": "step"} for i in range(1, 6)],
+        "edges": [],
+    }
+    layout = compute_static_layout(flow)
+    positions = layout["nodes"]
+    rows = sorted({p["y"] for p in positions.values()})
+    assert len(rows) == 2
+    row_counts = {}
+    for p in positions.values():
+        row_counts[p["y"]] = row_counts.get(p["y"], 0) + 1
+    assert sorted(row_counts.values()) == [2, 3]
+
+
+def test_compute_static_layout_forces_dependency_chain_into_separate_rows_even_under_max_cols():
+    """还原用户反馈的真实场景：同一泳道内 A、B 互相独立（可并排），但 B 依赖的
+    C 有直接依赖边 B->C；即便三个节点数量不超过每行上限 3，也不能把 B、C 挤在
+    同一行——C 必须换到 B 下面的新一行，因为二者是顺序关系而不是并行分支。"""
+    flow = {
+        "lanes": ["step"],
+        "nodes": [{"id": "a", "lane": "step"}, {"id": "b", "lane": "step"}, {"id": "c", "lane": "step"}],
+        "edges": [{"source": "b", "target": "c"}],
+    }
+    layout = compute_static_layout(flow)
+    positions = layout["nodes"]
+
+    # a、b 无依赖关系，属于同一层，可以同排
+    assert positions["a"]["y"] == positions["b"]["y"]
+    # c 依赖 b，必须换到新的一行，不能和 a/b 同排
+    assert positions["c"]["y"] != positions["b"]["y"]
+    assert positions["c"]["y"] > positions["b"]["y"]
+
 
 
 def _assert_no_diagonal_line_segments(path: str, desc: str = ""):

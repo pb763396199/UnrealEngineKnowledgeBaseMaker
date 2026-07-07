@@ -89,7 +89,9 @@ def _latest_published_flow(conn: sqlite3.Connection, subject_id: str) -> Optiona
 # 完全不动，只有用户主动拖拽才会移动。本模块用纯 Python 复刻这一布局算法（不引入
 # Node/Archify 依赖），坐标在生成时一次性算好、写入数据，前端只负责渲染与响应交互。
 NODE_W, NODE_H = 200, 56
-_LAYOUT_COL_GAP, _LAYOUT_ROW_GAP, _LAYOUT_LANE_GAP, _LAYOUT_LANE_PAD, _LAYOUT_LABEL_H, _LAYOUT_MARGIN = 24, 18, 46, 14, 20, 24
+# 行间距(_LAYOUT_ROW_GAP)必须大于"折线拐点+文字标签"所需的最小空间，否则跨行的边
+# 标签会紧贴甚至被上下节点框遮住（同一泳道内按依赖关系换行后，这种跨行边非常常见）。
+_LAYOUT_COL_GAP, _LAYOUT_ROW_GAP, _LAYOUT_LANE_GAP, _LAYOUT_LANE_PAD, _LAYOUT_LABEL_H, _LAYOUT_MARGIN = 24, 40, 46, 14, 20, 24
 _LAYOUT_MAX_COLS = 3  # 同一泳道内节点按依赖顺序换行排布，而不是强行挤成一整行
 
 
@@ -151,12 +153,45 @@ def _apply_intra_lane_order(lane_ids: List[str], edges: List[Dict[str, Any]]) ->
     return order
 
 
-def _wrap_into_rows(ids: List[str], max_cols: int) -> List[List[str]]:
-    """按阅读顺序（依赖顺序）把节点换行分组，避免同一大步骤的节点被硬挤成一整行。"""
+def _wrap_into_rows(ids: List[str], max_cols: int, edges: List[Dict[str, Any]]) -> List[List[str]]:
+    """把同一泳道内的节点分行：优先按泳道内部的依赖关系分层——有直接/间接依赖
+    链条的节点必须换行、纵向排布成先后顺序；同一层内彼此没有依赖关系的节点才视为
+    并行分支，允许左右并排（超过 max_cols 时再按顺序换行）。不再是无视依赖关系、
+    单纯按每 N 个强行切一行的做法（那样会把有先后顺序的节点误排成同一行，看起来
+    像并行分支，误导阅读流程逻辑）。
+    """
     if not ids:
         return []
-    cols = max(1, min(max_cols, len(ids)))
-    return [ids[i:i + cols] for i in range(0, len(ids), cols)]
+    id_set = set(ids)
+    local_edges = [(e.get("source"), e.get("target")) for e in edges
+                   if e.get("source") in id_set and e.get("target") in id_set and e.get("source") != e.get("target")]
+
+    # 最长路径分层：没有泳道内前驱的节点层号为 0，每条依赖边把目标节点的层号
+    # 抬高到至少比源节点多 1；反复松弛直到收敛（节点数量级很小，迭代上限很安全）。
+    rank = {node_id: 0 for node_id in ids}
+    for _ in range(len(ids) + 1):
+        changed = False
+        for s, t in local_edges:
+            if rank[s] + 1 > rank[t]:
+                rank[t] = rank[s] + 1
+                changed = True
+        if not changed:
+            break
+
+    # 按层分组，层内保持传入的阅读顺序（barycenter + 依赖排序已确定的先后关系）。
+    max_rank = max(rank.values()) if rank else 0
+    layered: List[List[str]] = [[] for _ in range(max_rank + 1)]
+    for node_id in ids:
+        layered[rank[node_id]].append(node_id)
+
+    cols = max(1, max_cols)
+    rows: List[List[str]] = []
+    for layer in layered:
+        if not layer:
+            continue
+        for i in range(0, len(layer), cols):
+            rows.append(layer[i:i + cols])
+    return rows
 
 
 _MIN_JOG = 14.0  # 折线拐点与两端端点之间至少留出的距离，保证圆角与箭头有地方画
@@ -243,7 +278,7 @@ def compute_static_layout(flow: Dict[str, Any]) -> Dict[str, Any]:
         lanes = seen or ["默认"]
 
     order = _order_nodes_by_barycenter(lanes, nodes, edges)
-    rows_by_lane = {lane: _wrap_into_rows(order.get(lane, []), _LAYOUT_MAX_COLS) for lane in lanes}
+    rows_by_lane = {lane: _wrap_into_rows(order.get(lane, []), _LAYOUT_MAX_COLS, edges) for lane in lanes}
     row_widths = {
         lane: max((len(row) * NODE_W + max(0, len(row) - 1) * _LAYOUT_COL_GAP for row in rows), default=NODE_W)
         for lane, rows in rows_by_lane.items()
@@ -512,6 +547,7 @@ nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#deta
 .lane-label{font-size:10px;font-weight:600;font-family:"Segoe UI",sans-serif}
 .flow-edge{stroke:#3a4055;stroke-width:1.5;fill:none}
 .flow-edge.dashed{stroke:#e5b458;stroke-dasharray:5,4}
+.edge-label-bg{fill:#10141f;fill-opacity:.92;pointer-events:none}
 .edge-label{font-size:10px;fill:#9aa3b8;font-family:"Segoe UI",sans-serif;text-anchor:middle}
 .edge-label.dashed{fill:#e5b458}
 #legend{display:flex;flex-wrap:wrap;gap:10px;padding:8px 10px;font-size:11px;color:var(--dim);border-top:1px solid var(--line)}
@@ -688,9 +724,14 @@ function renderFlowGraph(container, flow) {
     const label = e.condition || e.label;
     const a = layout.nodes[e.source], b = layout.nodes[e.target];
     const geom = a && b ? routeEdgePath(a, b) : { path: e.path, lx: 0, ly: 0 };
+    // 标签背景矩形（edge-label-bg）先于文字放置：折线拐点常常离节点框很近，
+    // 没有底色的话文字会被节点框"吃掉"看不清；实际尺寸在渲染后用 getBBox 量出来填。
     return `<g class="flow-edge-group" data-from="${esc(e.source)}" data-to="${esc(e.target)}">`
       + `<path class="flow-edge${dashed ? ' dashed' : ''}" d="${geom.path}" marker-end="url(#${dashed ? 'arr-dashed' : 'arr-solid'})"></path>`
-      + (label ? `<text class="edge-label${dashed ? ' dashed' : ''}" x="${geom.lx.toFixed(1)}" y="${geom.ly.toFixed(1)}">${esc(label)}</text>` : '')
+      + (label
+        ? `<rect class="edge-label-bg" x="0" y="0" width="0" height="0" rx="3"></rect>`
+          + `<text class="edge-label${dashed ? ' dashed' : ''}" x="${geom.lx.toFixed(1)}" y="${geom.ly.toFixed(1)}">${esc(label)}</text>`
+        : '')
       + `</g>`;
   }).join('');
   const nodeSvg = Object.keys(layout.nodes || {}).map(id => {
@@ -715,26 +756,50 @@ function renderFlowGraph(container, flow) {
   </svg>`;
 
   const svg = container.querySelector('#flow-svg');
+  // 用实际渲染出来的文字包围盒（getBBox，字符串阶段没法精确算宽度，中英文宽度也不一样）
+  // 回填标签背景矩形的尺寸，保证背景刚好贴合文字，不管标签离节点框多近都能看清。
+  const refreshLabelBg = textEl => {
+    const bg = textEl.previousElementSibling;
+    if (!bg || !bg.classList.contains('edge-label-bg')) return;
+    const bbox = textEl.getBBox();
+    bg.setAttribute('x', (bbox.x - 4).toFixed(1));
+    bg.setAttribute('y', (bbox.y - 2).toFixed(1));
+    bg.setAttribute('width', (bbox.width + 8).toFixed(1));
+    bg.setAttribute('height', (bbox.height + 4).toFixed(1));
+  };
+  container.querySelectorAll('text.edge-label').forEach(refreshLabelBg);
   let view = { x: 0, y: 0, w: layout.width, h: layout.height };
   const applyView = () => svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
 
   // 泳道边框跟随其成员节点当前位置动态收缩/扩张（初始值已由 Python 端算好，
   // 拖拽节点后这里重新计算包围盒，而不是让边框停留在旧的静态位置）。
   const LANE_PAD = 14, LABEL_H = 20;
-  // 碰撞检测的最小间距：节点间距同时也是 edge/label 的最小可绘制留白。
+  // 节点/泳道之间必须保留的最小间距：既是"挤开"求解的阈值，也是 edge/label 的最小可绘制留白。
   const NODE_PAD = 20, LANE_MIN_GAP = 18;
+  const MAX_RESOLVE_PASSES = 8; // 一次拖拽只做有限次"一次性推挤求解"，不是持续物理模拟，不会抖动
   const laneOrder = flow.lanes || [];
   const laneMembers = {};
-  (flow.nodes || []).forEach(n => { (laneMembers[n.lane] || (laneMembers[n.lane] = [])).push(n.id); });
+  const nodeLaneOf = {};
+  (flow.nodes || []).forEach(n => {
+    (laneMembers[n.lane] || (laneMembers[n.lane] = [])).push(n.id);
+    nodeLaneOf[n.id] = n.lane;
+  });
 
-  // 计算某条泳道当前的紧致包围盒；overrideId/overrideRect 用于"假设某节点已经
-  // 移动到候选位置"时的试算，供拖拽时的碰撞检测使用，不会真的改动数据。
-  const laneBBox = (laneName, overrideId, overrideRect) => {
+  // 建立"节点 id -> 与它相连的边分组元素"索引：拖拽推挤可能牵动很多节点，需要
+  // 批量刷新这些节点各自关联的边，而不仅仅是被直接拖拽的那一个节点。
+  const edgeGroupsByNode = {};
+  container.querySelectorAll('.flow-edge-group').forEach(g => {
+    const from = g.dataset.from, to = g.dataset.to;
+    (edgeGroupsByNode[from] || (edgeGroupsByNode[from] = [])).push(g);
+    (edgeGroupsByNode[to] || (edgeGroupsByNode[to] = [])).push(g);
+  });
+
+  const laneBBox = laneName => {
     const ids = laneMembers[laneName];
     if (!ids || !ids.length) return null;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const id of ids) {
-      const p = (overrideId && id === overrideId) ? overrideRect : flow.layout.nodes[id];
+      const p = flow.layout.nodes[id];
       if (!p) continue;
       minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
       maxX = Math.max(maxX, p.x + p.w); maxY = Math.max(maxY, p.y + p.h);
@@ -750,32 +815,97 @@ function renderFlowGraph(container, flow) {
     if (rectEl) { rectEl.setAttribute('x', bbox.x); rectEl.setAttribute('y', bbox.y); rectEl.setAttribute('width', bbox.w); rectEl.setAttribute('height', bbox.h); }
     if (labelEl) { labelEl.setAttribute('x', bbox.x + 10); labelEl.setAttribute('y', bbox.y + 14); }
   };
-  // AABB 碰撞测试，pad 是两个矩形之间必须留出的最小间距（不是零间距才算碰撞）。
-  const rectsOverlap = (p, q, pad) => !(
-    p.x + p.w + pad <= q.x || q.x + q.w + pad <= p.x ||
-    p.y + p.h + pad <= q.y || q.y + q.h + pad <= p.y
-  );
-  // 节点拖到候选位置 candidate 是否会造成：①与任意其他节点重叠（含跨泳道）；
-  // ②所在泳道的动态包围盒与相邻（上一条/下一条）泳道重叠。任一命中都视为碰撞，
-  // 拖拽时应"撞墙"式停止在最后一个不冲突的位置，而不是继续穿透。
-  const wouldCollide = (nodeId, candidate) => {
-    for (const id in flow.layout.nodes) {
-      if (id === nodeId) continue;
-      if (rectsOverlap(candidate, flow.layout.nodes[id], NODE_PAD)) return true;
-    }
-    const node = (flow.nodes || []).find(n => n.id === nodeId);
-    if (node && node.lane) {
-      const idx = laneOrder.indexOf(node.lane);
-      const bbox = laneBBox(node.lane, nodeId, candidate);
-      if (bbox) {
-        const prevBBox = idx > 0 ? laneBBox(laneOrder[idx - 1]) : null;
-        const nextBBox = idx >= 0 && idx < laneOrder.length - 1 ? laneBBox(laneOrder[idx + 1]) : null;
-        if (prevBBox && rectsOverlap(bbox, prevBBox, LANE_MIN_GAP)) return true;
-        if (nextBBox && rectsOverlap(bbox, nextBBox, LANE_MIN_GAP)) return true;
-      }
-    }
-    return false;
+  // 两个矩形若重叠（含 pad 间距），返回需要施加在 other 身上的最小推开位移，沿
+  // 重叠量较小的那根轴推开（标准 AABB 最小平移向量思路）；不重叠则返回 null。
+  const resolveOverlap = (mover, other, pad) => {
+    const pcx = mover.x + mover.w / 2, pcy = mover.y + mover.h / 2;
+    const qcx = other.x + other.w / 2, qcy = other.y + other.h / 2;
+    const overlapX = (mover.w + other.w) / 2 + pad - Math.abs(pcx - qcx);
+    const overlapY = (mover.h + other.h) / 2 + pad - Math.abs(pcy - qcy);
+    if (overlapX <= 0 || overlapY <= 0) return null;
+    return overlapX < overlapY
+      ? { dx: qcx >= pcx ? overlapX : -overlapX, dy: 0 }
+      : { dx: 0, dy: qcy >= pcy ? overlapY : -overlapY };
   };
+  // 把节点的候选位置（就地）钳制在其所属泳道与相邻泳道之间的可用间隙内：不允许
+  // 任何节点越过相邻泳道的边界。这是防止"泳道整体被撑爆/被弹飞"的关键——旧实现
+  // 曾经用"重叠了就把下一整条泳道所有节点批量搬走 dy"的方式来处理泳道碰撞，一旦
+  // 某个节点被拖出很远，dy 会被算出一个极大的值，导致其余泳道被瞬间弹飞到极远处
+  // （复现为一张被拉伸得极其狭长的图）。改为钳制单个节点自身的位置后，任何一次
+  // 调整的幅度都有界（不超过相邻泳道当前的间隙差），不会再出现这种量级失控的跳变。
+  const clampToLaneGap = (nodeId, rect) => {
+    const lane = nodeLaneOf[nodeId];
+    if (!lane) return;
+    const idx = laneOrder.indexOf(lane);
+    if (idx > 0) {
+      const prevBBox = laneBBox(laneOrder[idx - 1]);
+      if (prevBBox) rect.y = Math.max(rect.y, prevBBox.y + prevBBox.h + LANE_MIN_GAP);
+    }
+    if (idx >= 0 && idx < laneOrder.length - 1) {
+      const nextBBox = laneBBox(laneOrder[idx + 1]);
+      if (nextBBox) rect.y = Math.min(rect.y, nextBBox.y - LANE_MIN_GAP - rect.h);
+    }
+  };
+  // 被拖拽的节点自身永远自由移动、不被阻挡；与它冲突的其他节点会被"挤开"，而不是
+  // 像之前那样直接拒绝这次拖拽。每个被挤开的节点同样会被钳制在所属泳道的间隙内，
+  // 防止链式推挤把某个节点顶出泳道范围。这是有限次的一次性位置求解（每次 mousemove
+  // 独立计算，不依赖上一帧速度/弹簧），不是持续物理模拟，因此不会有 vis-network
+  // 那种抖动、一直在动的问题。
+  const resolveCollisions = draggedId => {
+    const changed = new Set([draggedId]);
+    for (let pass = 0; pass < MAX_RESOLVE_PASSES; pass++) {
+      let touched = false;
+      const ids = Object.keys(flow.layout.nodes);
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const idA = ids[i], idB = ids[j];
+          // 两个节点都不是被拖拽节点时，固定推开后者，保证结果确定、不会来回震荡；
+          // 只要有一方是被拖拽节点，就以它为参照物推开另一方。
+          const mover = idA === draggedId ? idA : (idB === draggedId ? idB : idA);
+          const other = mover === idA ? idB : idA;
+          const push = resolveOverlap(flow.layout.nodes[mover], flow.layout.nodes[other], NODE_PAD);
+          if (push) {
+            const o = flow.layout.nodes[other];
+            const moved = { x: o.x + push.dx, y: o.y + push.dy, w: o.w, h: o.h };
+            clampToLaneGap(other, moved);
+            flow.layout.nodes[other] = moved;
+            changed.add(other);
+            touched = true;
+          }
+        }
+      }
+      if (!touched) break;
+    }
+    return changed;
+  };
+  // 把 changed 集合里所有节点的最新位置写回 DOM：节点本身的 transform、它关联的
+  // 每一条边的折线路径与标签背景、以及它所在泳道的动态边框，一次性批量刷新。
+  const applyChanges = (changed, draggedEl, draggedId) => {
+    const dirtyEdgeGroups = new Set();
+    const dirtyLanes = new Set();
+    changed.forEach(id => {
+      const p = flow.layout.nodes[id];
+      const nodeEl = id === draggedId ? draggedEl : container.querySelector(`.flow-node[data-id="${cssEsc(id)}"]`);
+      if (nodeEl && p) nodeEl.setAttribute('transform', `translate(${p.x},${p.y})`);
+      (edgeGroupsByNode[id] || []).forEach(g => dirtyEdgeGroups.add(g));
+      if (nodeLaneOf[id]) dirtyLanes.add(nodeLaneOf[id]);
+    });
+    dirtyEdgeGroups.forEach(g => {
+      const a = flow.layout.nodes[g.dataset.from], b = flow.layout.nodes[g.dataset.to];
+      if (!a || !b) return;
+      const geom = routeEdgePath(a, b);
+      const path = g.querySelector('path.flow-edge');
+      const label = g.querySelector('text.edge-label');
+      if (path) path.setAttribute('d', geom.path);
+      if (label) {
+        label.setAttribute('x', geom.lx.toFixed(1));
+        label.setAttribute('y', geom.ly.toFixed(1));
+        refreshLabelBg(label);
+      }
+    });
+    dirtyLanes.forEach(updateLaneBounds);
+  };
+
 
   const onWheel = ev => {
     ev.preventDefault();
@@ -792,10 +922,9 @@ function renderFlowGraph(container, flow) {
   };
   svg.addEventListener('wheel', onWheel, { passive: false });
 
-  // 拖拽状态：连接边在 mousedown 时一次性缓存好（不在 mousemove 里反复查询 DOM）。
-  // 直接同步更新 DOM（不经 requestAnimationFrame）：实测 rAF 合帧在部分环境下（后台/非
-  // 焦点标签页、自动化测试）可能被浏览器节流甚至不触发，导致拖拽视觉更新滞后或丢帧；
-  // 直接更新在节点数量级（几十个）下足够快，且响应最即时、最"动态"。
+  // 拖拽状态：直接同步更新 DOM（不经 requestAnimationFrame）：实测 rAF 合帧在部分
+  // 环境下（后台/非焦点标签页、自动化测试）可能被浏览器节流甚至不触发，导致拖拽
+  // 视觉更新滞后或丢帧；直接更新在节点数量级（几十个）下足够快，且响应最即时。
   let dragNode = null, dragMoved = false, panState = null;
   const onMouseDown = ev => {
     if (ev.button !== 0) return;
@@ -808,17 +937,7 @@ function renderFlowGraph(container, flow) {
     document.body.style.userSelect = 'none';
     if (nodeEl) {
       const id = nodeEl.dataset.id;
-      const node = (flow.nodes || []).find(n => n.id === id);
-      const connected = Array.from(container.querySelectorAll(
-        `.flow-edge-group[data-from="${cssEsc(id)}"],.flow-edge-group[data-to="${cssEsc(id)}"]`
-      )).map(g => ({
-        group: g,
-        path: g.querySelector('path.flow-edge'),
-        label: g.querySelector('text.edge-label'),
-        otherId: g.dataset.from === id ? g.dataset.to : g.dataset.from,
-        isSource: g.dataset.from === id,
-      }));
-      dragNode = { id, el: nodeEl, lane: node ? node.lane : null, startX: ev.clientX, startY: ev.clientY, scale, connected, base: { ...flow.layout.nodes[id] } };
+      dragNode = { id, el: nodeEl, startX: ev.clientX, startY: ev.clientY, scale, base: { ...flow.layout.nodes[id] } };
       dragMoved = false;
     } else {
       panState = { startX: ev.clientX, startY: ev.clientY, ox: view.x, oy: view.y, scale };
@@ -830,20 +949,13 @@ function renderFlowGraph(container, flow) {
       if (!dragMoved && (Math.abs(dx0) > 2 || Math.abs(dy0) > 2)) dragMoved = true;
       if (!dragMoved) return;
       const dx = dx0 * dragNode.scale, dy = dy0 * dragNode.scale;
-      const nx = dragNode.base.x + dx, ny = dragNode.base.y + dy;
-      const moved = { x: nx, y: ny, w: dragNode.base.w, h: dragNode.base.h };
-      // 碰撞检测：会与其他节点或相邻泳道包围盒重叠就"撞墙"停在原地，不继续穿透。
-      if (wouldCollide(dragNode.id, moved)) return;
-      dragNode.el.setAttribute('transform', `translate(${nx},${ny})`);
-      for (const c of dragNode.connected) {
-        const other = flow.layout.nodes[c.otherId];
-        if (!other) continue;
-        const geom = c.isSource ? routeEdgePath(moved, other) : routeEdgePath(other, moved);
-        c.path.setAttribute('d', geom.path);
-        if (c.label) { c.label.setAttribute('x', geom.lx.toFixed(1)); c.label.setAttribute('y', geom.ly.toFixed(1)); }
-      }
+      const moved = { x: dragNode.base.x + dx, y: dragNode.base.y + dy, w: dragNode.base.w, h: dragNode.base.h };
+      // 被拖拽节点严格按鼠标位移量 1:1 移动，不做任何钳制/阻挡（本身完全跟手）；
+      // resolveCollisions 会把与它冲突的其他节点"挤开"（并把挤开的结果钳制在各自
+      // 泳道的间隙内，不会越界），applyChanges 统一把受影响的节点/边/泳道刷新到 DOM。
       flow.layout.nodes[dragNode.id] = moved;
-      if (dragNode.lane) updateLaneBounds(dragNode.lane);
+      const changed = resolveCollisions(dragNode.id);
+      applyChanges(changed, dragNode.el, dragNode.id);
     } else if (panState) {
       const dx = (ev.clientX - panState.startX) * panState.scale;
       const dy = (ev.clientY - panState.startY) * panState.scale;
@@ -854,8 +966,6 @@ function renderFlowGraph(container, flow) {
   const onMouseUp = () => {
     document.body.style.userSelect = '';
     if (dragNode) {
-      // 位置在 onMouseMove 里已做过碰撞校验并直接写入 flow.layout.nodes，这里不
-      // 再根据原始鼠标位移重算一次——那样会绕过碰撞检测，把被拒绝的越界位置写回去。
       if (!dragMoved) nodeDetail(flow, dragNode.id);
       dragNode = null;
     }
