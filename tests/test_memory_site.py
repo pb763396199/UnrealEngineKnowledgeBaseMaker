@@ -85,10 +85,15 @@ def test_export_site_generates_single_file_wiki_from_sqlite_only(tmp_path):
     assert 'href="vendor/github-markdown.css"' in text
     assert "function compute" not in text  # 布局计算在 Python 端完成，前端不包含布局算法
     assert "routeEdgePath" in text  # 前端仅做拖拽时的边重绘，不做全局布局
-    # 面板可拖拽调整 + 代码可切换换行 + 滚动条统一样式
+    # 真正的可拖拽/停靠/自由调整布局窗口系统（dockview-core），对齐 Unreal Editor 停靠窗口
+    assert 'src="vendor/dockview-core.min.js"' in text
+    assert 'href="vendor/dockview.css"' in text
+    assert 'id="dock-container"' in text
+    assert "dockview-theme-abyss" in text
+    assert "DockviewComponent" in text
+    assert "function ensureDock" in text
+    # nav 侧栏仍是自写拖拽分隔条（应用外壳，不是 dockview 内容窗口）；代码可切换换行 + 滚动条统一样式
     assert 'id="resizer-nav"' in text
-    assert 'id="resizer-detail"' in text
-    assert 'id="graph-resize"' in text
     assert "function makeResizer" in text
     assert "function toggleWrap" in text
     assert "::-webkit-scrollbar" in text
@@ -98,11 +103,13 @@ def test_export_site_generates_single_file_wiki_from_sqlite_only(tmp_path):
     assert result["stats"]["memory_count"] == 1
     assert result["generated_programmatically"] is True
 
-    # vendor 资产只剩 github-markdown-css（图引擎不再 vendor 第三方库）
-    assert set(result["vendor_assets"]) == {"github-markdown.css"}
+    # vendor 资产：github-markdown-css（排版）+ dockview-core（真正的可拖拽停靠窗口系统）
+    assert set(result["vendor_assets"]) == {"github-markdown.css", "dockview-core.min.js", "dockview.css"}
     vendor_dir = Path(result["vendor_dir"])
     assert not (vendor_dir / "vis-network.min.js").exists()
     assert (vendor_dir / "github-markdown.css").stat().st_size > 10_000
+    assert (vendor_dir / "dockview-core.min.js").stat().st_size > 100_000
+    assert (vendor_dir / "dockview.css").stat().st_size > 10_000
 
     # 幂等：重新生成字节级一致（generated_at 除外的确定性由数据决定，允许时间戳差异）
     again = export_site(skill_dir=skill_dir, source_root=source_root)

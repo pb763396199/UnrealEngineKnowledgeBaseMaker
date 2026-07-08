@@ -5,14 +5,22 @@
 2. 纯代码生成，AI 不参与渲染；删除后可随时重新生成，输出确定性。
 3. 渐进式披露：业务地图 -> 主题泳道板 -> 节点侧栏 -> 证据片段 + vscode:// 深链。
 4. 哈希/ID 等机器数据全部折叠进"技术详情"，默认不打扰人。
-5. 单页面交互站（index.html + vendor/），仅 github-markdown-css 排版离线 vendor，不接 CDN、
-   不需 npm/构建步骤，双击即开。详见仓库根目录 wiki_vendor/VENDOR.md。
+5. 单页面交互站（index.html + vendor/），仅 github-markdown-css 排版 + dockview-core 窗口
+   引擎离线 vendor，不接 CDN、不需 npm/构建步骤，双击即开。详见仓库根目录 wiki_vendor/VENDOR.md。
 
 图引擎选型（实战迭代结论）：初版用 vis-network 运行时物理引擎，实机反馈"一直在动来动去"不可接受。
 参考 F:\\AiProject\\DecisionReview 项目多轮真实用户迭代：力导向物理图被反复否定，最终收敛到 Archify
 的 architecture 渲染风格——服务端一次性计算好的静态 SVG（矩形节点 + 泳道分组框 + 直角走线），
 加载后完全不动，只有用户主动拖拽才会移动。本模块用纯 Python 复刻这一布局算法（不引入
 Node/Archify 依赖，见 compute_static_layout），前端仅负责渲染与交互，不再跑任何运行时布局/物理模拟。
+
+窗口系统选型（2026-07-08）：早期版本用纯 CSS 的 .panel/.panel-header 静态组件模拟 Unreal Editor
+停靠窗口的"边框+标题栏"观感，但那只是视觉皮肤，无法拖动/停靠/自由调整布局。参考同团队
+F:\\ShanghaiP4\\neon\\Plugins\\EarthPrefabStudio（旨在用 web 复刻 Unreal Editor 的项目）选定的
+依赖，改用其核心引擎 dockview-core：framework-agnostic、零依赖、纯 vanilla TS，UMD 构建可直接
+<script> 引入（暴露 window['dockview-core'] 全局对象），不需要 React/构建工具链，业务流程图、
+路线记忆、演进史、技术详情、节点详情等全部是真正独立、可拖拽停靠、可调整布局的窗口。见
+compute_static_layout 之后的 renderFlowGraph/dockview 相关 JS 与 wiki_vendor/VENDOR.md。
 """
 
 from __future__ import annotations
@@ -30,7 +38,7 @@ from .query_memory import _connect
 SNIPPET_RADIUS = 6
 # 与 templates/ 同级（ue5_kb/query/memory_site.py 向上三级到仓库根），与 generate.py 定位 templates 目录的约定一致
 VENDOR_DIR = Path(__file__).parent.parent.parent / "wiki_vendor"
-VENDOR_ASSETS = ("github-markdown.css",)
+VENDOR_ASSETS = ("github-markdown.css", "dockview-core.min.js", "dockview.css")
 
 
 def _read_snippet(source_root: Optional[Path], file_value: str, line_number: int) -> Optional[Dict[str, Any]]:
@@ -484,8 +492,12 @@ markdown_is_authoritative: false
 本文件为程序化生成产物，可随时删除并重新生成；事实以 sqlite + validate/replay 为准。
 graph_engine: 服务端确定性静态分层布局（纯 Python compute_static_layout，无运行时物理引擎、无 vendor 依赖）
 typography: github-markdown-css (vendor/github-markdown.css, MIT, 离线 vendor)
+window_engine: dockview-core (vendor/dockview-core.min.js + vendor/dockview.css, MIT, 离线 vendor,
+  framework-agnostic UMD，对齐 Unreal Editor 停靠窗口：所有窗口可自由拖拽/停靠/调整布局)
 -->
 <link rel="stylesheet" href="vendor/github-markdown.css">
+<link rel="stylesheet" href="vendor/dockview.css">
+<script src="vendor/dockview-core.min.js"></script>
 <style>
 :root{--bg:#12141a;--panel:#1b1e27;--card:#232735;--line:#3a4055;--text:#e6e9f2;--dim:#9aa3b8;
 --accent:#5b9dff;--ok:#3fbf7f;--warn:#e5b458;--bad:#e0626b;--chip:#2c3143;}
@@ -508,15 +520,28 @@ nav a:hover,nav a.active{background:var(--card)}
 .resizer:hover,.resizer.active{background:var(--accent)}
 .resizer-x{width:5px;cursor:col-resize}
 .resizer-y{height:5px;cursor:row-resize}
-#content{flex:1;overflow:auto;padding:18px;position:relative;min-width:0}
-#detail{width:0;overflow-y:auto;flex:none;background:var(--panel);border-left:1px solid var(--line)}
-#detail.open{width:460px;padding:16px}
-/* 滚动条统一样式（Firefox + WebKit） */
-nav,#content,#detail,pre.snippet{scrollbar-width:thin;scrollbar-color:var(--line) var(--panel)}
-nav::-webkit-scrollbar,#content::-webkit-scrollbar,#detail::-webkit-scrollbar,pre.snippet::-webkit-scrollbar{width:9px;height:9px}
-nav::-webkit-scrollbar-track,#content::-webkit-scrollbar-track,#detail::-webkit-scrollbar-track,pre.snippet::-webkit-scrollbar-track{background:var(--panel)}
-nav::-webkit-scrollbar-thumb,#content::-webkit-scrollbar-thumb,#detail::-webkit-scrollbar-thumb,pre.snippet::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px;border:2px solid var(--panel)}
-nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#detail::-webkit-scrollbar-thumb:hover,pre.snippet::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+/* dockview 容器：真正的可拖拽/停靠/自由调整布局的窗口系统（dockview-core，对齐 Unreal
+   Editor 停靠窗口）。不再用自写 .resizer 手动拖拽高/宽——dockview 自带拖拽分割条。 */
+#dock-container{flex:1;min-width:0;min-height:0;position:relative}
+.dockview-theme-abyss{--dv-background-color:#12141a;--dv-group-view-background-color:#171a22;
+  --dv-tabs-and-actions-container-background-color:#1b1e27;--dv-activegroup-visiblepanel-tab-background-color:#171a22;
+  --dv-activegroup-hiddenpanel-tab-background-color:#1b1e27;--dv-inactivegroup-visiblepanel-tab-background-color:#1b1e27;
+  --dv-inactivegroup-hiddenpanel-tab-background-color:#1b1e27;--dv-tab-divider-color:#3a4055;
+  --dv-separator-border:#3a4055;--dv-paneview-active-outline-color:#5b9dff;
+  --dv-activegroup-visiblepanel-tab-color:#e6e9f2;--dv-activegroup-hiddenpanel-tab-color:#9aa3b8;
+  --dv-inactivegroup-visiblepanel-tab-color:#9aa3b8;--dv-inactivegroup-hiddenpanel-tab-color:#7d8399;
+  --dv-drag-over-background-color:rgba(91,157,255,.12);--dv-drag-over-border-color:#5b9dff;
+  font-family:"Segoe UI",system-ui,sans-serif;font-size:13px}
+.dock-html{padding:12px;height:100%;overflow:auto;box-sizing:border-box}
+.dock-html.markdown-body{background:transparent}
+/* 滚动条统一样式（Firefox + WebKit）：nav 是应用外壳侧栏，.dock-html 是面板内容区，
+   pre.snippet 是代码片段自己的横向滚动条。dockview 自身的分组/标签区域滚动条用其
+   自带主题样式，不在这里覆盖。 */
+nav,.dock-html,pre.snippet{scrollbar-width:thin;scrollbar-color:var(--line) var(--panel)}
+nav::-webkit-scrollbar,.dock-html::-webkit-scrollbar,pre.snippet::-webkit-scrollbar{width:9px;height:9px}
+nav::-webkit-scrollbar-track,.dock-html::-webkit-scrollbar-track,pre.snippet::-webkit-scrollbar-track{background:var(--panel)}
+nav::-webkit-scrollbar-thumb,.dock-html::-webkit-scrollbar-thumb,pre.snippet::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px;border:2px solid var(--panel)}
+nav::-webkit-scrollbar-thumb:hover,.dock-html::-webkit-scrollbar-thumb:hover,pre.snippet::-webkit-scrollbar-thumb:hover{background:var(--accent)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;cursor:pointer}
 .card:hover{border-color:var(--accent)}
@@ -524,15 +549,16 @@ nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#deta
 .card .sub{color:var(--dim);font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .chip{background:var(--chip);border-radius:10px;padding:1px 8px;font-size:11px;color:var(--dim)}
-#graph-wrap{display:flex;flex-direction:column}
+/* 业务流程图面板内部布局：工具栏 + 图满铺区域 + 图例，高度跟随 dockview 面板自适应。 */
+.dock-graph{height:100%;display:flex;flex-direction:column}
+.graph-toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel);flex:none}
 .graph-toolbar button{background:var(--chip);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer}
 .graph-toolbar button:hover{border-color:var(--accent)}
 .graph-toolbar .hint{margin-left:auto;color:var(--dim);font-size:11px}
-#graph{height:540px;min-height:220px;cursor:grab;flex:none;user-select:none}
-#graph svg text{user-select:none}
-#graph:active{cursor:grabbing}
-#graph svg{display:block;width:100%;height:100%}
-#graph-resize{margin:0}
+.graph-mount{flex:1;min-height:0;cursor:grab;user-select:none}
+.graph-mount svg text{user-select:none}
+.graph-mount:active{cursor:grabbing}
+.graph-mount svg{display:block;width:100%;height:100%}
 .flow-node{cursor:grab}
 .flow-node:active{cursor:grabbing}
 .flow-node .node-mask{fill:#000;opacity:0.35;transform:translate(2px,3px)}
@@ -549,7 +575,7 @@ nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#deta
 .edge-label-bg{fill:#10141f;fill-opacity:.92;pointer-events:none}
 .edge-label{font-size:10px;fill:#9aa3b8;font-family:"Segoe UI",sans-serif;text-anchor:middle}
 .edge-label.dashed{fill:#e5b458}
-#legend{display:flex;flex-wrap:wrap;gap:10px;padding:8px 10px;font-size:11px;color:var(--dim);border-top:1px solid var(--line)}
+#legend{display:flex;flex-wrap:wrap;gap:10px;padding:8px 10px;font-size:11px;color:var(--dim);border-top:1px solid var(--line);flex:none}
 #legend .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
 /* markdown-body 默认跟随系统浅/深色偏好；页面自身固定深色，此处强制复用官方 dark 变量不跟系统切换 */
 .markdown-body{
@@ -559,17 +585,6 @@ nav::-webkit-scrollbar-thumb:hover,#content::-webkit-scrollbar-thumb:hover,#deta
   --fgColor-default:#e6e9f2;--fgColor-muted:#9198a1;--fgColor-danger:#f85149;--fgColor-success:#3fb950;
 }
 .markdown-body table{width:100%;display:table}
-/* 面板/窗口通用组件：对齐 Unreal Editor 停靠窗口的观感——每块内容都是一个带
-   标题栏的独立“窗口”（边框+圆角+标题栏背景区分于正文），而不是无边界地铺在
-   页面上。业务流程图沿用同一套外壳（.panel + .panel-header），但内容区不加
-   padding（视口需要满铺），其余面板用 .panel-body 承载有内边距的正文。 */
-.panel{border:1px solid var(--line);border-radius:8px;background:#171a22;margin-bottom:14px;overflow:hidden}
-.panel-header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--panel)}
-.panel-header h2{font-size:13px;font-weight:600;margin:0;padding:0;border:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.panel-header .hint{margin-left:auto;color:var(--dim);font-size:11px}
-.panel-toolbar{display:flex;align-items:center;gap:8px;margin-left:8px}
-.panel-body{padding:12px}
-.panel .tech{margin:0;padding:12px}
 .evidence-card{margin-bottom:14px}
 table{border-collapse:collapse;width:100%;font-size:12px}
 td,th{border:1px solid var(--line);padding:5px 8px;text-align:left}
@@ -593,9 +608,8 @@ pre.snippet .tok-macro{color:#dcdcaa}
 details.tech{margin-top:10px;color:var(--dim);font-size:12px}
 details.tech summary{cursor:pointer}
 details.tech code{word-break:break-all}
-#detail h2{font-size:15px;margin-bottom:6px}
-#detail .close{float:right;cursor:pointer;color:var(--dim);font-size:18px}
-#detail h4{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:14px 0 6px}
+.dock-html h2{font-size:15px;margin-bottom:6px}
+.dock-html h4{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin:14px 0 6px}
 .timeline{list-style:none}
 .timeline li{padding:4px 0 4px 16px;border-left:2px solid var(--line);position:relative;font-size:12px}
 .timeline li::before{content:'';position:absolute;left:-5px;top:10px;width:8px;height:8px;border-radius:50%;background:var(--accent)}
@@ -612,9 +626,7 @@ details.tech code{word-break:break-all}
 <main>
   <nav id="nav"></nav>
   <div class="resizer resizer-x" id="resizer-nav" title="拖动调整侧栏宽度"></div>
-  <div id="content"></div>
-  <div class="resizer resizer-x" id="resizer-detail" title="拖动调整详情面板宽度"></div>
-  <aside id="detail"></aside>
+  <div id="dock-container" class="dockview-theme-abyss"></div>
 </main>
 <script id="data" type="application/json">__DATA__</script>
 <script>
@@ -1098,54 +1110,93 @@ function renderFlowGraph(container, flow) {
   };
 }
 
+// 真正的可拖拽/停靠/自由调整布局的窗口系统（dockview-core），对齐 Unreal Editor 停靠窗口：
+// 业务流程图、路线记忆、演进史、技术详情、节点详情等都是独立的 dockview 面板，用户可以
+// 自由拖动改变停靠位置、拖拽分隔条调整大小、把面板拖成标签页或浮动窗口。
+// 只注册两种"组件类型"：'html-panel'（通用，内容就是一段 innerHTML，覆盖除图以外的所有
+// 面板）和 'graph-panel'（业务流程图专用，需要挂载 renderFlowGraph 并绑定工具栏按钮）。
+let _dock = null;
+function ensureDock() {
+  if (_dock) return _dock;
+  const DV = window['dockview-core'];
+  _dock = new DV.DockviewComponent(document.getElementById('dock-container'), {
+    createComponent: options => {
+      if (options.name === 'graph-panel') {
+        const el = document.createElement('div');
+        el.className = 'dock-graph';
+        return {
+          element: el,
+          init: params => {
+            const flow = params.params.flow;
+            const lanes = flow.lanes || [];
+            const legend = lanes.map(l => `<span><span class="sw" style="background:${laneColor(lanes, l)}"></span>${esc(l)}</span>`).join('');
+            el.innerHTML = `<div class="graph-toolbar">
+                <button class="btn-fit" type="button">适应窗口</button>
+                <button class="btn-reset" type="button">重置布局</button>
+                <span class="hint">点节点看证据 / 滚轮缩放 / 拖动空白处平移 / 拖动节点或泳道手动微调（服务端一次性静态分层布局，加载后不会自动移动）</span>
+              </div>
+              <div class="graph-mount"></div>
+              <div id="legend">${legend}</div>`;
+            let graph = renderFlowGraph(el.querySelector('.graph-mount'), flow);
+            const bindToolbar = g => {
+              el.querySelector('.btn-fit').onclick = () => g.fit();
+              el.querySelector('.btn-reset').onclick = () => { graph = g.reset(); bindToolbar(graph); };
+            };
+            if (graph) bindToolbar(graph);
+          },
+        };
+      }
+      // 'html-panel'：通用面板，内容是一段现成的 innerHTML 字符串，params.cls 可选附加
+      // class（比如 markdown-body），update() 支持外部刷新内容（节点详情面板复用同一个）。
+      const el = document.createElement('div');
+      el.className = 'dock-html';
+      return {
+        element: el,
+        init: params => {
+          if (params.params && params.params.cls) el.classList.add(params.params.cls);
+          el.innerHTML = (params.params && params.params.html) || '';
+        },
+        update: event => {
+          if (event.params && 'html' in event.params) el.innerHTML = event.params.html;
+        },
+      };
+    },
+  });
+  return _dock;
+}
+
 function subjectView(s) {
-  let body = `<div class="panel"><div class="panel-header"><h2>${esc(s.name)} ${badge(s.status)}</h2></div>
-    <div class="panel-body"><div class="chips">${(s.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div></div></div>`;
+  const dv = ensureDock();
+  dv.clear();
+  // dockview 面板的 title 只接受纯文本（它自己的默认 tab 渲染器会把传入内容按文本转义显示，
+  // 不会解析 HTML），状态徽标这类 HTML 只能放进面板正文，不能放在 title 里。
+  const overviewHtml = `<p>${badge(s.status)} ${esc(s.status)}</p><div class="chips">${(s.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>`;
+  dv.addPanel({ id: 'overview', component: 'html-panel', title: s.name, params: { html: overviewHtml } });
   if (s.flow) {
-    const lanes = s.flow.lanes || [];
-    const legend = lanes.map(l => `<span><span class="sw" style="background:${laneColor(lanes, l)}"></span>${esc(l)}</span>`).join('');
-    body += `<div class="panel" id="graph-wrap">
-        <div class="panel-header graph-toolbar">
-          <h2>业务流程图</h2>
-          <div class="panel-toolbar">
-            <button id="btn-fit" type="button">适应窗口</button>
-            <button id="btn-reset" type="button">重置布局</button>
-          </div>
-          <span class="hint">点节点看证据 / 滚轮缩放 / 拖动空白处平移 / 拖动节点或泳道手动微调（服务端一次性静态分层布局，加载后不会自动移动）</span>
-        </div>
-        <div id="graph"></div>        <div class="resizer resizer-y" id="graph-resize" title="拖动调整图高度"></div>        <div id="legend">${legend}</div>
-      </div>`;
+    dv.addPanel({ id: 'graph', component: 'graph-panel', title: '业务流程图', params: { flow: s.flow },
+      position: { direction: 'right', referencePanel: 'overview' } });
   } else {
-    body += `<div class="panel"><div class="panel-header"><h2>业务流程图</h2></div><div class="panel-body"><div class="chip">尚无通过质量门禁的流程附注</div></div></div>`;
+    dv.addPanel({ id: 'graph', component: 'html-panel', title: '业务流程图',
+      params: { html: '<div class="chip">尚无通过质量门禁的流程附注</div>' },
+      position: { direction: 'right', referencePanel: 'overview' } });
   }
-  body += `<div class="panel"><div class="panel-header"><h2>路线记忆（${s.memories.length} 次查询累积）</h2></div>
-    <div class="panel-body markdown-body"><table><tr><th></th><th>意图</th><th>步数</th><th>记录时间</th><th>最近校验</th></tr>` +
+  const memHtml = `<table><tr><th></th><th>意图</th><th>步数</th><th>记录时间</th><th>最近校验</th></tr>` +
     s.memories.map(m => `<tr><td>${badge(m.status)}</td><td>${esc(m.intent)}</td><td>${m.step_count}</td>
-      <td>${fmtTime(m.created_at)}</td><td>${fmtTime(m.last_validated_at)}</td></tr>`).join('') + '</table></div></div>';
+      <td>${fmtTime(m.created_at)}</td><td>${fmtTime(m.last_validated_at)}</td></tr>`).join('') + '</table>';
+  dv.addPanel({ id: 'route-memory', component: 'html-panel', title: `路线记忆（${s.memories.length}）`,
+    params: { html: memHtml, cls: 'markdown-body' }, position: { direction: 'below', referencePanel: 'overview' } });
   if (s.evolution.length) {
-    body += `<div class="panel"><div class="panel-header"><h2>演进史</h2></div><div class="panel-body"><ul class="timeline">` + s.evolution.map(ev =>
-      `<li>${fmtTime(ev.created_at)} · ${ev.kind === 'flow' ? '流程附注' : '快照'} ${badge(ev.status)} ${esc(ev.status)}</li>`).join('') + '</ul></div></div>';
+    const evoHtml = `<ul class="timeline">` + s.evolution.map(ev =>
+      `<li>${fmtTime(ev.created_at)} · ${ev.kind === 'flow' ? '流程附注' : '快照'} ${badge(ev.status)} ${esc(ev.status)}</li>`).join('') + '</ul>';
+    dv.addPanel({ id: 'evolution', component: 'html-panel', title: '演进史', params: { html: evoHtml },
+      position: { direction: 'within', referencePanel: 'route-memory' } });
   }
-  body += `<div class="panel"><details class="tech"><summary>技术详情（机器数据）</summary>
+  const techHtml = `<details class="tech" open><summary>技术详情（机器数据）</summary>
     <p>subject_id: <code>${esc(s.id)}</code></p>
     ${s.memories.map(m => `<p>memory <code>${esc(m.id)}</code> @ ${esc(m.branch || '')} ${esc(m.commit || '')}</p>`).join('')}
-  </details></div>`;
-  $('#content').innerHTML = body;
-  if (s.flow) {
-    let graph = renderFlowGraph($('#graph'), s.flow);
-    const bindToolbar = g => {
-      $('#btn-fit').onclick = () => g.fit();
-      $('#btn-reset').onclick = () => { graph = g.reset(); bindToolbar(graph); };
-    };
-    if (graph) {
-      bindToolbar(graph);
-      makeResizer($('#graph-resize'), 'y', 1, {
-        getSize: () => $('#graph').getBoundingClientRect().height,
-        setSize: h => { $('#graph').style.height = h + 'px'; },
-        min: 220, max: 1400,
-      });
-    }
-  }
+  </details>`;
+  dv.addPanel({ id: 'tech-details', component: 'html-panel', title: '技术详情', params: { html: techHtml },
+    position: { direction: 'within', referencePanel: 'route-memory' } });
 }
 
 function nodeDetail(flow, nodeId) {
@@ -1153,8 +1204,7 @@ function nodeDetail(flow, nodeId) {
   if (!n) return;
   const evs = (n.evidence_view && n.evidence_view.length) ? n.evidence_view
     : (n.evidence || []).map(ref => ({ ref }));
-  $('#detail').innerHTML = `<span class="close" onclick="closeDetail()">✕</span>
-    <h2>${esc(n.label)}</h2>
+  const html = `<h2>${esc(n.label)}</h2>
     <p>${esc(n.summary || '')}</p>
     ${(n.details || []).map(d => `<p class="sub">· ${esc(d)}</p>`).join('')}
     <h4>源码证据（${evs.length}）</h4>
@@ -1162,20 +1212,35 @@ function nodeDetail(flow, nodeId) {
     <details class="tech"><summary>技术详情</summary>
       ${(n.evidence_anchors || []).map(a => `<p><code>${esc(a.reference)}</code><br>anchor: <code>${esc(a.anchor_hash)}</code></p>`).join('') || '<p>无锚点哈希</p>'}
     </details>`;
-  $('#detail').classList.add('open');
+  const dv = ensureDock();
+  const title = `节点：${n.label}`;
+  // 注意：这里用 dv.panels.find(...) 而不是 dv.getPanel(id)——实测 getPanel 在这个
+  // 版本里对刚创建不久的面板会返回 undefined（即便该 id 确实存在于 dv.panels 里），
+  // 直接在面板数组里按 id 查找更可靠，避免"panel already exists"报错。
+  const existing = dv.panels.find(p => p.id === 'node-detail');
+  if (existing) {
+    existing.api.setTitle(title);
+    existing.update({ params: { html } });
+    existing.focus();
+  } else {
+    const graphPanel = dv.panels.find(p => p.id === 'graph');
+    dv.addPanel({ id: 'node-detail', component: 'html-panel', title, params: { html },
+      position: graphPanel ? { direction: 'right', referencePanel: 'graph' } : undefined });
+  }
   document.querySelectorAll('.flow-node.sel').forEach(g => g.classList.remove('sel'));
   const g = document.querySelector(`.flow-node[data-id="${cssEsc(nodeId)}"]`);
   if (g) g.classList.add('sel');
 }
 function closeDetail() {
-  $('#detail').classList.remove('open');
-  $('#detail').style.width = '';
-  $('#detail').innerHTML = '';
+  const dv = ensureDock();
+  const p = dv.panels.find(x => x.id === 'node-detail');
+  if (p) dv.removePanel(p);
   document.querySelectorAll('.flow-node.sel').forEach(g => g.classList.remove('sel'));
 }
 
-
 function mapView() {
+  const dv = ensureDock();
+  dv.clear();
   const cards = DATA.subjects.map(s => {
     const rel = (s.relations || []).map(r => `<span class="chip">${esc(r.type)} → ${esc(nameOf(r.target))}</span>`).join('');
     return `<div class="card" onclick="navigateTo('subject/${esc(s.id)}')">
@@ -1186,25 +1251,36 @@ function mapView() {
   const pats = DATA.patterns.map(p => `<div class="card" onclick="navigateTo('pattern/${esc(p.id)}')">
       <h3>${badge(p.status)} ${esc(p.name)}</h3>
       <div class="sub">阶段 ${p.stages.length} · 支撑主题 ${p.members.length}</div></div>`).join('');
-  $('#content').innerHTML = `
-    <div class="panel"><div class="panel-header"><h2>业务主题地图</h2></div><div class="panel-body"><div class="grid">${cards}</div></div></div>
-    <div class="panel"><div class="panel-header"><h2>业务模式（跨主题归纳）</h2></div><div class="panel-body"><div class="grid">${pats || '<span class="chip">暂无</span>'}</div></div></div>`;
+  dv.addPanel({ id: 'map-subjects', component: 'html-panel', title: '业务主题地图', params: { html: `<div class="grid">${cards}</div>` } });
+  dv.addPanel({ id: 'map-patterns', component: 'html-panel', title: '业务模式（跨主题归纳）',
+    params: { html: `<div class="grid">${pats || '<span class="chip">暂无</span>'}</div>` },
+    position: { direction: 'below', referencePanel: 'map-subjects' } });
 }
 
 function patternView(p) {
-  $('#content').innerHTML = `<div class="panel"><div class="panel-header"><h2>${esc(p.name)} ${badge(p.status)}</h2></div></div>
-    <div class="panel"><div class="panel-header"><h2>阶段</h2></div><div class="panel-body markdown-body"><table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
-    ${p.stages.map(st => `<tr><td>${st.index}</td><td>${esc(st.name)}</td><td>${badge(st.status)} ${esc(st.status)}</td></tr>`).join('')}</table></div></div>
-    <div class="panel"><div class="panel-header"><h2>支撑主题</h2></div><div class="panel-body"><div class="grid">
-    ${p.members.map(id => `<div class="card" onclick="navigateTo('subject/${esc(id)}')"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div></div></div>
-    <div class="panel"><details class="tech"><summary>技术详情</summary><p>pattern_id: <code>${esc(p.id)}</code></p></details></div>`;
+  const dv = ensureDock();
+  dv.clear();
+  dv.addPanel({ id: 'p-overview', component: 'html-panel', title: p.name, params: { html: `<p>${badge(p.status)} ${esc(p.status)}</p>` } });
+  const stagesHtml = `<table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
+    ${p.stages.map(st => `<tr><td>${st.index}</td><td>${esc(st.name)}</td><td>${badge(st.status)} ${esc(st.status)}</td></tr>`).join('')}</table>`;
+  dv.addPanel({ id: 'p-stages', component: 'html-panel', title: '阶段', params: { html: stagesHtml, cls: 'markdown-body' },
+    position: { direction: 'right', referencePanel: 'p-overview' } });
+  const membersHtml = `<div class="grid">
+    ${p.members.map(id => `<div class="card" onclick="navigateTo('subject/${esc(id)}')"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div>`;
+  dv.addPanel({ id: 'p-members', component: 'html-panel', title: '支撑主题', params: { html: membersHtml },
+    position: { direction: 'below', referencePanel: 'p-overview' } });
+  const techHtml = `<details class="tech" open><summary>技术详情</summary><p>pattern_id: <code>${esc(p.id)}</code></p></details>`;
+  dv.addPanel({ id: 'p-tech', component: 'html-panel', title: '技术详情', params: { html: techHtml },
+    position: { direction: 'within', referencePanel: 'p-members' } });
 }
 
 function hintsView() {
-  $('#content').innerHTML = `<div class="panel"><div class="panel-header"><h2>避坑记录（失败被自动隔离，不污染成功路线）</h2></div>
-    <div class="panel-body markdown-body"><table><tr><th>命令</th><th>参数</th><th>失败类型</th><th>错误摘要</th><th>时间</th></tr>
+  const dv = ensureDock();
+  dv.clear();
+  const html = `<table><tr><th>命令</th><th>参数</th><th>失败类型</th><th>错误摘要</th><th>时间</th></tr>
     ${DATA.negative_hints.map(h => `<tr><td><code>${esc(h.command)}</code></td><td><code>${esc(h.args || '')}</code></td>
-      <td>${esc(h.failure_type)}</td><td>${esc(h.error || '')}</td><td>${fmtTime(h.created_at)}</td></tr>`).join('')}</table></div></div>`;
+      <td>${esc(h.failure_type)}</td><td>${esc(h.error || '')}</td><td>${fmtTime(h.created_at)}</td></tr>`).join('')}</table>`;
+  dv.addPanel({ id: 'hints', component: 'html-panel', title: '避坑记录（失败被自动隔离，不污染成功路线）', params: { html, cls: 'markdown-body' } });
 }
 
 function nameOf(subjectId) {
@@ -1247,7 +1323,6 @@ function makeResizer(handle, axis, sign, { getSize, setSize, min, max }) {
 }
 
 function route() {
-  closeDetail();
   const hash = location.hash.slice(1) || 'map';
   const [kind, id] = hash.split('/');
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.route === hash));
@@ -1269,15 +1344,13 @@ $('#search').addEventListener('keydown', e => {
   if (hit) navigateTo('subject/' + hit.id);
 });
 
+// nav 侧栏在 dockview 容器之外，是固定的"应用外壳"（类似 Unreal Editor 顶部菜单/工具栏），
+// 不是可变内容窗口，沿用简单的自写拖拽分隔条即可；dockview 内部所有面板自带拖拽分割条，
+// 不需要（也不应该）再额外套一层手动 resizer。
 makeResizer($('#resizer-nav'), 'x', 1, {
   getSize: () => $('#nav').getBoundingClientRect().width,
   setSize: w => { $('#nav').style.width = w + 'px'; },
   min: 160, max: 480,
-});
-makeResizer($('#resizer-detail'), 'x', -1, {
-  getSize: () => $('#detail').getBoundingClientRect().width,
-  setSize: w => { $('#detail').style.width = w + 'px'; },
-  min: 280, max: 900,
 });
 
 $('#meta').textContent = `生成于 ${fmtTime(DATA.generated_at)} · 主题 ${DATA.stats.subject_count} · 路线 ${DATA.stats.memory_count} · 证据 ${DATA.stats.evidence_count} · 数据源 memory.sqlite（本页面为程序化生成产物）`;
@@ -1285,7 +1358,6 @@ $('#meta').textContent = `生成于 ${fmtTime(DATA.generated_at)} · 主题 ${DA
 // （例如用户直接编辑地址栏 # 片段），二者都指向同一个 route() 不会重复触发副作用。
 window.addEventListener('popstate', route);
 window.addEventListener('hashchange', route);
-window.addEventListener('resize', () => { const btn = $('#btn-fit'); if (btn) btn.onclick && btn.onclick(); });
 navRender();
 route();
 </script>
