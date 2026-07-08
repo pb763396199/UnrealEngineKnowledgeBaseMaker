@@ -92,6 +92,15 @@ def test_export_site_generates_single_file_wiki_from_sqlite_only(tmp_path):
     assert "dockview-theme-abyss" in text
     assert "DockviewComponent" in text
     assert "function ensureDock" in text
+    # 布局持久化 + 手动重置：自动保存到 localStorage、页面加载时尝试恢复，仅显式点击
+    # “重置窗口布局”按钮才会清空重铺——导航/搜索等常规操作不能触发布局重置（用户明确要求）。
+    assert "function upsertPanel" in text
+    assert "function pruneUnusedPanels" in text
+    assert "function resetDockLayout" in text
+    assert 'id="btn-reset-layout"' in text
+    assert "onDidLayoutChange" in text
+    assert "localStorage" in text
+    assert "node-detail" in text
     # nav 侧栏仍是自写拖拽分隔条（应用外壳，不是 dockview 内容窗口）；代码可切换换行 + 滚动条统一样式
     assert 'id="resizer-nav"' in text
     assert "function makeResizer" in text

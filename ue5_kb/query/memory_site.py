@@ -622,6 +622,7 @@ details.tech code{word-break:break-all}
   <h1>Memory Wiki</h1>
   <span class="meta" id="meta"></span>
   <input id="search" placeholder="搜索业务 / 别名 / 符号 / 文件… (回车跳转)">
+  <button id="btn-reset-layout" type="button" class="btn ghost" title="放弃已保存的手动调整，恢复当前页面的默认窗口布局">重置窗口布局</button>
 </header>
 <main>
   <nav id="nav"></nav>
@@ -1111,10 +1112,13 @@ function renderFlowGraph(container, flow) {
 }
 
 // 真正的可拖拽/停靠/自由调整布局的窗口系统（dockview-core），对齐 Unreal Editor 停靠窗口：
-// 业务流程图、路线记忆、演进史、技术详情、节点详情等都是独立的 dockview 面板，用户可以
-// 自由拖动改变停靠位置、拖拽分隔条调整大小、把面板拖成标签页或浮动窗口。
+// 业务流程图、信息、节点详情等都是独立的 dockview 面板，用户可以自由拖动改变停靠位置、
+// 拖拽分隔条调整大小、把面板拖成标签页或浮动窗口。
 // 只注册两种"组件类型"：'html-panel'（通用，内容就是一段 innerHTML，覆盖除图以外的所有
-// 面板）和 'graph-panel'（业务流程图专用，需要挂载 renderFlowGraph 并绑定工具栏按钮）。
+// 面板）和 'graph-panel'（业务流程图专用，需要挂载 renderFlowGraph 并绑定工具栏按钮；没有
+// 流程图数据时也用这个组件渲染一条提示语，而不是切换成 'html-panel'——面板一旦创建，其
+// 组件类型不能再变更，同一个 id 要在"有图/无图"之间切换就必须让同一种组件类型都能处理）。
+const DOCK_LAYOUT_KEY = 'ue5kb-memory-wiki-dock-layout-v1';
 let _dock = null;
 function ensureDock() {
   if (_dock) return _dock;
@@ -1124,30 +1128,36 @@ function ensureDock() {
       if (options.name === 'graph-panel') {
         const el = document.createElement('div');
         el.className = 'dock-graph';
+        const render = flow => {
+          if (!flow) {
+            el.innerHTML = '<div class="dock-html"><div class="chip">尚无通过质量门禁的流程附注</div></div>';
+            return;
+          }
+          const lanes = flow.lanes || [];
+          const legend = lanes.map(l => `<span><span class="sw" style="background:${laneColor(lanes, l)}"></span>${esc(l)}</span>`).join('');
+          el.innerHTML = `<div class="graph-toolbar">
+              <button class="btn-fit" type="button">适应窗口</button>
+              <button class="btn-reset" type="button">重置节点位置</button>
+              <span class="hint">点节点看证据 / 滚轮缩放 / 拖动空白处平移 / 拖动节点或泳道手动微调（服务端一次性静态分层布局，加载后不会自动移动）</span>
+            </div>
+            <div class="graph-mount"></div>
+            <div id="legend">${legend}</div>`;
+          let graph = renderFlowGraph(el.querySelector('.graph-mount'), flow);
+          const bindToolbar = g => {
+            el.querySelector('.btn-fit').onclick = () => g.fit();
+            el.querySelector('.btn-reset').onclick = () => { graph = g.reset(); bindToolbar(graph); };
+          };
+          if (graph) bindToolbar(graph);
+        };
         return {
           element: el,
-          init: params => {
-            const flow = params.params.flow;
-            const lanes = flow.lanes || [];
-            const legend = lanes.map(l => `<span><span class="sw" style="background:${laneColor(lanes, l)}"></span>${esc(l)}</span>`).join('');
-            el.innerHTML = `<div class="graph-toolbar">
-                <button class="btn-fit" type="button">适应窗口</button>
-                <button class="btn-reset" type="button">重置布局</button>
-                <span class="hint">点节点看证据 / 滚轮缩放 / 拖动空白处平移 / 拖动节点或泳道手动微调（服务端一次性静态分层布局，加载后不会自动移动）</span>
-              </div>
-              <div class="graph-mount"></div>
-              <div id="legend">${legend}</div>`;
-            let graph = renderFlowGraph(el.querySelector('.graph-mount'), flow);
-            const bindToolbar = g => {
-              el.querySelector('.btn-fit').onclick = () => g.fit();
-              el.querySelector('.btn-reset').onclick = () => { graph = g.reset(); bindToolbar(graph); };
-            };
-            if (graph) bindToolbar(graph);
-          },
+          init: params => render(params.params.flow),
+          update: event => { if (event.params && 'flow' in event.params) render(event.params.flow); },
         };
       }
       // 'html-panel'：通用面板，内容是一段现成的 innerHTML 字符串，params.cls 可选附加
-      // class（比如 markdown-body），update() 支持外部刷新内容（节点详情面板复用同一个）。
+      // class（比如 markdown-body），update() 支持外部刷新内容（导航/搜索切主题时靠这个
+      // 就地刷新已有面板的内容，而不是销毁重建整个窗口布局）。
       const el = document.createElement('div');
       el.className = 'dock-html';
       return {
@@ -1162,21 +1172,61 @@ function ensureDock() {
       };
     },
   });
+  // 布局持久化：用户手动拖拽/停靠/调整大小后自动保存到 localStorage（防抖，避免拖拽/缩放
+  // 过程中的每一帧都写一次），下次打开页面自动恢复上次的窗口摆放。仅在用户点击"重置窗口
+  // 布局"按钮时才会清空这份存档——绝不在导航/搜索等常规交互中自动重置，这是用户明确要求的。
+  let saveTimer = null;
+  _dock.onDidLayoutChange(() => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      try { localStorage.setItem(DOCK_LAYOUT_KEY, JSON.stringify(_dock.toJSON())); } catch (e) { /* 存储不可用时静默跳过，不影响使用 */ }
+    }, 400);
+  });
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(DOCK_LAYOUT_KEY) || 'null'); } catch (e) { saved = null; }
+  if (saved) {
+    try { _dock.fromJSON(saved); } catch (e) { /* 存档和当前面板结构不兼容（比如版本升级后 id/组件变了），忽略，走默认布局 */ }
+  }
   return _dock;
+}
+// 放弃已保存的手动布局，恢复"当前页面"的默认窗口摆放——只由用户点击"重置窗口布局"按钮触发，
+// 绝不在导航/搜索等场景里自动调用。
+function resetDockLayout() {
+  try { localStorage.removeItem(DOCK_LAYOUT_KEY); } catch (e) { /* 忽略 */ }
+  const dv = ensureDock();
+  dv.clear();
+  route();
+}
+// 面板"就地更新或新建"：已存在同 id 面板就刷新标题/内容，不存在才新建（新建时才需要 position
+// 锚点）。避免每次导航/搜索都 dv.clear() 整个布局、丢掉用户手动摆好的位置和尺寸。
+function upsertPanel(dv, opts) {
+  const existing = dv.panels.find(p => p.id === opts.id);
+  if (existing) {
+    if (opts.title !== undefined) existing.api.setTitle(opts.title);
+    existing.update({ params: opts.params });
+    return existing;
+  }
+  return dv.addPanel(opts);
+}
+// 移除"这次路由用不到"的旧面板（比如从主题页切到地图页，业务流程图面板就不再适用）。
+// 节点详情面板（node-detail）永远不在这里被自动移除——用户明确要求它不应被程序主动销毁，
+// 只能由用户自己点面板标签页上的关闭按钮来关掉。
+function pruneUnusedPanels(dv, keepIds) {
+  dv.panels.slice().forEach(p => {
+    if (p.id !== 'node-detail' && keepIds.indexOf(p.id) === -1) dv.removePanel(p);
+  });
 }
 
 function subjectView(s) {
   const dv = ensureDock();
-  dv.clear();
+  pruneUnusedPanels(dv, ['info', 'graph']);
   // dockview 面板的 title 只接受纯文本（它自己的默认 tab 渲染器会把传入内容按文本转义显示，
   // 不会解析 HTML），状态徽标这类 HTML 只能放进面板正文，不能放在 title 里。
   //
-  // 之前把总览/路线记忆/演进史/技术详情拆成 4 个独立 dockview 面板，但这几块内容本身都很
-  // 单薄（总览就一个徽标 + 几个 chip，技术详情就三五行哈希），拆成"可以自由拖拽停靠"的独立
-  // 窗口反而是空占地方、没有实际收益——真正需要独立窗口能力（可大可小、可拖拽调整）的只有
-  // Graph（信息密度高、需要大量空间交互）和节点详情（动态产生、内容因节点而异）。这里改为
-  // 把总览/路线记忆/演进史/技术详情合并进同一个"信息"面板（面板本身依然是 dockview 面板，
-  // 一样可以整体拖拽/停靠/调整大小，只是内部不再无意义地再拆细）。
+  // 总览/路线记忆/演进史/技术详情内容本身都很单薄（总览就一个徽标 + 几个 chip，技术详情就
+  // 三五行哈希），拆成"可以自由拖拽停靠"的独立窗口是空占地方、没有实际收益——真正需要独立
+  // 窗口能力（可大可小、可拖拽调整）的只有 Graph（信息密度高、需要大量空间交互）和节点
+  // 详情（动态产生、内容因节点而异），这里合并进同一个"信息"面板。
   const memHtml = `<h3>路线记忆（${s.memories.length} 次查询累积）</h3>
     <table><tr><th></th><th>意图</th><th>步数</th><th>记录时间</th><th>最近校验</th></tr>` +
     s.memories.map(m => `<tr><td>${badge(m.status)}</td><td>${esc(m.intent)}</td><td>${m.step_count}</td>
@@ -1192,15 +1242,9 @@ function subjectView(s) {
   const infoHtml = `<p>${badge(s.status)} ${esc(s.status)}</p>
     <div class="chips">${(s.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>
     ${memHtml}${evoHtml}${techHtml}`;
-  dv.addPanel({ id: 'info', component: 'html-panel', title: s.name, params: { html: infoHtml, cls: 'markdown-body' } });
-  if (s.flow) {
-    dv.addPanel({ id: 'graph', component: 'graph-panel', title: '业务流程图', params: { flow: s.flow },
-      position: { direction: 'right', referencePanel: 'info' } });
-  } else {
-    dv.addPanel({ id: 'graph', component: 'html-panel', title: '业务流程图',
-      params: { html: '<div class="chip">尚无通过质量门禁的流程附注</div>' },
-      position: { direction: 'right', referencePanel: 'info' } });
-  }
+  upsertPanel(dv, { id: 'info', component: 'html-panel', title: s.name, params: { html: infoHtml, cls: 'markdown-body' } });
+  upsertPanel(dv, { id: 'graph', component: 'graph-panel', title: '业务流程图', params: { flow: s.flow || null },
+    position: { direction: 'right', referencePanel: 'info' } });
 }
 
 function nodeDetail(flow, nodeId) {
@@ -1244,7 +1288,7 @@ function closeDetail() {
 
 function mapView() {
   const dv = ensureDock();
-  dv.clear();
+  pruneUnusedPanels(dv, ['map-subjects', 'map-patterns']);
   const cards = DATA.subjects.map(s => {
     const rel = (s.relations || []).map(r => `<span class="chip">${esc(r.type)} → ${esc(nameOf(r.target))}</span>`).join('');
     return `<div class="card" onclick="navigateTo('subject/${esc(s.id)}')">
@@ -1255,35 +1299,35 @@ function mapView() {
   const pats = DATA.patterns.map(p => `<div class="card" onclick="navigateTo('pattern/${esc(p.id)}')">
       <h3>${badge(p.status)} ${esc(p.name)}</h3>
       <div class="sub">阶段 ${p.stages.length} · 支撑主题 ${p.members.length}</div></div>`).join('');
-  dv.addPanel({ id: 'map-subjects', component: 'html-panel', title: '业务主题地图', params: { html: `<div class="grid">${cards}</div>` } });
-  dv.addPanel({ id: 'map-patterns', component: 'html-panel', title: '业务模式（跨主题归纳）',
+  upsertPanel(dv, { id: 'map-subjects', component: 'html-panel', title: '业务主题地图', params: { html: `<div class="grid">${cards}</div>` } });
+  upsertPanel(dv, { id: 'map-patterns', component: 'html-panel', title: '业务模式（跨主题归纳）',
     params: { html: `<div class="grid">${pats || '<span class="chip">暂无</span>'}</div>` },
     position: { direction: 'below', referencePanel: 'map-subjects' } });
 }
 
 function patternView(p) {
   const dv = ensureDock();
-  dv.clear();
+  pruneUnusedPanels(dv, ['info', 'members']);
   // 同 subjectView：总览/阶段/技术详情内容都比较单薄，合并进一个"信息"面板，不必再拆细；
   // 支撑主题是一组卡片、内容量独立且可能较多，保留为单独面板。
   const stagesHtml = `<h3>阶段</h3><table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
     ${p.stages.map(st => `<tr><td>${st.index}</td><td>${esc(st.name)}</td><td>${badge(st.status)} ${esc(st.status)}</td></tr>`).join('')}</table>`;
   const techHtml = `<details class="tech"><summary>技术详情</summary><p>pattern_id: <code>${esc(p.id)}</code></p></details>`;
   const infoHtml = `<p>${badge(p.status)} ${esc(p.status)}</p>${stagesHtml}${techHtml}`;
-  dv.addPanel({ id: 'info', component: 'html-panel', title: p.name, params: { html: infoHtml, cls: 'markdown-body' } });
+  upsertPanel(dv, { id: 'info', component: 'html-panel', title: p.name, params: { html: infoHtml, cls: 'markdown-body' } });
   const membersHtml = `<div class="grid">
     ${p.members.map(id => `<div class="card" onclick="navigateTo('subject/${esc(id)}')"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div>`;
-  dv.addPanel({ id: 'members', component: 'html-panel', title: '支撑主题', params: { html: membersHtml },
+  upsertPanel(dv, { id: 'members', component: 'html-panel', title: '支撑主题', params: { html: membersHtml },
     position: { direction: 'right', referencePanel: 'info' } });
 }
 
 function hintsView() {
   const dv = ensureDock();
-  dv.clear();
+  pruneUnusedPanels(dv, ['hints']);
   const html = `<table><tr><th>命令</th><th>参数</th><th>失败类型</th><th>错误摘要</th><th>时间</th></tr>
     ${DATA.negative_hints.map(h => `<tr><td><code>${esc(h.command)}</code></td><td><code>${esc(h.args || '')}</code></td>
       <td>${esc(h.failure_type)}</td><td>${esc(h.error || '')}</td><td>${fmtTime(h.created_at)}</td></tr>`).join('')}</table>`;
-  dv.addPanel({ id: 'hints', component: 'html-panel', title: '避坑记录（失败被自动隔离，不污染成功路线）', params: { html, cls: 'markdown-body' } });
+  upsertPanel(dv, { id: 'hints', component: 'html-panel', title: '避坑记录（失败被自动隔离，不污染成功路线）', params: { html, cls: 'markdown-body' } });
 }
 
 function nameOf(subjectId) {
@@ -1346,6 +1390,10 @@ $('#search').addEventListener('keydown', e => {
     ((s.flow && s.flow.nodes) || []).some(n => (n.label || '').toLowerCase().includes(q)));
   if (hit) navigateTo('subject/' + hit.id);
 });
+
+// 手动重置窗口布局：仅此按钮点击会清空已保存的布局存档并重铺默认摆放，导航/搜索等常规
+// 操作绝不会触发这个逻辑（用户明确要求过：不能因为搜索/切换主题就把布局猛地重置掉）。
+$('#btn-reset-layout').addEventListener('click', () => resetDockLayout());
 
 // nav 侧栏在 dockview 容器之外，是固定的"应用外壳"（类似 Unreal Editor 顶部菜单/工具栏），
 // 不是可变内容窗口，沿用简单的自写拖拽分隔条即可；dockview 内部所有面板自带拖拽分割条，
