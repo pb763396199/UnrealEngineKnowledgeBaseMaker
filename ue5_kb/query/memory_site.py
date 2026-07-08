@@ -621,7 +621,7 @@ details.tech code{word-break:break-all}
 <header>
   <h1>Memory Wiki</h1>
   <span class="meta" id="meta"></span>
-  <input id="search" placeholder="搜索业务 / 别名 / 符号 / 文件… (回车跳转)">
+  <input id="search" placeholder="搜索主题/别名/节点/证据/模式/避坑记录…(回车跳转)">
   <button id="btn-reset-layout" type="button" class="btn ghost" title="放弃已保存的手动调整，恢复当前页面的默认窗口布局">重置窗口布局</button>
 </header>
 <main>
@@ -1379,16 +1379,32 @@ function route() {
   mapView();
 }
 
+// 搜索：覆盖主题名/别名/证据文件与符号/节点标题与摘要与细节、业务模式名/阶段名、
+// 避坑记录命令与错误摘要——尽量让"输入个关键词回车"能覆盖页面里大部分可读文本，
+// 而不是之前那样只匹配主题名/别名/证据文件符号/节点标题这几个很窄的字段。
+// 找不到任何匹配时用原生表单校验气泡给出明确反馈（不需要额外 CSS/DOM），而不是
+// 之前那样完全没有任何反应——之前"搜索没反应"很大程度上就是因为匹配范围太窄、
+// 且没有任何找不到时的提示，让人以为搜索框根本没生效。
 $('#search').addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
-  const q = e.target.value.trim().toLowerCase();
+  const input = e.target;
+  input.setCustomValidity('');
+  const raw = input.value.trim();
+  const q = raw.toLowerCase();
   if (!q) return;
-  const hit = DATA.subjects.find(s =>
-    s.name.toLowerCase().includes(q) ||
-    (s.aliases || []).some(a => a.toLowerCase().includes(q)) ||
-    (s.evidence || []).some(ev => (ev.file || '').toLowerCase().includes(q) || (ev.symbol || '').toLowerCase().includes(q)) ||
-    ((s.flow && s.flow.nodes) || []).some(n => (n.label || '').toLowerCase().includes(q)));
-  if (hit) navigateTo('subject/' + hit.id);
+  const hasText = (...vals) => vals.some(v => v != null && String(v).toLowerCase().includes(q));
+  const hitSubject = DATA.subjects.find(s =>
+    hasText(s.name) ||
+    (s.aliases || []).some(a => hasText(a)) ||
+    (s.evidence || []).some(ev => hasText(ev.file, ev.symbol)) ||
+    ((s.flow && s.flow.nodes) || []).some(n => hasText(n.label, n.summary) || (n.details || []).some(d => hasText(d))));
+  if (hitSubject) { navigateTo('subject/' + hitSubject.id); return; }
+  const hitPattern = DATA.patterns.find(p => hasText(p.name) || (p.stages || []).some(st => hasText(st.name)));
+  if (hitPattern) { navigateTo('pattern/' + hitPattern.id); return; }
+  const hitHint = (DATA.negative_hints || []).some(h => hasText(h.command, h.args, h.error));
+  if (hitHint) { navigateTo('hints'); return; }
+  input.setCustomValidity(`未找到与"${raw}"匹配的主题 / 业务模式 / 避坑记录`);
+  input.reportValidity();
 });
 
 // 手动重置窗口布局：仅此按钮点击会清空已保存的布局存档并重铺默认摆放，导航/搜索等常规
