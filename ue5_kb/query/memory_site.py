@@ -1170,33 +1170,37 @@ function subjectView(s) {
   dv.clear();
   // dockview 面板的 title 只接受纯文本（它自己的默认 tab 渲染器会把传入内容按文本转义显示，
   // 不会解析 HTML），状态徽标这类 HTML 只能放进面板正文，不能放在 title 里。
-  const overviewHtml = `<p>${badge(s.status)} ${esc(s.status)}</p><div class="chips">${(s.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>`;
-  dv.addPanel({ id: 'overview', component: 'html-panel', title: s.name, params: { html: overviewHtml } });
-  if (s.flow) {
-    dv.addPanel({ id: 'graph', component: 'graph-panel', title: '业务流程图', params: { flow: s.flow },
-      position: { direction: 'right', referencePanel: 'overview' } });
-  } else {
-    dv.addPanel({ id: 'graph', component: 'html-panel', title: '业务流程图',
-      params: { html: '<div class="chip">尚无通过质量门禁的流程附注</div>' },
-      position: { direction: 'right', referencePanel: 'overview' } });
-  }
-  const memHtml = `<table><tr><th></th><th>意图</th><th>步数</th><th>记录时间</th><th>最近校验</th></tr>` +
+  //
+  // 之前把总览/路线记忆/演进史/技术详情拆成 4 个独立 dockview 面板，但这几块内容本身都很
+  // 单薄（总览就一个徽标 + 几个 chip，技术详情就三五行哈希），拆成"可以自由拖拽停靠"的独立
+  // 窗口反而是空占地方、没有实际收益——真正需要独立窗口能力（可大可小、可拖拽调整）的只有
+  // Graph（信息密度高、需要大量空间交互）和节点详情（动态产生、内容因节点而异）。这里改为
+  // 把总览/路线记忆/演进史/技术详情合并进同一个"信息"面板（面板本身依然是 dockview 面板，
+  // 一样可以整体拖拽/停靠/调整大小，只是内部不再无意义地再拆细）。
+  const memHtml = `<h3>路线记忆（${s.memories.length} 次查询累积）</h3>
+    <table><tr><th></th><th>意图</th><th>步数</th><th>记录时间</th><th>最近校验</th></tr>` +
     s.memories.map(m => `<tr><td>${badge(m.status)}</td><td>${esc(m.intent)}</td><td>${m.step_count}</td>
       <td>${fmtTime(m.created_at)}</td><td>${fmtTime(m.last_validated_at)}</td></tr>`).join('') + '</table>';
-  dv.addPanel({ id: 'route-memory', component: 'html-panel', title: `路线记忆（${s.memories.length}）`,
-    params: { html: memHtml, cls: 'markdown-body' }, position: { direction: 'below', referencePanel: 'overview' } });
-  if (s.evolution.length) {
-    const evoHtml = `<ul class="timeline">` + s.evolution.map(ev =>
-      `<li>${fmtTime(ev.created_at)} · ${ev.kind === 'flow' ? '流程附注' : '快照'} ${badge(ev.status)} ${esc(ev.status)}</li>`).join('') + '</ul>';
-    dv.addPanel({ id: 'evolution', component: 'html-panel', title: '演进史', params: { html: evoHtml },
-      position: { direction: 'within', referencePanel: 'route-memory' } });
-  }
-  const techHtml = `<details class="tech" open><summary>技术详情（机器数据）</summary>
+  const evoHtml = s.evolution.length
+    ? `<h3>演进史</h3><ul class="timeline">` + s.evolution.map(ev =>
+        `<li>${fmtTime(ev.created_at)} · ${ev.kind === 'flow' ? '流程附注' : '快照'} ${badge(ev.status)} ${esc(ev.status)}</li>`).join('') + '</ul>'
+    : '';
+  const techHtml = `<details class="tech"><summary>技术详情（机器数据）</summary>
     <p>subject_id: <code>${esc(s.id)}</code></p>
     ${s.memories.map(m => `<p>memory <code>${esc(m.id)}</code> @ ${esc(m.branch || '')} ${esc(m.commit || '')}</p>`).join('')}
   </details>`;
-  dv.addPanel({ id: 'tech-details', component: 'html-panel', title: '技术详情', params: { html: techHtml },
-    position: { direction: 'within', referencePanel: 'route-memory' } });
+  const infoHtml = `<p>${badge(s.status)} ${esc(s.status)}</p>
+    <div class="chips">${(s.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>
+    ${memHtml}${evoHtml}${techHtml}`;
+  dv.addPanel({ id: 'info', component: 'html-panel', title: s.name, params: { html: infoHtml, cls: 'markdown-body' } });
+  if (s.flow) {
+    dv.addPanel({ id: 'graph', component: 'graph-panel', title: '业务流程图', params: { flow: s.flow },
+      position: { direction: 'right', referencePanel: 'info' } });
+  } else {
+    dv.addPanel({ id: 'graph', component: 'html-panel', title: '业务流程图',
+      params: { html: '<div class="chip">尚无通过质量门禁的流程附注</div>' },
+      position: { direction: 'right', referencePanel: 'info' } });
+  }
 }
 
 function nodeDetail(flow, nodeId) {
@@ -1260,18 +1264,17 @@ function mapView() {
 function patternView(p) {
   const dv = ensureDock();
   dv.clear();
-  dv.addPanel({ id: 'p-overview', component: 'html-panel', title: p.name, params: { html: `<p>${badge(p.status)} ${esc(p.status)}</p>` } });
-  const stagesHtml = `<table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
+  // 同 subjectView：总览/阶段/技术详情内容都比较单薄，合并进一个"信息"面板，不必再拆细；
+  // 支撑主题是一组卡片、内容量独立且可能较多，保留为单独面板。
+  const stagesHtml = `<h3>阶段</h3><table><tr><th>#</th><th>阶段</th><th>状态</th></tr>
     ${p.stages.map(st => `<tr><td>${st.index}</td><td>${esc(st.name)}</td><td>${badge(st.status)} ${esc(st.status)}</td></tr>`).join('')}</table>`;
-  dv.addPanel({ id: 'p-stages', component: 'html-panel', title: '阶段', params: { html: stagesHtml, cls: 'markdown-body' },
-    position: { direction: 'right', referencePanel: 'p-overview' } });
+  const techHtml = `<details class="tech"><summary>技术详情</summary><p>pattern_id: <code>${esc(p.id)}</code></p></details>`;
+  const infoHtml = `<p>${badge(p.status)} ${esc(p.status)}</p>${stagesHtml}${techHtml}`;
+  dv.addPanel({ id: 'info', component: 'html-panel', title: p.name, params: { html: infoHtml, cls: 'markdown-body' } });
   const membersHtml = `<div class="grid">
     ${p.members.map(id => `<div class="card" onclick="navigateTo('subject/${esc(id)}')"><h3>${esc(nameOf(id))}</h3></div>`).join('') || '<span class="chip">暂无</span>'}</div>`;
-  dv.addPanel({ id: 'p-members', component: 'html-panel', title: '支撑主题', params: { html: membersHtml },
-    position: { direction: 'below', referencePanel: 'p-overview' } });
-  const techHtml = `<details class="tech" open><summary>技术详情</summary><p>pattern_id: <code>${esc(p.id)}</code></p></details>`;
-  dv.addPanel({ id: 'p-tech', component: 'html-panel', title: '技术详情', params: { html: techHtml },
-    position: { direction: 'within', referencePanel: 'p-members' } });
+  dv.addPanel({ id: 'members', component: 'html-panel', title: '支撑主题', params: { html: membersHtml },
+    position: { direction: 'right', referencePanel: 'info' } });
 }
 
 function hintsView() {
