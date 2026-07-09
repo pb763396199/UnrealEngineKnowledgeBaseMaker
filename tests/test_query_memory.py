@@ -1292,3 +1292,172 @@ def test_query_memory_same_size_graph_replacement_marks_changed(tmp_path):
     assert validation["overall"] == "changed"
     assert validation["freshness"]["business_path"] == "changed"
     assert validation["reusable_as"] == "route_only"
+
+
+def test_record_memory_auto_refreshes_wiki(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    source_root = tmp_path / "Source"
+    source_root.mkdir()
+
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="trace-wiki-refresh",
+        command="resolve_seed",
+        args=["Feature"],
+        context=_context(source_root),
+        result={"seed": "Feature", "resolution_state": "function", "candidate_count": 1},
+    )
+
+    def runner(command, args):
+        return {"seed": args[0], "resolution_state": "function", "candidate_count": 1}
+
+    recorded = record_memory(
+        skill_dir=skill_dir,
+        trace_id="trace-wiki-refresh",
+        intent="explain_business_flow",
+        seed="Feature",
+        context=_context(source_root),
+        source_root=source_root,
+        command_runner=runner,
+    )
+
+    assert recorded["wiki_refreshed"] is True
+    assert (skill_dir / "memory" / "wiki" / "index.html").exists()
+
+
+def test_attach_business_flow_auto_refreshes_wiki(tmp_path):
+    skill_dir = tmp_path / "Skill"
+    source_root = tmp_path / "Source"
+    source_root.mkdir()
+    source_file = source_root / "Feature.cpp"
+    source_file.write_text("void Feature() {}\n", encoding="utf-8")
+
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="trace-flow-wiki-refresh",
+        command="resolve_seed",
+        args=["Feature"],
+        context=_context(source_root),
+        result={"seed": "Feature", "resolution_state": "function", "candidate_count": 1},
+    )
+
+    def runner(command, args):
+        return {"seed": args[0], "resolution_state": "function", "candidate_count": 1}
+
+    recorded = record_memory(
+        skill_dir=skill_dir,
+        trace_id="trace-flow-wiki-refresh",
+        intent="explain_business_flow",
+        seed="Feature",
+        context=_context(source_root),
+        source_root=source_root,
+        command_runner=runner,
+    )
+    # 先删掉 record_memory 阶段生成的 wiki，确认是 attach_business_flow 自己重新生成的
+    (skill_dir / "memory" / "wiki" / "index.html").unlink()
+
+    flow = {
+        "title": "Demo flow",
+        "nodes": [{"id": "n1", "label": "Feature", "evidence": ["Feature.cpp:1"]}],
+        "edges": [],
+    }
+    result = attach_business_flow(skill_dir=skill_dir, memory_id=recorded["memory_id"], flow=flow, source_root=source_root)
+
+    assert result["wiki_refreshed"] is True
+    assert (skill_dir / "memory" / "wiki" / "index.html").exists()
+
+
+def test_auto_capture_memory_uses_active_session_trace_and_derives_seed(tmp_path):
+    from ue5_kb.query.query_memory import auto_capture_memory
+
+    skill_dir = tmp_path / "Skill"
+    source_root = tmp_path / "Source"
+    source_root.mkdir()
+
+    # 不传 trace_id，模拟 agent 一连串没带 --trace-id 的查询自动归并进同一条会话 trace
+    trace_id = record_query(
+        skill_dir=skill_dir,
+        trace_id=None,
+        command="query_class_info",
+        args=["AFeatureActor"],
+        context=_context(source_root),
+        result={"found_count": 1},
+    )
+    record_query(
+        skill_dir=skill_dir,
+        trace_id=None,
+        command="query_function_info",
+        args=["AFeatureActor"],
+        context=_context(source_root),
+        result={"found_count": 1},
+    )
+
+    def runner(command, args):
+        return {"found_count": 1}
+
+    captured = auto_capture_memory(
+        skill_dir=skill_dir,
+        trace_id=None,
+        intent=None,
+        seed=None,
+        context=_context(source_root),
+        source_root=source_root,
+        command_runner=runner,
+    )
+
+    assert captured["schema"] == "query-memory-auto-capture/v1"
+    assert captured["trace_id"] == trace_id
+    assert captured["seed"] == "AFeatureActor"
+    assert captured["intent"] == "auto_capture"
+    assert captured["auto_derived_seed"] is True
+    assert captured["auto_derived_trace_id"] is True
+    assert captured["step_count"] == 2
+
+
+def test_auto_capture_memory_errors_without_active_session_or_explicit_trace(tmp_path):
+    from ue5_kb.query.query_memory import auto_capture_memory
+
+    skill_dir = tmp_path / "Skill"
+    result = auto_capture_memory(
+        skill_dir=skill_dir,
+        trace_id=None,
+        intent=None,
+        seed=None,
+        context={},
+        source_root=None,
+        command_runner=lambda command, args: {},
+    )
+
+    assert "error" in result
+
+
+def test_auto_capture_memory_respects_explicit_overrides(tmp_path):
+    from ue5_kb.query.query_memory import auto_capture_memory
+
+    skill_dir = tmp_path / "Skill"
+    source_root = tmp_path / "Source"
+    source_root.mkdir()
+
+    record_query(
+        skill_dir=skill_dir,
+        trace_id="explicit-trace",
+        command="query_class_info",
+        args=["AFeatureActor"],
+        context=_context(source_root),
+        result={"found_count": 1},
+    )
+
+    captured = auto_capture_memory(
+        skill_dir=skill_dir,
+        trace_id="explicit-trace",
+        intent="my_custom_intent",
+        seed="MyCustomSeed",
+        context=_context(source_root),
+        source_root=source_root,
+        command_runner=lambda command, args: {"found_count": 1},
+    )
+
+    assert captured["seed"] == "MyCustomSeed"
+    assert captured["intent"] == "my_custom_intent"
+    assert captured["auto_derived_seed"] is False
+    assert captured["auto_derived_trace_id"] is False

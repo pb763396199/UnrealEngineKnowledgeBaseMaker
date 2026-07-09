@@ -94,6 +94,7 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | `query_audit` | `[trace_id] [--limit N]` 或 `[N]` | 查看 `memory/memory.sqlite` 中的查询审计记录；单个数字参数按 limit 处理 |
 | `query_audit_report` | `[trace_id] [limit=200] [broad_threshold=40]` | 基于审计记录生成确定性静态统计报告，包含失败率、宽泛搜索和验收状态 |
 | `query_memory_record` | `<trace_id> <intent> <seed>` | 把一轮查询 trace 或有价值片段记录为可复用路线，不保存业务事实 |
+| `query_memory_auto_capture` | `[trace_id] [intent] [seed]` | 徜底安全网：三个参数都可省略，默认用当前活跃会话 trace（见 `preflight` 返回的 `active_session_trace`）+ 历史步骤确定性推导的 seed 沉淀本轮路线，防止 agent 忘记显式调 `query_memory_record` |
 | `query_memory_search` | `<keyword> [intent] [limit=20]` | 搜索已沉淀路线，也返回自动审计日志中的 trace 片段候选 |
 | `query_memory_validate` | `<memory_id>` | 纯算法校验历史路线是否对当前 KB/源码仍新鲜 |
 | `query_memory_replay` | `<memory_id>` | 在当前 KB 上重跑历史路线 |
@@ -105,6 +106,7 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | `query_memory_render` | `[subject\|pattern\|all] [view=full]` | 从 `memory/memory.sqlite` 程序化生成 Obsidian Markdown/Mermaid；`full` 保持主文档 |
 | `query_memory_render_graph` | `[subject\|pattern\|all] [business\|evidence\|evolution\|query-path]` | 生成独立 graph 视图：业务、证据、演进、查询路径 |
 | `query_memory_attach_flow` | `<memory_id> <flow.json>` | 把本轮已验证证据归纳出的业务流程图附加到 memory；返回质量评分和 `publication_status`，Markdown 只默认展示 `published` 泳道业务图 |
+| `query_memory_render_site` | - | 从 `memory/memory.sqlite` 生成整库交互式 Wiki（`memory/wiki/index.html`，可拖拽/停靠窗口，双击直接在浏览器打开，无需服务器） |
 | `query_callees` | `<function_name> [class_name] [limit=50] [resolution_state=resolved]` | 查询函数调用目标，默认仅 resolved |
 | `query_callers` | `<function_name> [class_name] [limit=50] [resolution_state=resolved]` | 查询调用某函数的位置，默认仅 resolved |
 | `query_symbol_references` | `<symbol_name> [limit=50] [resolution_state=resolved]` | 查询符号引用，默认仅 resolved |
@@ -130,8 +132,8 @@ description: UE{ENGINE_VERSION} 引擎源码知识库 - 查询模块、类、函
 | 业务探索 | `query_static_closure`, `query_flow`, `trace_flow_path` | 高/中 | 复杂链路用它们导航，再回源验证 |
 | 实验聚合 | `trace_business_flow` | 实验 | 首轮证据聚合和画图；不能作为完整业务闭环证明 |
 | 审计复盘 | `query_audit`, `query_audit_report` | 中/高 | 统计本轮调用次数、失败率和宽泛搜索 |
-| 查询记忆 | `query_memory_search`, `query_memory_validate`, `query_memory_replay`, `query_memory_record` | 高 | 复用已沉淀路线和自动审计 trace 片段，但必须重跑当前事实 |
-| 记忆可视化 | `query_memory_subjects`, `query_memory_attach_flow`, `query_memory_render`, `query_memory_render_graph`, `query_memory_snapshot`, `query_memory_negative_hints` | 中/高 | 查看业务证据图谱、保存业务流程附注、生成 Obsidian 图、导出多视图 graph、归档快照、复查避坑 |
+| 查询记忆 | `query_memory_search`, `query_memory_validate`, `query_memory_replay`, `query_memory_record`, `query_memory_auto_capture` | 高 | 复用已沉淀路线和自动审计 trace 片段，但必须重跑当前事实 |
+| 记忆可视化 | `query_memory_subjects`, `query_memory_attach_flow`, `query_memory_render`, `query_memory_render_graph`, `query_memory_render_site`, `query_memory_snapshot`, `query_memory_negative_hints` | 中/高 | 查看业务证据图谱、保存业务流程附注、生成 Obsidian 图、导出多视图 graph、生成交互式 Wiki、归档快照、复查避坑 |
 | 版本统计 | `get_statistics`, `get_kb_info` | 中 | 确认 KB 规模、版本和来源 |
 
 ### 常见任务路径
@@ -193,6 +195,7 @@ py "{SKILL_PATH}/impl.py" query_memory_render_graph FeatureLayer business
 py "{SKILL_PATH}/impl.py" query_memory_render_graph FeatureLayer evidence
 py "{SKILL_PATH}/impl.py" query_memory_render_graph FeatureLayer evolution
 py "{SKILL_PATH}/impl.py" query_memory_render_graph FeatureLayer query-path
+py "{SKILL_PATH}/impl.py" query_memory_render_site
 
 # 静态证据包与引用图
 py "{SKILL_PATH}/impl.py" resolve_seed FMyFeatureFragment
@@ -224,6 +227,43 @@ py "{SKILL_PATH}/impl.py" get_statistics
 14. **业务流程附注必须过质量门槛**：`query_memory_attach_flow` 会给出确定性评分和 `publication_status`；低于 flow.json 声明的 `quality_baseline` 或通用默认基线时只保存为 `candidate`，默认 Markdown 不展示；必须补齐节点、边、泳道、分支条件、节点证据和关键实体覆盖后重挂成 `published`
 15. **业务流程附注不是原始事实源**：`query_memory_attach_flow` 保存的是基于当前源码证据归纳出的业务图；最终事实仍必须能由 `query_memory_validate/replay`、文件 hash、anchor hash 和当前 `source_slice/get_function_implementation` 复查
 16. **Obsidian Markdown 是生成物**：`query_memory_render` 只从 `memory/memory.sqlite` 生成可视化 Markdown/Mermaid，不能把 MD 当事实源手写维护；需要改格式时重新生成
+17. **定期生成交互式 Wiki 并告知用户**：完成一轮有价值的查询或讲完一条完整业务流程后（尤其是 `query_memory_attach_flow` 成功变为 `published` 之后），应调用 `query_memory_render_site` 刷新 `memory/wiki/index.html`，并把该路径告诉用户，方便可视化复查积累的业务知识
+18. **不传 `--trace-id` 也会自动归并为同一会话**：同一 Skill 30 分钟内的连续查询会自动归并进同一条 trace（见 `preflight` 返回的 `active_session_trace`/`active_session_trace_hint`），不需要每次都记得显式传参；`query_memory_record`/`query_memory_attach_flow` 成功后会自动重新生成 wiki（返回的 `wiki_refreshed` 字段），不需要再单独调一次 `query_memory_render_site`；即使完全忘记这些步骤，任务结束前调一次不传任何参数的 `query_memory_auto_capture` 也能保证本轮调查不丢失（但不会自动产出业务流程图，那一步仍需人工/AI 归纳）
+
+## 何时主动归纳业务流程图（触发规则）
+
+不是每次查询都要产出业务流程图（`query_memory_attach_flow`）；只有当调查真正构成一条业务链路时才值得沩淀。按以下顺序判断是否触发：
+
+### 1. 显式触发（用户说了 = 必须做）
+
+| 类别 | 示例短语 |
+|---|---|
+| 直接业务流程请求 | “讲一下 X 完整流程”、“X 是怎么从创建到消费的”、“画一个 X 的业务流程图”、“X 的完整链路/生命周期是什么”、“X 端到端是怎么工作的” |
+| 复盘/交接请求 | “把这次调查记下来”、“存到 memory 里”、“生成一下 wiki”、“给团队留个档”、“这个值得沩淀一下” |
+| 直接下工具指令 | 用户直接提到 `query_memory_attach_flow`/业务流程图/memory wiki 等术语 |
+
+命中后必须在给出最终答案前完成：`query_memory_record`（若无活跃 trace）→ 编写 flow.json → `query_memory_attach_flow` → 确认 `publication_status=published` → 告知用户 wiki 路径。不能只回答问题就结束。
+
+### 2. 隐式信号（用户没明说，AI 自主判断）
+
+| 信号 | 判定方法 |
+|---|---|
+| S1 证据链够长 | 本轮回答引用了 ≥ 4 个不同函数/类的源码证据，且彼此有调用/数据依赖（不是并列罗列） |
+| S2 静态探索已闭合 | 用过 `query_static_closure`/`query_flow`/`trace_business_flow`，且覆盖率/闭合度较高 |
+| S3 问题措辞暗示业务流程 | 原始问题含“为什么”、“怎么实现”、“完整”、“端到端”、“生命周期”、“流程”、“链路”、“流转”等词 |
+| S4 高频未沩淀 | `query_memory_search` 该 seed 已有多条历史 trace，但从未 `published` 过 |
+| S5 本轮调查够“重” | `preflight.active_session_trace` 显示本轮已调用 ≥ 5 个真实查询命令 |
+
+### 3. 决策规则
+
+- 显式短语命中 → **必须做**（同上）
+- 无显式短语但隐式信号 **≥2 个** 命中 → **主动做**，完成后在回答末尾说明“已把本轮调查沩淀为业务流程图，可在 Memory Wiki 查看：`<path>`”
+- 仅 **1 个** 隐式信号命中 → **建议**（回答末尾加一句“这条链路看起来值得沩淀，需要我生成业务流程图吗？”），不强行打断
+- 都不命中（单次事实查询，如“这个函数签名是什么”）→ **不主动做**，让自动的 session-trace + `query_memory_auto_capture` 典底即可
+
+### 4. 静态后端的边界（不要越界）
+
+语义归纳（什么算一次完整业务解释、节点怎么分组、泳道怎么划分）本质上需要 AI/人工判断，`attach_business_flow` 的 `evidence_validation` 只校验 `file:line` 是否真实存在，不校验语义是否合理；不要指望有任何静态命令能自动产出业务流程图——这一步永远需要显式调用并附带人工归纳的 flow.json。
 
 ---
 

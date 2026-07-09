@@ -238,6 +238,78 @@ def resolve_trace_id(explicit_trace_id: Optional[str] = None) -> str:
     return uuid.uuid4().hex
 
 
+DEFAULT_SESSION_TRACE_TTL_SECONDS = 1800  # 30 分钟：同一 Skill 30 分钟内的连续查询自动归并为同一条 trace
+_SESSION_TRACE_FILENAME = "session_trace.json"
+
+
+def _session_trace_path(skill_dir: Path) -> Path:
+    return Path(skill_dir) / "memory" / _SESSION_TRACE_FILENAME
+
+
+def _write_session_trace(skill_dir: Path, trace_id: str, *, now: Optional[float] = None) -> None:
+    """尽力而为地把当前活跃 trace_id 写回会话文件；写失败不影响查询主流程。"""
+    path = _session_trace_path(skill_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"trace_id": trace_id, "last_used_at": now if now is not None else time.time()}
+        tmp_path = path.with_name(path.name + f".tmp-{os.getpid()}")
+        tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError:
+        pass
+
+
+def peek_session_trace(skill_dir: Path, *, ttl_seconds: int = DEFAULT_SESSION_TRACE_TTL_SECONDS) -> Optional[Dict[str, Any]]:
+    """只读查看当前仍在 TTL 内的会话 trace，不刷新/不生成；供 preflight 等只读展示使用。"""
+    path = _session_trace_path(skill_dir)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        trace_id = data.get("trace_id")
+        last_used_at = float(data.get("last_used_at", 0))
+    except Exception:
+        return None
+    age_seconds = time.time() - last_used_at
+    if not trace_id or age_seconds > ttl_seconds:
+        return None
+    return {"trace_id": trace_id, "last_used_at": last_used_at, "age_seconds": age_seconds}
+
+
+def resolve_session_trace_id(
+    skill_dir: Path,
+    explicit_trace_id: Optional[str] = None,
+    *,
+    ttl_seconds: int = DEFAULT_SESSION_TRACE_TTL_SECONDS,
+) -> str:
+    """解析本次查询应归属的 trace_id，让"整轮调查自动归并成同一条可复用路线"无需 agent 每次记得传 --trace-id。
+
+    优先级：显式参数（CLI --trace-id 或环境变量 UE5KB_TRACE_ID）> 仍在 ttl_seconds 内
+    活跃的会话 trace（memory/session_trace.json）> 新生成的 trace_id。
+    无论走哪条路径，都会刷新会话文件的 last_used_at，让"接下来 ttl_seconds 分钟内的
+    所有查询"继续自动归入同一条 trace；超过 ttl_seconds 无新查询后自动"过期"，下一次
+    查询会开启新的一条 trace，避免跨天/跨任务的查询被错误地拼在一起。
+    """
+    if explicit_trace_id:
+        _write_session_trace(skill_dir, explicit_trace_id)
+        return explicit_trace_id
+
+    env_trace_id = os.environ.get("UE5KB_TRACE_ID")
+    if env_trace_id:
+        _write_session_trace(skill_dir, env_trace_id)
+        return env_trace_id
+
+    now = time.time()
+    active = peek_session_trace(skill_dir, ttl_seconds=ttl_seconds)
+    if active:
+        _write_session_trace(skill_dir, active["trace_id"], now=now)
+        return active["trace_id"]
+
+    new_trace_id = uuid.uuid4().hex
+    _write_session_trace(skill_dir, new_trace_id, now=now)
+    return new_trace_id
+
+
 def summarize_args(args: Iterable[Any]) -> str:
     """Store only a compact argument summary, never large result/source bodies."""
     compact: List[str] = []
@@ -739,7 +811,7 @@ def record_query(
 ) -> str:
     audit = QueryAudit.for_skill(skill_dir)
     try:
-        resolved_trace_id = resolve_trace_id(trace_id)
+        resolved_trace_id = resolve_session_trace_id(skill_dir, trace_id)
         inferred_error = error
         if inferred_error is None and isinstance(result, dict) and result.get("error"):
             inferred_error = str(result.get("error"))

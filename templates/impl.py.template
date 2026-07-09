@@ -17,9 +17,10 @@ from typing import Dict, List, Any, Optional
 
 from ue5_kb.branch_manager import BranchManager, safe_pickle_load
 from ue5_kb.core.files_fts_index import search_files as _search_files_index
-from ue5_kb.query.query_audit import QueryAudit, record_query, resolve_trace_id
+from ue5_kb.query.query_audit import QueryAudit, record_query, resolve_trace_id, resolve_session_trace_id, peek_session_trace
 from ue5_kb.query.query_memory import (
     attach_business_flow as _query_memory_attach_flow,
+    auto_capture_memory as _query_memory_auto_capture,
     diff_memory as _query_memory_diff,
     list_negative_hints as _query_memory_negative_hints,
     list_subjects as _query_memory_subjects,
@@ -110,8 +111,16 @@ def _get_runtime_context() -> Dict[str, Any]:
 
 
 def preflight() -> Dict[str, Any]:
-    """查询前检查 KB/source/indices 新鲜度"""
-    return _get_runtime_context()
+    """查询前检查 KB/source/indices 新鲜度，并附带当前自动会话 trace 信息"""
+    context = _get_runtime_context()
+    active_trace = peek_session_trace(SKILL_DIR)
+    context["active_session_trace"] = active_trace
+    if active_trace:
+        context["active_session_trace_hint"] = (
+            "最近30分钟内的查询已自动归并进这条 trace，不传 --trace-id 也会继续归入；"
+            f"完成调查后可直接 query_memory_record {active_trace['trace_id']} <intent> <seed> 沉淀本轮路线"
+        )
+    return context
 
 
 def query_audit(trace_id: str = None, limit: int = 20) -> Dict[str, Any]:
@@ -139,6 +148,21 @@ def _memory_command_runner(command: str, args: List[str]) -> Dict[str, Any]:
 def query_memory_record(trace_id: str, intent: str, seed: str) -> Dict[str, Any]:
     """把一次查询 trace 提升为可复用路线；不保存业务事实。"""
     return _query_memory_record(
+        skill_dir=SKILL_DIR,
+        trace_id=trace_id,
+        intent=intent,
+        seed=seed,
+        context=_get_runtime_context(),
+        source_root=SOURCE_ROOT,
+        command_runner=_memory_command_runner,
+    )
+
+
+def query_memory_auto_capture(trace_id: str = None, intent: str = None, seed: str = None) -> Dict[str, Any]:
+    """兜底安全网：不传任何参数时，自动用当前活跃会话 trace + 历史步骤确定性推导的 seed，
+    把这轮调查沉淀为可复用路线；即使 agent 忘记显式调 query_memory_record 也能保证不丢失本轮查询。
+    不会自动产出业务流程图（那一步仍需 query_memory_attach_flow 手工归纳）。"""
+    return _query_memory_auto_capture(
         skill_dir=SKILL_DIR,
         trace_id=trace_id,
         intent=intent,
@@ -2460,7 +2484,7 @@ if __name__ == "__main__":
     def _command_requires_fresh(command):
         return command not in {
             "preflight", "query_audit", "query_audit_report", "get_kb_info",
-            "query_memory_search", "query_memory_record", "query_memory_promote",
+            "query_memory_search", "query_memory_record", "query_memory_auto_capture", "query_memory_promote",
             "query_memory_subjects", "query_memory_negative_hints",
             "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_render_site", "query_memory_attach_flow",
         }
@@ -2512,7 +2536,9 @@ if __name__ == "__main__":
         print("  query_memory_render [subject|pattern|all] [view=full] - 生成 Obsidian Markdown/Mermaid", file=sys.stderr)
         print("  query_memory_render_graph [subject|pattern|all] [business|evidence|evolution|query-path] - 生成 graph 视图", file=sys.stderr)
         print("  query_memory_render_site                   - 生成整库交互 wiki（memory/wiki/index.html 双击即开）", file=sys.stderr)
+        print("  query_memory_auto_capture [trace_id] [intent] [seed] - 徜底：不传参数时自动用当前会话 trace 沉淀本轮路线", file=sys.stderr)
         print("  query_memory_attach_flow <memory_id> <flow.json> - 为历史路线附加可读业务流程图（证据程序化校验）", file=sys.stderr)
+        print("  何时主动归纳业务流程图: 用户明确要求(如'讲完整流程'/'沩淀一下') 必做；无明说但证据链≥ 4 节点+探索已闭合+问题含'完整/端到端/流程'等信号≥ 2 个时主动做，完整规则见 SKILL.md「何时主动归纳业务流程图」", file=sys.stderr)
         print("  Memory store: memory/memory.sqlite; Obsidian view: memory/obsidian/", file=sys.stderr)
         print("  query_callees <function_name> [class_name] [limit] [resolution_state=resolved|all|ambiguous|unresolved] - 查询函数调用目标", file=sys.stderr)
         print("  query_callers <function_name> [class_name] [limit] [resolution_state=resolved|all|ambiguous|unresolved] - 查询调用该函数的位置", file=sys.stderr)
@@ -2651,6 +2677,11 @@ if __name__ == "__main__":
         if command == "query_memory_record":
             _require(args, 3, "Missing query_memory_record arguments")
             return query_memory_record(args[0], args[1], args[2])
+        if command == "query_memory_auto_capture":
+            trace_id = args[0] if len(args) > 0 and args[0] else None
+            intent = args[1] if len(args) > 1 and args[1] else None
+            seed = args[2] if len(args) > 2 and args[2] else None
+            return query_memory_auto_capture(trace_id, intent, seed)
         if command == "query_memory_search":
             _require(args, 1, "Missing keyword argument")
             intent = args[1] if len(args) > 1 else None
@@ -2763,7 +2794,7 @@ if __name__ == "__main__":
         if command not in {
             "query_audit", "query_audit_report",
             "query_memory_search", "query_memory_validate", "query_memory_replay",
-            "query_memory_diff", "query_memory_record", "query_memory_promote",
+            "query_memory_diff", "query_memory_record", "query_memory_auto_capture", "query_memory_promote",
             "query_memory_subjects", "query_memory_negative_hints",
             "query_memory_snapshot", "query_memory_render", "query_memory_render_graph", "query_memory_render_site", "query_memory_attach_flow",
         } and not no_audit:
@@ -2781,7 +2812,7 @@ if __name__ == "__main__":
         print(json.dumps(result, ensure_ascii=True, indent=2))
 
     except Exception as e:
-        resolved_trace_id = resolve_trace_id(trace_id)
+        resolved_trace_id = resolve_session_trace_id(SKILL_DIR, trace_id)
         if not no_audit:
             try:
                 _record_query_audit(

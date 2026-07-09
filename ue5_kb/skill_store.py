@@ -66,7 +66,7 @@ def _backup_existing_path(path: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = path.with_name(f"{path.name}.bak-{stamp}")
     counter = 1
-    while backup.exists():
+    while os.path.lexists(backup):
         backup = path.with_name(f"{path.name}.bak-{stamp}-{counter}")
         counter += 1
     path.rename(backup)
@@ -75,20 +75,28 @@ def _backup_existing_path(path: Path) -> Path:
 
 def _restore_backup(backup: Optional[Path], destination: Path) -> bool:
     """Restore a provider artifact that was backed up before a failed install."""
-    if not backup or not backup.exists() or destination.exists():
+    if not backup or not os.path.lexists(backup) or os.path.lexists(destination):
         return False
     backup.rename(destination)
     return True
 
 
 def create_directory_link(source: Path, destination: Path, force: bool = False) -> Dict[str, str]:
-    """Create a provider-visible directory link when it is safe to do so."""
+    """Create a provider-visible directory link when it is safe to do so.
+
+    Uses `os.path.lexists` (not `Path.exists`) to detect an existing destination:
+    a dangling symlink/junction whose target no longer exists still occupies the
+    path on disk, but `Path.exists()` follows the link and reports `False` for it.
+    Relying on `Path.exists()` here would skip the backup/replace step entirely and
+    make both the `os.symlink` and `mklink /J` attempts fail with "already exists",
+    silently leaving the stale/broken link in place.
+    """
     source = Path(source)
     destination = Path(destination)
 
-    if destination.exists():
+    if os.path.lexists(destination):
         try:
-            if destination.resolve() == source.resolve():
+            if destination.exists() and destination.resolve() == source.resolve():
                 return {"status": "ok", "action": "exists", "path": str(destination)}
         except OSError:
             pass

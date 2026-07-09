@@ -483,6 +483,7 @@ py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" search_modules Runtime
 | 查询记忆 | `query_memory_record` / `query_memory_promote` | 中 | 把有价值的 trace 或片段沉淀为更稳定路线，不保存业务结论；不要求整轮查询完美 PASS。 |
 | 记忆图谱 | `query_memory_subjects` / `query_memory_negative_hints` | 中 | 查看 evidence-bound 业务主题视图、file/module/symbol 证据命中和隔离失败避坑提示。 |
 | 记忆可视化 | `query_memory_snapshot` / `query_memory_render` | 中 | 保存 subject/pattern 完整 JSON 快照，并程序化生成 Obsidian Markdown/Mermaid。 |
+| 记忆可视化 | `query_memory_render_site` | 中 | 生成整库交互式 Memory Wiki（`memory/wiki/index.html`，可拖拽窗口/搜索，双击离线打开）；也可以直接用 `ue5kb wiki open` 一步生成并打开，见下方「查看 Memory Wiki」。 |
 | 维护 | `get_statistics` / `get_kb_info` | 中 | 看 KB 规模、版本、来源和路径。 |
 | 分支维护 | `init` / `register` / `update` / `status` / `set_active` / `check_freshness` / `remove` / `gc` | 低到中 | 管理多分支/多变体 KB；普通问答不优先用。 |
 
@@ -500,6 +501,27 @@ py "C:\Users\pb763\.agents\skills\ue5kb-5.5.4\impl.py" search_modules Runtime
 注意：复杂业务答案必须回到 `source_slice` 或 `get_function_implementation` 的源码证据。`trace_business_flow` 只是证据聚合器，不是完整业务闭环证明。
 历史查询记忆也只能复用路线和静态证据图谱，不能复用自然语言业务事实；Memory 是插件/引擎级共享资产，不按 branch/variant 分库。记录时保存 branch、variant、commit、dirty、fingerprint 作为 provenance；跨分支复用时由当前 KB fresh 状态、证据文件 hash、命令 replay 和业务图变化决定新鲜度。`query_memory_search` 会像 SQL-ManyThing 的 `:trace` 一样显示自动审计日志里的可复用 trace 片段，也会直接返回 file/module/symbol evidence anchor；后续可用 `query_memory_record` 沉淀成稳定路线。同一 intent 下的多个 subject 会自动形成 pattern 视图；失败步骤只进入 `query_memory_negative_hints`，不参与主图 replay/validate；`query_memory_render` 生成的 Obsidian Markdown/Mermaid 是可再生成展示层，不是事实源；`query_memory_validate` 返回非 `fresh` 时必须重跑和补查。
 `query_memory_validate` 的常见状态：`fresh` 可按路线重跑并复核证据；`equivalent` 表示文件 hash 变了但锚点仍一致，必须重新取源码切片；`expanded` 表示当前图发现新增边或 frontier；`changed`、`broken`、`unknown` 不能作为事实来源。
+
+## 查看 Memory Wiki
+
+每个已生成的 Skill 只要沉淀过 memory（`query_memory_record` / `query_memory_attach_flow`），就可以用 `ue5kb wiki` 命令一步生成并在浏览器打开交互式业务知识页面，不需要手动拼 `impl.py` 路径或找 `memory/wiki/index.html`：
+
+```bash
+# 列出这台机器上所有已生成的 Skill 及其 Memory Wiki 状态（业务主题数、是否已生成过 wiki 等）
+ue5kb wiki list
+
+# 重新生成并在默认浏览器打开指定 Skill 的 Memory Wiki
+ue5kb wiki open ue5kb-5.5.4
+ue5kb wiki open MyPlugin-kb
+
+# 在引擎/插件目录下直接运行，自动检测对应 Skill（同 `ue5kb init` 的自动检测逻辑）
+cd "F:\MyProject\Plugins\MyPlugin" && ue5kb wiki open
+
+# 只重新生成文件，不自动打开浏览器（适合 CI/脚本，或手动用其他方式打开）
+ue5kb wiki open ue5kb-5.5.4 --no-browser
+```
+
+`ue5kb wiki open` 内部直接复用 `ue5_kb.query.memory_site.export_site`，不会另起 CLI 子进程，也不依赖手写路径；生成后会打印业务主题/业务模式/查询记忆/证据/避坑提示的数量摘要，再用系统默认浏览器打开该 Skill 的 `memory/wiki/index.html`。
 
 ## 版本要求
 

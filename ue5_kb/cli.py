@@ -1189,6 +1189,181 @@ def pipeline_partition_status(engine_path):
     console.print()
 
 
+# ============================================================================
+# Wiki 命令组（Memory Wiki 交互式业务知识查看）
+# ============================================================================
+
+@cli.group()
+def wiki():
+    """Memory Wiki 交互式业务知识查看
+
+    \b
+    Memory Wiki 是从 memory/memory.sqlite 生成的自包含 HTML 页面，
+    展示 AI 沉淀的业务流程图/证据链/查询记忆，支持拖拽窗口、搜索，
+    双击 index.html 即可离线打开，无需服务器。
+
+    \b
+    Wiki 里的"业务流程图"不是每次查询都会自动产生，而是由使用某个 Skill 的 AI
+    agent 在判断"这次调查构成一条完整业务链路"时，显式调用
+    query_memory_record -> query_memory_attach_flow 归纳出来的（详见对应
+    Skill 的 SKILL.md「何时主动归纳业务流程图」一节）。触发时机分两类：
+    - 用户明确要求：例如"讲一下 X 完整流程"、"把这次调查记下来"、"生成一下 wiki"
+    - AI 自主判断：证据链覆盖 >=4 个函数/类、静态探索已闭合、问题措辞含
+      "完整/端到端/流程/链路"等词、同一 seed 被反复问过但从未沉淀 等信号
+      同时命中 >=2 个时，AI 会主动归纳并在回答里给出这里的 wiki 路径。
+    仅执行了一次性事实查询（如"这个函数签名是什么"）不会触发，只会被自动记入
+    query_steps 审计，不会产生业务流程图。
+
+    \b
+    可用命令：
+      ue5kb wiki list           列出所有已生成 Skill 及其 Memory Wiki 状态
+      ue5kb wiki open [名称]     重新生成并在浏览器打开指定 Skill 的 Memory Wiki
+
+    \b
+    常用示例：
+      ue5kb wiki list
+      ue5kb wiki open ue5kb-5.5.4
+      ue5kb wiki open MyPlugin-kb
+      cd "F:\\MyProject\\Plugins\\MyPlugin" && ue5kb wiki open   # 自动检测当前目录
+      ue5kb wiki open ue5kb-5.5.4 --no-browser                  # 只重新生成，不打开浏览器
+    """
+    pass
+
+
+@wiki.command('list')
+@click.option('--skill-root', type=click.Path(), help='共享 Skill 根目录 (默认: ~/.agents/skills)')
+def wiki_list(skill_root):
+    """列出所有已生成 Skill 及其 Memory Wiki 状态"""
+    from datetime import datetime
+    from ue5_kb.skill_store import get_default_skill_root
+    from ue5_kb.query.query_memory import list_subjects
+
+    root = Path(skill_root) if skill_root else get_default_skill_root()
+    if not root.exists():
+        console.print(f"[yellow]Skill 根目录不存在: {root}[/yellow]")
+        return
+
+    table = Table(title=f"Memory Wiki 状态一览 ({root})")
+    table.add_column("Skill")
+    table.add_column("memory.sqlite")
+    table.add_column("业务主题数")
+    table.add_column("wiki/index.html")
+    table.add_column("上次生成时间")
+
+    found = 0
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        impl_py = entry / "impl.py"
+        if not impl_py.exists():
+            continue
+        found += 1
+        memory_db = entry / "memory" / "memory.sqlite"
+        wiki_html = entry / "memory" / "wiki" / "index.html"
+
+        subject_count = "-"
+        if memory_db.exists():
+            try:
+                result = list_subjects(skill_dir=entry, limit=200)
+                subject_count = str(result.get("found_count", 0))
+            except Exception:
+                subject_count = "?"
+
+        wiki_status = "[green]✓[/green]" if wiki_html.exists() else "[dim]✗[/dim]"
+        wiki_time = (
+            datetime.fromtimestamp(wiki_html.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            if wiki_html.exists() else "-"
+        )
+        table.add_row(
+            entry.name,
+            "[green]✓[/green]" if memory_db.exists() else "[dim]✗[/dim]",
+            subject_count,
+            wiki_status,
+            wiki_time,
+        )
+
+    if found == 0:
+        console.print(f"[yellow]{root} 下没有找到任何已生成的 Skill[/yellow]")
+        return
+    console.print(table)
+    console.print("\n用 [cyan]ue5kb wiki open <Skill名称>[/cyan] 打开对应的 Memory Wiki")
+
+
+@wiki.command('open')
+@click.argument('skill_name', required=False)
+@click.option('--skill-root', type=click.Path(), help='共享 Skill 根目录 (默认: ~/.agents/skills)')
+@click.option('--no-browser', is_flag=True, help='只重新生成 wiki 文件，不自动打开浏览器（适合 CI/脚本）')
+def wiki_open(skill_name, skill_root, no_browser):
+    """重新生成并在浏览器打开指定 Skill 的 Memory Wiki
+
+    \b
+    不传 SKILL_NAME 时，会像 `ue5kb init` 一样自动检测当前目录对应的引擎/插件，
+    推导出对应的 Skill 名称（ue5kb-{版本} 或 {插件名}-kb）。
+    """
+    import webbrowser
+    from ue5_kb.skill_store import get_default_skill_root, get_skill_path
+    from ue5_kb.branch_manager import BranchManager
+    from ue5_kb.query.memory_site import export_site
+
+    if not skill_name:
+        from ue5_kb.utils.auto_detect import detect_from_cwd
+
+        detection = detect_from_cwd()
+        if detection.mode == 'unknown' or not detection.detected_path:
+            console.print("[red]X 未指定 Skill 名称，且无法从当前目录自动检测[/red]")
+            console.print("请先用 [cyan]ue5kb wiki list[/cyan] 查看所有可用 Skill，再指定名称")
+            return
+        if detection.mode == 'plugin':
+            plugin_name, _ = detect_plugin_info(Path(detection.detected_path))
+            skill_name = f"{plugin_name}-kb"
+        else:
+            version = detect_engine_version(Path(detection.detected_path))
+            skill_name = f"ue5kb-{version}"
+        console.print(f"[dim]自动检测到 Skill: {skill_name}[/dim]")
+
+    root = Path(skill_root) if skill_root else get_default_skill_root()
+    try:
+        skill_dir = get_skill_path(skill_name, root)
+    except ValueError as e:
+        console.print(f"[red]X {e}[/red]")
+        return
+    if not skill_dir.exists() or not (skill_dir / "impl.py").exists():
+        console.print(f"[red]X 未找到 Skill: {skill_dir}[/red]")
+        console.print("用 [cyan]ue5kb wiki list[/cyan] 查看所有可用 Skill")
+        return
+
+    memory_db = skill_dir / "memory" / "memory.sqlite"
+    if not memory_db.exists():
+        console.print(f"[yellow]该 Skill 还没有任何 memory 记录: {memory_db}[/yellow]")
+        console.print("先用它做几次查询，调用 query_memory_record / query_memory_attach_flow 沉淀业务流程后再来查看")
+        return
+
+    mgr = BranchManager(skill_dir)
+    try:
+        source_root = mgr.resolve_source_path()
+    except Exception as e:
+        source_root = None
+        console.print(f"[yellow]! 无法解析源码路径（{type(e).__name__}: {e}），证据 file:line 链接将不会被校验[/yellow]")
+
+    result = export_site(skill_dir=skill_dir, source_root=source_root)
+
+    stats = result.get("stats", {})
+    console.print(f"\n[bold cyan]=== {skill_name} Memory Wiki ===[/bold cyan]")
+    console.print(f"  业务主题: {stats.get('subject_count', 0)}")
+    console.print(f"  业务模式: {stats.get('pattern_count', 0)}")
+    console.print(f"  查询记忆: {stats.get('memory_count', 0)}")
+    console.print(f"  证据条数: {stats.get('evidence_count', 0)}")
+    console.print(f"  避坑提示: {stats.get('hint_count', 0)}")
+    console.print(f"  文件路径: {result.get('site_file')}")
+
+    site_file = Path(result["site_file"])
+    if no_browser:
+        console.print("\n[dim]--no-browser 已指定，未自动打开浏览器[/dim]")
+    else:
+        webbrowser.open(site_file.as_uri())
+        console.print("\n[green]已在默认浏览器打开[/green]")
+
+
 def main():
     """CLI 入口点"""
     cli()

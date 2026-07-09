@@ -518,3 +518,73 @@ def test_query_audit_report_classifies_failures_and_broad_queries(tmp_path):
     assert report["broad_searches"][0]["command"] == "search_functions"
     assert report["acceptance"]["status"] == "FAIL"
     assert report["acceptance"]["static_only"] is True
+
+
+def test_resolve_session_trace_id_reuses_active_trace_within_ttl(tmp_path, monkeypatch):
+    from ue5_kb.query.query_audit import resolve_session_trace_id
+
+    skill_dir = tmp_path / "Skill"
+    first = resolve_session_trace_id(skill_dir)
+    second = resolve_session_trace_id(skill_dir)
+
+    assert first == second
+
+
+def test_resolve_session_trace_id_expires_after_ttl(tmp_path, monkeypatch):
+    from ue5_kb.query import query_audit
+
+    skill_dir = tmp_path / "Skill"
+    first = query_audit.resolve_session_trace_id(skill_dir, ttl_seconds=1800)
+
+    real_time = query_audit.time.time
+    monkeypatch.setattr(query_audit.time, "time", lambda: real_time() + 3600)
+    second = query_audit.resolve_session_trace_id(skill_dir, ttl_seconds=1800)
+
+    assert first != second
+
+
+def test_resolve_session_trace_id_explicit_argument_overrides_and_updates_session(tmp_path):
+    from ue5_kb.query.query_audit import peek_session_trace, resolve_session_trace_id
+
+    skill_dir = tmp_path / "Skill"
+    resolve_session_trace_id(skill_dir)  # 建立一个自动会话
+    resolved = resolve_session_trace_id(skill_dir, "explicit-trace")
+
+    assert resolved == "explicit-trace"
+    active = peek_session_trace(skill_dir)
+    assert active["trace_id"] == "explicit-trace"
+
+
+def test_peek_session_trace_returns_none_when_no_session_yet(tmp_path):
+    from ue5_kb.query.query_audit import peek_session_trace
+
+    assert peek_session_trace(tmp_path / "Skill") is None
+
+
+def test_record_query_without_explicit_trace_id_groups_consecutive_calls(tmp_path):
+    """不传 --trace-id 时，短时间内的多次查询应自动归入同一条 trace（会话延续性）。"""
+    skill_dir = tmp_path / "Skill"
+
+    first_trace = record_query(
+        skill_dir=skill_dir,
+        trace_id=None,
+        command="query_class_info",
+        args=["AActor"],
+        context={"data_trust": "fresh"},
+        result={"found_count": 1},
+    )
+    second_trace = record_query(
+        skill_dir=skill_dir,
+        trace_id=None,
+        command="query_function_info",
+        args=["BeginPlay"],
+        context={"data_trust": "fresh"},
+        result={"found_count": 1},
+    )
+
+    assert first_trace == second_trace
+
+    conn = sqlite3.connect(str(skill_dir / "memory" / "memory.sqlite"))
+    trace_ids = {row[0] for row in conn.execute("SELECT DISTINCT trace_id FROM query_steps")}
+    conn.close()
+    assert trace_ids == {first_trace}

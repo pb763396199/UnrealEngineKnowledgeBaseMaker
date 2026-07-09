@@ -25,6 +25,22 @@ MAX_TEXT = 1000
 CommandRunner = Callable[[str, List[str]], Dict[str, Any]]
 
 
+def _auto_refresh_wiki(skill_dir: Path, source_root: Optional[Path]) -> bool:
+    """尽力而为地在每次 record_memory/attach_business_flow 成功后重新生成 Memory Wiki。
+
+    这样 agent 不需要额外记得再手动跑一次 query_memory_render_site；wiki 永远反映
+    memory.sqlite 最新内容。渲染失败（例如 vendor 资源缺失）不影响 record/attach 本身
+    的成功结果，只是不产出/不刷新 wiki 文件。
+    """
+    try:
+        from ue5_kb.query.memory_site import export_site
+
+        export_site(skill_dir=skill_dir, source_root=source_root)
+        return True
+    except Exception:
+        return False
+
+
 def stable_json(value: Any) -> str:
     """Return deterministic JSON for hashing without preserving source bodies."""
     return json.dumps(_sanitize(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -1203,6 +1219,7 @@ def record_memory(
             evidence_ids=evidence_ids,
         )
         conn.commit()
+        wiki_refreshed = _auto_refresh_wiki(skill_dir, source_root)
         return {
             "schema": "query-memory-record/v1",
             "memory_id": memory_id,
@@ -1218,9 +1235,95 @@ def record_memory(
             "freshness_basis": runtime,
             "stores_business_facts": False,
             "static_only": True,
+            "wiki_refreshed": wiki_refreshed,
         }
     finally:
         conn.close()
+
+
+def _derive_auto_seed(conn: sqlite3.Connection, trace_id: str) -> Optional[str]:
+    """从 trace 的历史步骤里确定性推导一个默认 seed：取最近一次成功查询的第一个参数，
+    没有则退回整条 trace 里出现次数最多的第一个参数。纯统计，不涉及语义判断。"""
+    steps = _query_steps(conn, trace_id)
+    if not steps:
+        return None
+    for step in reversed(steps):
+        if step.get("error"):
+            continue
+        args = _parse_args_summary(step.get("args_summary"))
+        if args and args[0]:
+            return args[0]
+    counter: Dict[str, int] = {}
+    for step in steps:
+        args = _parse_args_summary(step.get("args_summary"))
+        if args and args[0]:
+            counter[args[0]] = counter.get(args[0], 0) + 1
+    if not counter:
+        return None
+    return max(counter.items(), key=lambda item: item[1])[0]
+
+
+def auto_capture_memory(
+    *,
+    skill_dir: Path,
+    trace_id: Optional[str],
+    intent: Optional[str],
+    seed: Optional[str],
+    context: Dict[str, Any],
+    source_root: Optional[Path],
+    command_runner: CommandRunner,
+) -> Dict[str, Any]:
+    """兜底安全网：即使 agent 忘了显式调用 query_memory_record，也能一条命令把"当前活跃
+    会话 trace"沉淀成可复用路线（不产出业务流程图，那一步仍需要 agent 用
+    query_memory_attach_flow 手工归纳，因为"什么才算一次完整业务解释"本质上需要语义判断，
+    静态后端无法自动判定）。
+
+    trace_id/intent/seed 均可省略：
+    - trace_id 省略时用当前仍在 TTL 内的会话 trace（session_trace.json）
+    - seed 省略时用 _derive_auto_seed 从历史步骤确定性推导
+    - intent 省略时固定为 "auto_capture"，避免语义化字符串污染 subject 显示名
+    """
+    from ue5_kb.query.query_audit import peek_session_trace
+
+    resolved_trace_id = trace_id
+    if not resolved_trace_id:
+        active = peek_session_trace(skill_dir)
+        if not active:
+            return {
+                "schema": "query-memory-auto-capture/v1",
+                "error": "no active session trace found; pass trace_id explicitly or run a query first",
+            }
+        resolved_trace_id = active["trace_id"]
+
+    resolved_intent = intent or "auto_capture"
+
+    resolved_seed = seed
+    if not resolved_seed:
+        conn = _connect(skill_dir)
+        try:
+            resolved_seed = _derive_auto_seed(conn, resolved_trace_id)
+        finally:
+            conn.close()
+        if not resolved_seed:
+            return {
+                "schema": "query-memory-auto-capture/v1",
+                "trace_id": resolved_trace_id,
+                "error": "could not derive a seed from trace history; pass seed explicitly",
+            }
+
+    result = record_memory(
+        skill_dir=skill_dir,
+        trace_id=resolved_trace_id,
+        intent=resolved_intent,
+        seed=resolved_seed,
+        context=context,
+        source_root=source_root,
+        command_runner=command_runner,
+    )
+    result["schema"] = "query-memory-auto-capture/v1"
+    result["auto_derived_seed"] = seed is None
+    result["auto_derived_trace_id"] = trace_id is None
+    return result
 
 
 def _validate_flow_evidence(source_root: Optional[Path], nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1325,6 +1428,7 @@ def attach_business_flow(
             (annotation_id, memory_id, subject_id, flow_json, graph_hash, publication_status, int(time.time())),
         )
         conn.commit()
+        wiki_refreshed = _auto_refresh_wiki(skill_dir, effective_source_root)
         return {
             "schema": "query-memory-attach-flow/v1",
             "annotation_id": annotation_id,
@@ -1339,6 +1443,7 @@ def attach_business_flow(
             "graph_hash": graph_hash,
             "stores_business_flow": True,
             "markdown_is_authoritative": False,
+            "wiki_refreshed": wiki_refreshed,
         }
     finally:
         conn.close()

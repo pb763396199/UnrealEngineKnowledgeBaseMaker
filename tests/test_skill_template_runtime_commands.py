@@ -419,6 +419,7 @@ def test_engine_and_plugin_impl_templates_include_runtime_commands():
         assert "def query_audit" in content
         assert "def query_audit_report" in content
         assert "def query_memory_record" in content
+        assert "def query_memory_auto_capture" in content
         assert "def query_memory_search" in content
         assert "def query_memory_validate" in content
         assert "def query_memory_replay" in content
@@ -459,6 +460,43 @@ def test_engine_template_memory_command_runner_uses_engine_run_command_signature
 
     assert result == {"ok": True, "command": "source_slice"}
     assert calls == [("source_slice", ["Feature.cpp", "1"], True)]
+
+
+def test_rendered_impl_templates_query_memory_auto_capture_promotes_active_session(tmp_path):
+    """端到端验证：不传 --trace-id 的连续查询自动归并为同一 trace，
+    然后 query_memory_auto_capture() 不传任何参数也能把它沉淀为可复用路线。"""
+    from ue5_kb.query.query_audit import record_query
+
+    for template in ("templates/impl.py.template", "templates/impl.plugin.py.template"):
+        namespace = _load_rendered_impl_namespace(template, tmp_path / template.replace("/", "_"))
+        skill_dir = namespace["SKILL_DIR"]
+
+        first_trace = record_query(
+            skill_dir=skill_dir,
+            trace_id=None,
+            command="query_class_info",
+            args=["AFeatureActor"],
+            context={"data_trust": "fresh"},
+            result={"found_count": 1},
+        )
+        second_trace = record_query(
+            skill_dir=skill_dir,
+            trace_id=None,
+            command="query_function_info",
+            args=["AFeatureActor"],
+            context={"data_trust": "fresh"},
+            result={"found_count": 1},
+        )
+        assert first_trace == second_trace
+
+        namespace["_run_command"] = lambda command, args, **kwargs: {"found_count": 1}
+        captured = namespace["query_memory_auto_capture"]()
+
+        assert captured["schema"] == "query-memory-auto-capture/v1"
+        assert captured["trace_id"] == first_trace
+        assert captured["seed"] == "AFeatureActor"
+        assert captured["intent"] == "auto_capture"
+        assert captured.get("memory_id")
 
 
 def test_engine_template_does_not_advertise_read_only_without_write_commands():
@@ -548,7 +586,30 @@ def test_engine_and_plugin_skill_templates_require_preflight_and_new_commands():
         assert "query_memory_negative_hints" in content
         assert "query_memory_snapshot" in content
         assert "query_memory_render" in content
+        assert "query_memory_render_site" in content
+        assert "query_memory_auto_capture" in content
         assert "--trace-id" in content
+
+
+def test_engine_and_plugin_skill_templates_document_business_flow_trigger_rules():
+    """SKILL.md 必须明确写出"何时主动归纳业务流程图"的显式/隐式触发规则，
+    不能让 agent 只能靠猜或每次都问用户。"""
+    for template in ("templates/skill.md.template", "templates/skill.plugin.md.template"):
+        content = _read(template)
+        assert "何时主动归纳业务流程图" in content
+        assert "显式触发" in content
+        assert "隐式信号" in content
+        assert "决策规则" in content
+        assert "S1" in content and "S2" in content and "S3" in content
+        assert "query_memory_attach_flow" in content
+
+
+def test_engine_and_plugin_impl_templates_reference_business_flow_trigger_rules_in_help():
+    """impl.py CLI 的 --help 输出也要提一句触发时机，不能只在 SKILL.md 里才找得到。"""
+    for template in ("templates/impl.py.template", "templates/impl.plugin.py.template"):
+        content = _read(template)
+        assert "何时主动归纳业务流程图" in content
+        assert "SKILL.md" in content
 
 
 def test_skill_templates_description_covers_compile_debug_edit_review():
