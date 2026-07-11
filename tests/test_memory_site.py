@@ -83,8 +83,14 @@ def test_export_site_generates_single_file_wiki_from_sqlite_only(tmp_path):
     assert 'src="vendor/vis-network' not in text
     assert 'new vis.Network(' not in text
     assert 'href="vendor/github-markdown.css"' in text
-    assert "function compute" not in text  # 布局计算在 Python 端完成，前端不包含布局算法
-    assert "routeEdgePath" in text  # 前端仅做拖拽时的边重绘，不做全局布局
+    # 初始布局仍由 Python 端一次性算好（compute_static_layout）随数据下发；前端额外内嵌一份
+    # 与之保持同步的 barycenter+分层换行算法（computeCompactPositions 等），专门用于"重排布局"
+    # 按钮——过滤视图锁定时只对当前可见的节点子集重排，这必须在浏览器里现算（生成后就是纯
+    # 离线静态文件，没有服务器可以回调），不是走回头路又把整图布局搬回前端算。
+    assert "function computeCompactPositions" in text
+    assert "function orderNodesByBarycenter" in text
+    assert "function wrapIntoRows" in text
+    assert "routeEdgePath" in text  # 拖拽/重排后重绘折线路径仍是前端职责
     # 真正的可拖拽/停靠/自由调整布局窗口系统（dockview-core），对齐 Unreal Editor 停靠窗口
     assert 'src="vendor/dockview-core.min.js"' in text
     assert 'href="vendor/dockview.css"' in text
@@ -309,5 +315,42 @@ def test_compute_static_layout_edges_never_diagonal_for_backward_same_lane_edge(
     layout = compute_static_layout(flow)
     edge = layout["edges"][0]
     _assert_no_diagonal_line_segments(edge["path"])
+
+
+def _path_l_command_points(path: str):
+    """依次提取路径里每条 L 直线段的终点坐标（不含 M 起点），用于校验行进方向单调性。"""
+    tokens = re.findall(r"([MLQ])((?:\s*-?\d+\.?\d*){2,4})", path)
+    points = []
+    for cmd, nums in tokens:
+        vals = [float(v) for v in nums.split()]
+        if cmd == "L":
+            points.append((vals[0], vals[1]))
+        elif cmd == "Q":
+            points.append((vals[2], vals[3]))
+    return points
+
+
+def test_elbow_vertical_reverse_edge_has_no_backward_kink_at_midpoint():
+    """回归测试：目标节点在源节点上方的"反向"竖直边（下游泳道连回上游泳道），
+    修复前 _elbow_vertical 的圆角拐点固定用 mid-rr 当前段、mid+rr 当后段，对这种
+    从下往上走的边会导致路径在中点附近先反向多拐一小段再折回来（一个不该出现的
+    小钩子/尖角）。修复后整条路径的 y 坐标必须严格单调递减（从下往上走到底，
+    没有任何局部回头）。"""
+    a = {"x": 0, "y": 400, "w": 200, "h": 56}  # 源节点在下方
+    b = {"x": 300, "y": 0, "w": 200, "h": 56}  # 目标节点在上方（反向边）
+    geom = _route_edge(a, b)
+    ys = [400.0] + [pt[1] for pt in _path_l_command_points(geom["path"])]
+    for prev, cur in zip(ys, ys[1:]):
+        assert cur <= prev + 1e-6, f"反向竖直边的 y 坐标出现回头（未单调递减）: {ys} path={geom['path']}"
+
+
+def test_elbow_horizontal_reverse_edge_has_no_backward_kink_at_midpoint():
+    """同上，针对水平折线（同排/侧向边）里目标在源左侧的反向情形。"""
+    a = {"x": 400, "y": 0, "w": 200, "h": 56}   # 源节点在右侧
+    b = {"x": 0, "y": 20, "w": 200, "h": 56}    # 目标节点在左侧（反向边），与 a 纵向有重叠走水平折线
+    geom = _route_edge(a, b)
+    xs = [a["x"]] + [pt[0] for pt in _path_l_command_points(geom["path"])]
+    for prev, cur in zip(xs, xs[1:]):
+        assert cur <= prev + 1e-6, f"反向水平边的 x 坐标出现回头（未单调递减）: {xs} path={geom['path']}"
 
 

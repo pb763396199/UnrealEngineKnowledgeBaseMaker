@@ -12,7 +12,11 @@
 参考 F:\\AiProject\\DecisionReview 项目多轮真实用户迭代：力导向物理图被反复否定，最终收敛到 Archify
 的 architecture 渲染风格——服务端一次性计算好的静态 SVG（矩形节点 + 泳道分组框 + 直角走线），
 加载后完全不动，只有用户主动拖拽才会移动。本模块用纯 Python 复刻这一布局算法（不引入
-Node/Archify 依赖，见 compute_static_layout），前端仅负责渲染与交互，不再跑任何运行时布局/物理模拟。
+Node/Archify 依赖，见 compute_static_layout），前端仅负责渲染与交互，不存在任何自动/持续的
+运行时物理模拟（不会自己动来动去）；但"重排布局"是用户主动触发的一次性重新计算，前端为此
+内嵌了一份与 compute_static_layout 保持同步的 barycenter+分层换行算法（computeCompactPositions
+等，2026-07-11 新增），只对"当前可见/未被过滤视图隐藏"的节点子集重排——生成后就是离线静态
+文件，没有服务器可回调，这份重排必须能在浏览器里现算，不能只会照搬 Python 算好的整图快照。
 
 窗口系统选型（2026-07-08）：早期版本用纯 CSS 的 .panel/.panel-header 静态组件模拟 Unreal Editor
 停靠窗口的"边框+标题栏"观感，但那只是视觉皮肤，无法拖动/停靠/自由调整布局。参考同团队
@@ -206,34 +210,46 @@ _MIN_JOG = 14.0  # 折线拐点与两端端点之间至少留出的距离，保�
 
 
 def _elbow_vertical(x1: float, y1: float, x2: float, y2: float, r: float) -> Any:
-    """竖直方向的直角折线：从 (x1,y1) 竖直出发，中途横向拐一次，竖直进入 (x2,y2)。"""
+    """竖直方向的直角折线：从 (x1,y1) 竖直出发，中途横向拐一次，竖直进入 (x2,y2)。
+
+    sign_y 按实际行进方向翻转圆角拐点的偏移：y2>y1（正常从上往下）时 mid-rr 在
+    行进路径的"前面"、mid+rr 在"后面"；但 y2<y1（反向边，比如下游泳道连回上游
+    泳道）时若仍固定用 mid-rr 当前段、mid+rr 当后段，会让圆角在中点附近先往回
+    拐一小段再折回来，画出一个不符合直角走线规范的多余小钩子/尖角。
+    """
     if abs(x1 - x2) < 1:
         return f"M {x1:.1f} {y1:.1f} L {x2:.1f} {y2:.1f}", (x1 + x2) / 2, (y1 + y2) / 2 - 4
     mid = (y1 + y2) / 2
     rr = min(r, max(2.0, abs(y2 - y1) / 2 - _MIN_JOG))
     sign = 1 if x2 > x1 else -1
+    sign_y = 1 if y2 > y1 else -1
     path = (
-        f"M {x1:.1f} {y1:.1f} L {x1:.1f} {mid - rr:.1f} "
+        f"M {x1:.1f} {y1:.1f} L {x1:.1f} {mid - sign_y * rr:.1f} "
         f"Q {x1:.1f} {mid:.1f} {x1 + sign * rr:.1f} {mid:.1f} "
         f"L {x2 - sign * rr:.1f} {mid:.1f} "
-        f"Q {x2:.1f} {mid:.1f} {x2:.1f} {mid + rr:.1f} "
+        f"Q {x2:.1f} {mid:.1f} {x2:.1f} {mid + sign_y * rr:.1f} "
         f"L {x2:.1f} {y2:.1f}"
     )
-    return path, (x1 + x2) / 2, mid - 4
+    return path, (x1 + x2) / 2, mid - 4 * sign_y
 
 
 def _elbow_horizontal(x1: float, y1: float, x2: float, y2: float, r: float) -> Any:
-    """水平方向的直角折线：从 (x1,y1) 横向出发，中途竖向拐一次，横向进入 (x2,y2)。"""
+    """水平方向的直角折线：从 (x1,y1) 横向出发，中途竖向拐一次，横向进入 (x2,y2)。
+
+    sign_x 同理按行进方向翻转（x2<x1，即目标在源左侧的反向水平边）时的圆角偏移，
+    避免 _elbow_vertical 同款"中点附近多余小钩子"问题。
+    """
     if abs(y1 - y2) < 1:
         return f"M {x1:.1f} {y1:.1f} L {x2:.1f} {y2:.1f}", (x1 + x2) / 2, (y1 + y2) / 2 - 4
     mid = (x1 + x2) / 2
     rr = min(r, max(2.0, abs(x2 - x1) / 2 - _MIN_JOG))
     sign = 1 if y2 > y1 else -1
+    sign_x = 1 if x2 > x1 else -1
     path = (
-        f"M {x1:.1f} {y1:.1f} L {mid - rr:.1f} {y1:.1f} "
+        f"M {x1:.1f} {y1:.1f} L {mid - sign_x * rr:.1f} {y1:.1f} "
         f"Q {mid:.1f} {y1:.1f} {mid:.1f} {y1 + sign * rr:.1f} "
         f"L {mid:.1f} {y2 - sign * rr:.1f} "
-        f"Q {mid:.1f} {y2:.1f} {mid + rr:.1f} {y2:.1f} "
+        f"Q {mid:.1f} {y2:.1f} {mid + sign_x * rr:.1f} {y2:.1f} "
         f"L {x2:.1f} {y2:.1f}"
     )
     return path, mid, (y1 + y2) / 2 - 4
@@ -327,7 +343,27 @@ def compute_static_layout(flow: Dict[str, Any]) -> Dict[str, Any]:
             "condition": edge.get("condition") or "",
         })
 
-    return {"nodes": positions, "lanes": lane_rects, "edges": edge_paths, "width": canvas_width, "height": canvas_height}
+    return {
+        "nodes": positions,
+        "lanes": lane_rects,
+        "edges": edge_paths,
+        "width": canvas_width,
+        "height": canvas_height,
+        # 前端"重排布局"要在 JS 里原样复刻这套 barycenter+分层换行算法（对当前可见/
+        # 过滤后的节点子集重排，而不是整图重排），必须用同一套间距常量，否则重排出来
+        # 的节点框大小、行列间距会和服务端算好的初始布局对不上、视觉上跳来跳去。
+        "constants": {
+            "node_w": NODE_W,
+            "node_h": NODE_H,
+            "col_gap": _LAYOUT_COL_GAP,
+            "row_gap": _LAYOUT_ROW_GAP,
+            "lane_gap": _LAYOUT_LANE_GAP,
+            "lane_pad": _LAYOUT_LANE_PAD,
+            "label_h": _LAYOUT_LABEL_H,
+            "margin": _LAYOUT_MARGIN,
+            "max_cols": _LAYOUT_MAX_COLS,
+        },
+    }
 
 
 def _collect_payload(conn: sqlite3.Connection, source_root: Optional[Path]) -> Dict[str, Any]:
@@ -554,6 +590,7 @@ nav::-webkit-scrollbar-thumb:hover,.dock-html::-webkit-scrollbar-thumb:hover,pre
 .graph-toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel);flex:none}
 .graph-toolbar button{background:var(--chip);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:4px 10px;font-size:12px;cursor:pointer}
 .graph-toolbar button:hover{border-color:var(--accent)}
+.graph-toolbar button.active{background:var(--accent);color:#0b0d12;border-color:var(--accent)}
 .graph-toolbar .hint{margin-left:auto;color:var(--dim);font-size:11px}
 .graph-mount{flex:1;min-height:0;cursor:grab;user-select:none}
 .graph-mount svg text{user-select:none}
@@ -561,6 +598,16 @@ nav::-webkit-scrollbar-thumb:hover,.dock-html::-webkit-scrollbar-thumb:hover,pre
 .graph-mount svg{display:block;width:100%;height:100%}
 .flow-node{cursor:grab}
 .flow-node:active{cursor:grabbing}
+/* 隔离视图模式：选中节点后，与它无直接/间接 edge 相连的其它节点与边整体降低不透明度，
+   参考 UE5.5 GraphEditor 的 FConnectionDrawingPolicy::ApplyHoverDeemphasis（悬停时把无关
+   wire 淡化成半透明黑），这里把"淡化对象"从单条 wire 扩展成整个不相关的连通子图，且由
+   点击驱动的持久隔离态（而非鼠标悬停的瞬时态）。淡化态不阻断交互（仍可点击/查看详情），
+   只做视觉降噪。*/
+.flow-node.dimmed{opacity:.18}
+.flow-edge-group.dimmed{opacity:.12}
+/* 过滤视图：不相关节点/边/空泳道直接整个隐藏（而不是隔离视图的淡化），
+   一次性选定过滤目标后锁定，见 renderFlowGraph 里 setFilterMode/applyFilter 的注释。 */
+.flow-node.filtered-out,.flow-edge-group.filtered-out,.lane-rect.filtered-out,.lane-label.filtered-out{display:none}
 .flow-node .node-mask{fill:#000;opacity:0.35;transform:translate(2px,3px)}
 .flow-node .node-box{fill:#232735;stroke-width:1.6}
 .flow-node:hover .node-box{stroke-width:2.2}
@@ -738,23 +785,26 @@ function evidenceHtml(ev) {
 // 静态分层布局（坐标由 Python compute_static_layout 一次性算好，随数据下发）。
 // 前端只画图 + 响应交互，加载后完全静止，不存在任何自动布局/物理模拟/持续动画。
 // 下面这套折线路由逻辑必须与 Python 端 _route_edge/_elbow_vertical/_elbow_horizontal
-// 保持一致：任何情形都要走直角折线，不能退化成斜线直连。
+// 保持一致：任何情形都要走直角折线，不能退化成斜线直连；sign_y/sign_x 按实际行进
+// 方向翻转圆角拐点偏移，避免反向边（下游连回上游）在中点附近多出一个小钩子/尖角。
 function elbowVertical(x1, y1, x2, y2, r) {
   if (Math.abs(x1 - x2) < 1) return { path: `M ${x1} ${y1} L ${x2} ${y2}`, lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 - 4 };
   const mid = (y1 + y2) / 2;
   const rr = Math.min(r, Math.max(2, Math.abs(y2 - y1) / 2 - 14));
   const sign = x2 > x1 ? 1 : -1;
-  const path = `M ${x1} ${y1} L ${x1} ${mid - rr} Q ${x1} ${mid} ${x1 + sign * rr} ${mid} `
-    + `L ${x2 - sign * rr} ${mid} Q ${x2} ${mid} ${x2} ${mid + rr} L ${x2} ${y2}`;
-  return { path, lx: (x1 + x2) / 2, ly: mid - 4 };
+  const signY = y2 > y1 ? 1 : -1;
+  const path = `M ${x1} ${y1} L ${x1} ${mid - signY * rr} Q ${x1} ${mid} ${x1 + sign * rr} ${mid} `
+    + `L ${x2 - sign * rr} ${mid} Q ${x2} ${mid} ${x2} ${mid + signY * rr} L ${x2} ${y2}`;
+  return { path, lx: (x1 + x2) / 2, ly: mid - 4 * signY };
 }
 function elbowHorizontal(x1, y1, x2, y2, r) {
   if (Math.abs(y1 - y2) < 1) return { path: `M ${x1} ${y1} L ${x2} ${y2}`, lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 - 4 };
   const mid = (x1 + x2) / 2;
   const rr = Math.min(r, Math.max(2, Math.abs(x2 - x1) / 2 - 14));
   const sign = y2 > y1 ? 1 : -1;
-  const path = `M ${x1} ${y1} L ${mid - rr} ${y1} Q ${mid} ${y1} ${mid} ${y1 + sign * rr} `
-    + `L ${mid} ${y2 - sign * rr} Q ${mid} ${y2} ${mid + rr} ${y2} L ${x2} ${y2}`;
+  const signX = x2 > x1 ? 1 : -1;
+  const path = `M ${x1} ${y1} L ${mid - signX * rr} ${y1} Q ${mid} ${y1} ${mid} ${y1 + sign * rr} `
+    + `L ${mid} ${y2 - sign * rr} Q ${mid} ${y2} ${mid + signX * rr} ${y2} L ${x2} ${y2}`;
   return { path, lx: mid, ly: (y1 + y2) / 2 - 4 };
 }
 function routeEdgePath(a, b, r) {
@@ -774,7 +824,146 @@ function routeEdgePath(a, b, r) {
   return elbowHorizontal(x1, y1, x2, y2, r);
 }
 
+// 下面这套"重排布局"算法必须与 Python 端 _order_nodes_by_barycenter/
+// _apply_intra_lane_order/_wrap_into_rows（memory_site.py）保持一致：只对"当前
+// 可见"的节点子集（过滤视图锁定时只含未被隐藏的节点，否则是全部节点）重新跑
+// barycenter 排序 + 按依赖关系分层换行，隐藏节点完全不参与占位——这样过滤视图下
+// 点"重排布局"才会紧凑地重新摆放当前这条链路，而不是照搬未过滤时整图的稀疏坐标。
+function orderNodesByBarycenter(lanes, nodes, edges) {
+  const byLane = {};
+  lanes.forEach(l => { byLane[l] = []; });
+  nodes.forEach(n => {
+    const lane = (byLane[n.lane] !== undefined) ? n.lane : (lanes[0] || '默认');
+    (byLane[lane] || (byLane[lane] = [])).push(n.id);
+  });
+  const preds = {}, succs = {};
+  edges.forEach(e => {
+    (succs[e.source] || (succs[e.source] = [])).push(e.target);
+    (preds[e.target] || (preds[e.target] = [])).push(e.source);
+  });
+  const posIndex = lane => {
+    const m = {};
+    (byLane[lane] || []).forEach((id, idx) => { m[id] = idx; });
+    return m;
+  };
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 1; i < lanes.length; i++) {
+      const prevPos = posIndex(lanes[i - 1]);
+      const curPos = posIndex(lanes[i]);
+      const baryDown = id => {
+        const refs = (preds[id] || []).filter(p => prevPos[p] !== undefined).map(p => prevPos[p]);
+        return refs.length ? (refs.reduce((a, b) => a + b, 0) / refs.length) : (curPos[id] !== undefined ? curPos[id] : 0);
+      };
+      byLane[lanes[i]] = (byLane[lanes[i]] || []).slice().sort((a, b) => baryDown(a) - baryDown(b));
+    }
+    for (let i = lanes.length - 2; i >= 0; i--) {
+      const nextPos = posIndex(lanes[i + 1]);
+      const curPos = posIndex(lanes[i]);
+      const baryUp = id => {
+        const refs = (succs[id] || []).filter(s => nextPos[s] !== undefined).map(s => nextPos[s]);
+        return refs.length ? (refs.reduce((a, b) => a + b, 0) / refs.length) : (curPos[id] !== undefined ? curPos[id] : 0);
+      };
+      byLane[lanes[i]] = (byLane[lanes[i]] || []).slice().sort((a, b) => baryUp(a) - baryUp(b));
+    }
+  }
+  lanes.forEach(l => { byLane[l] = applyIntraLaneOrder(byLane[l] || [], edges); });
+  return byLane;
+}
+
+function applyIntraLaneOrder(laneIds, edges) {
+  const idSet = new Set(laneIds);
+  let order = laneIds.slice();
+  const localEdges = edges
+    .filter(e => idSet.has(e.source) && idSet.has(e.target) && e.source !== e.target)
+    .map(e => [e.source, e.target]);
+  if (!localEdges.length) return order;
+  for (let iter = 0; iter < order.length; iter++) {
+    const index = {};
+    order.forEach((id, i) => { index[id] = i; });
+    let violation = null;
+    for (const pair of localEdges) {
+      if (index[pair[0]] > index[pair[1]]) { violation = pair; break; }
+    }
+    if (!violation) break;
+    const t = violation[1], sIdx = index[violation[0]];
+    order = order.filter(id => id !== t);
+    order.splice(sIdx, 0, t);
+  }
+  return order;
+}
+
+function wrapIntoRows(ids, maxCols, edges) {
+  if (!ids.length) return [];
+  const idSet = new Set(ids);
+  const localEdges = edges
+    .filter(e => idSet.has(e.source) && idSet.has(e.target) && e.source !== e.target)
+    .map(e => [e.source, e.target]);
+  const rank = {};
+  ids.forEach(id => { rank[id] = 0; });
+  for (let iter = 0; iter < ids.length + 1; iter++) {
+    let changed = false;
+    for (const pair of localEdges) {
+      if (rank[pair[0]] + 1 > rank[pair[1]]) { rank[pair[1]] = rank[pair[0]] + 1; changed = true; }
+    }
+    if (!changed) break;
+  }
+  const maxRank = ids.length ? Math.max(...ids.map(id => rank[id])) : 0;
+  const layered = Array.from({ length: maxRank + 1 }, () => []);
+  ids.forEach(id => layered[rank[id]].push(id));
+  const cols = Math.max(1, maxCols);
+  const rows = [];
+  layered.forEach(layer => {
+    if (!layer.length) return;
+    for (let i = 0; i < layer.length; i += cols) rows.push(layer.slice(i, i + cols));
+  });
+  return rows;
+}
+
+// 只给"当前可见"的节点子集算新坐标（隐藏节点/空泳道完全不占垂直空间）；
+// visibleIds 为 null/undefined 时视为"全部节点都可见"，等价于对整图重排。
+// 返回值只含 {id: {x,y,w,h}}，不涉及泳道边框——泳道框的动态收紧交给已有的
+// laneBBox/updateLaneBounds（它们本来就会按 currentFilterKeep 只看可见成员）。
+function computeCompactPositions(flow, visibleIds) {
+  const C = (flow.layout && flow.layout.constants) || {
+    node_w: 200, node_h: 56, col_gap: 24, row_gap: 40, lane_gap: 46, lane_pad: 14, label_h: 20, margin: 24, max_cols: 3,
+  };
+  const lanes = flow.lanes || [];
+  const isVisible = id => !visibleIds || visibleIds.has(id);
+  const nodes = (flow.nodes || []).filter(n => isVisible(n.id));
+  const edges = (flow.edges || []).filter(e => isVisible(e.source) && isVisible(e.target));
+  const order = orderNodesByBarycenter(lanes, nodes, edges);
+  const rowsByLane = {};
+  lanes.forEach(l => { rowsByLane[l] = wrapIntoRows(order[l] || [], C.max_cols, edges); });
+  const rowWidths = {};
+  lanes.forEach(l => {
+    let w = C.node_w;
+    (rowsByLane[l] || []).forEach(row => { w = Math.max(w, row.length * C.node_w + Math.max(0, row.length - 1) * C.col_gap); });
+    rowWidths[l] = w;
+  });
+  const maxWidth = lanes.length ? Math.max(...lanes.map(l => rowWidths[l] || C.node_w)) : C.node_w;
+  const positions = {};
+  let y = C.margin;
+  lanes.forEach(l => {
+    const rows = rowsByLane[l] || [];
+    if (!rows.length) return; // 这条泳道在当前可见子集里没有成员，完全不占垂直空间
+    const rowW = rowWidths[l] || C.node_w;
+    const rowLeft = C.margin + C.lane_pad + (maxWidth - rowW) / 2;
+    const contentTop = y + C.label_h + C.lane_pad;
+    rows.forEach((row, rowIdx) => {
+      const nodeY = contentTop + rowIdx * (C.node_h + C.row_gap);
+      row.forEach((id, colIdx) => {
+        positions[id] = { x: rowLeft + colIdx * (C.node_w + C.col_gap), y: nodeY, w: C.node_w, h: C.node_h };
+      });
+    });
+    const rowCount = Math.max(1, rows.length);
+    const bandH = C.label_h + rowCount * C.node_h + Math.max(0, rowCount - 1) * C.row_gap + 2 * C.lane_pad;
+    y += bandH + C.lane_gap;
+  });
+  return positions;
+}
+
 let _graphTeardown = null;
+
 
 function renderFlowGraph(container, flow) {
   if (_graphTeardown) { _graphTeardown(); _graphTeardown = null; }
@@ -784,6 +973,105 @@ function renderFlowGraph(container, flow) {
   const lanes = flow.lanes || [];
   const nodeMap = {};
   (flow.nodes || []).forEach(n => { nodeMap[n.id] = n; });
+
+  // 隔离视图模式：对齐 UE5.5 Blueprint/Material 编辑器的 "Hide Unrelated Nodes"
+  // （FBlueprintEditor::HideUnrelatedNodes + CollectExecDownstreamNodes/
+  // CollectExecUpstreamNodes，Engine/Source/Editor/Kismet/Private/BlueprintEditor.cpp）。
+  // 关键点：UE 分别做"只沿正向边走的下游遍历"和"只沿反向边走的上游遍历"，两条遍历
+  // 全程不换向——下游遍历到某个节点后，只继续看它的下游（输出连线），绝不会因为
+  // 经过一个多入度的共享节点就掉头去探索该节点的其它上游来源。这与"把边当无向图
+  // 做连通分量 BFS"是两回事：本图里 UEarthMarkerProducerFragmentsSubsystem（hub）
+  // 这类"汇聚点"有多个不同来源（Water/Building/Dom/Dem fragment）都注册进来，若按
+  // 无向连通分量计算，从任意一个叶子节点出发都会经 hub 反向牵连出全部其它来源，
+  // 导致整张图沒有一个节点会被淡化（此前的 bug）。改成方向严格分离的上游/下游遍历
+  // 后，从 hub 顺着下游走仍会牵出 hub 的全部下游消费者（同 UE 语义：一个节点的下游
+  // 就是下游，即使那是个共享汇聚点），但不会反过来牵出 hub 的其它上游兄弟分支。
+  const outgoing = {}, incoming = {};
+  (layout.edges || []).forEach(e => {
+    (outgoing[e.source] || (outgoing[e.source] = new Set())).add(e.target);
+    (incoming[e.target] || (incoming[e.target] = new Set())).add(e.source);
+  });
+  const collectDirected = (rootId, edgeMap) => {
+    const seen = new Set();
+    const stack = [rootId];
+    while (stack.length) {
+      const cur = stack.pop();
+      (edgeMap[cur] || []).forEach(next => { if (!seen.has(next)) { seen.add(next); stack.push(next); } });
+    }
+    return seen;
+  };
+  const relatedSetOf = rootId => {
+    const keep = new Set([rootId]);
+    collectDirected(rootId, outgoing).forEach(id => keep.add(id)); // 下游（descendants）
+    collectDirected(rootId, incoming).forEach(id => keep.add(id)); // 上游（ancestors）
+    return keep;
+  };
+  let isolateModeOn = false;
+  let isolatedRootId = null;
+  const clearIsolation = () => {
+    isolatedRootId = null;
+    container.querySelectorAll('.flow-node.dimmed,.flow-edge-group.dimmed').forEach(el => el.classList.remove('dimmed'));
+  };
+  const applyIsolation = rootId => {
+    if (isolatedRootId === rootId) { clearIsolation(); return; } // 再次点同一个节点=退出这次隔离，回到全亮
+    isolatedRootId = rootId;
+    const keep = relatedSetOf(rootId);
+    container.querySelectorAll('.flow-node').forEach(el => el.classList.toggle('dimmed', !keep.has(el.dataset.id)));
+    container.querySelectorAll('.flow-edge-group').forEach(el => {
+      const related = keep.has(el.dataset.from) && keep.has(el.dataset.to);
+      el.classList.toggle('dimmed', !related);
+    });
+  };
+  const setIsolateMode = on => {
+    isolateModeOn = on;
+    if (on) { filterModeOn = false; clearFilter(); } // 与过滤视图互斥
+    else { clearIsolation(); }
+  };
+
+  // 过滤视图：和隔离视图共用同一套有向可达性集合（relatedSetOf），但呈现方式和
+  // 交互模型都不同——隔离视图是"点哪个就切到哪个"的即时预览，过滤视图是"一次性
+  // 消费"：进入模式后选定一个节点即锁定，之后点其它（仍可见的）节点只是正常查看
+  // 详情，不会再改变过滤目标；必须显式退出（再点一次过滤按钮，或双击空白画布）
+  // 才能重新进入选择下一个过滤目标。这是刻意的设计——过滤视图的实际用途是"筛出
+  // 一整条链路后逐个点开节点看证据"，若像隔离视图那样点哪个就切过滤，会导致看到
+  // 一半随手点了链路上的某个节点就整条线换掉，需求完全没法用。
+  // 不相关节点/边直接 display:none（`.filtered-out`），而不是隔离视图的淡化，
+  // 泳道里成员全部被过滤掉时连泳道框带标题一并隐藏；未被全部过滤掉的泳道，边框
+  // 收紧到只包住当前可见的成员（而不是全部成员的旧包围盒）。
+  let filterModeOn = false;
+  let filterRootId = null;
+  // 当前过滤保留集（null = 未处于过滤态）；laneBBox/updateLaneBounds（拖拽时也会调用）都会看这个变量，
+  // 保证过滤模式下拖动任何仍可见节点时，泳道包围盒仍然只按“当前可见的成员”重算，
+  // 而不会因为拖拽触发的 updateLaneBounds 改回按全部成员（包含被隐藏的）重新长大。
+  let currentFilterKeep = null;
+  const setLaneFilteredVisibility = keep => {
+    currentFilterKeep = keep;
+    (flow.lanes || []).forEach(laneName => updateLaneBounds(laneName));
+  };
+  const clearFilter = () => {
+    filterRootId = null;
+    container.querySelectorAll('.flow-node.filtered-out,.flow-edge-group.filtered-out').forEach(el => el.classList.remove('filtered-out'));
+    setLaneFilteredVisibility(null);
+  };
+  const applyFilter = rootId => {
+    filterRootId = rootId;
+    const keep = relatedSetOf(rootId);
+    container.querySelectorAll('.flow-node').forEach(el => el.classList.toggle('filtered-out', !keep.has(el.dataset.id)));
+    container.querySelectorAll('.flow-edge-group').forEach(el => {
+      const related = keep.has(el.dataset.from) && keep.has(el.dataset.to);
+      el.classList.toggle('filtered-out', !related);
+    });
+    setLaneFilteredVisibility(keep);
+    fitToVisibleNodes(keep);
+  };
+  // 进入/退出过滤模式：进入时若隔离视图正开着先关掉（两者互斥，同一时刻只有一个
+  // focus 呈现），并复位成"待选择"状态（filterRootId=null，尚未隐藏任何东西）；
+  // 退出时清空过滤、恢复全部显示。
+  const setFilterMode = on => {
+    filterModeOn = on;
+    if (on) { isolateModeOn = false; clearIsolation(); filterRootId = null; } // 与隔离视图互斥
+    else { clearFilter(); }
+  };
 
   const defs = `<marker id="arr-solid" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5b9dff"/></marker>
     <marker id="arr-dashed" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#e5b458"/></marker>`;
@@ -841,6 +1129,22 @@ function renderFlowGraph(container, flow) {
   container.querySelectorAll('text.edge-label').forEach(refreshLabelBg);
   let view = { x: 0, y: 0, w: layout.width, h: layout.height };
   const applyView = () => svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
+  // 过滤视图生效时，顺手把镜头收到"当前可见节点"的包围盒（留一圈边距），避免过滤掉
+  // 大半张图后，剩下几个节点挤在原本很大的画布一角、大片空白很难看。keep 为空
+  // （不应该发生，至少包含 rootId 自身）时不做任何事，保留原视野。
+  const FIT_PAD = 60;
+  const fitToVisibleNodes = keep => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    keep.forEach(id => {
+      const p = flow.layout.nodes[id];
+      if (!p) return;
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + p.w); maxY = Math.max(maxY, p.y + p.h);
+    });
+    if (minX === Infinity) return;
+    view = { x: minX - FIT_PAD, y: minY - FIT_PAD, w: (maxX - minX) + FIT_PAD * 2, h: (maxY - minY) + FIT_PAD * 2 };
+    applyView();
+  };
   // SVG 没有设置 preserveAspectRatio，默认是 "xMidYMid meet"：当容器宽高比和
   // viewBox 宽高比不一致时（这里几乎总是如此——业务流程图通常又窄又长，容器却是
   // 宽而矮），浏览器会按"更紧的那根轴"统一缩放并居中，另一根轴上会有留白
@@ -866,21 +1170,25 @@ function renderFlowGraph(container, flow) {
   // 泳道边框跟随其成员节点当前位置动态收缩/扩张（初始值已由 Python 端算好，
   // 拖拽节点后这里重新计算包围盒，而不是让边框停留在旧的静态位置）。
   const LANE_PAD = 14, LABEL_H = 20;
-  // 节点/泳道之间必须保留的最小间距：既是"挤开"求解的阈值，也是 edge/label 的最小可绘制留白。
-  const NODE_PAD = 20, LANE_MIN_GAP = 18;
-  const laneOrder = flow.lanes || [];
+  // 节点拖拽吸附网格：对齐 UE5.5 SNodePanel::OnMouseMove 的做法——
+  // `AnchorNodeNewPos.X = SnapSize * FMath::RoundToFloat(pos.X / SnapSize)`，
+  // SnapSize 取自 `UEditorStyleSettings::GridSnapSize`（默认 16）。
+  // 之前这里还有一套自造的"节点/泳道碰撞检测+推挤"逻辑（resolveOverlap/
+  // resolveCollisions/泳道级联推挤），经查 UE5.5 GraphEditor 源码
+  // （SNodePanel.cpp::OnMouseMove）证实真实的 Blueprint/Material 图表编辑器
+  // 拖拽节点时只做网格吸附 + 多选节点整体平移，完全没有碰撞检测/自动推开——
+  // 节点允许自由重叠。已删除那套推挤逻辑，改为对齐 UE 的行为：拖拽只管跟手 +
+  // 吸附网格，不做任何自动避让；节点可以自由重叠。
+  const GRID_SIZE = 16;
+  const snapToGrid = v => GRID_SIZE * Math.round(v / GRID_SIZE);
   const laneMembers = {};
   const nodeLaneOf = {};
   (flow.nodes || []).forEach(n => {
     (laneMembers[n.lane] || (laneMembers[n.lane] = [])).push(n.id);
     nodeLaneOf[n.id] = n.lane;
   });
-  // 一次拖拽只做有限次"一次性推挤求解"，不是持续物理模拟，不会抖动；泳道级联推挤
-  // 最坏情况下需要沿泳道链条传播 laneOrder.length 步，节点级推挤同理，按数量放宽轮次上限。
-  const MAX_RESOLVE_PASSES = Math.max(16, laneOrder.length * 2, (flow.nodes || []).length);
 
-  // 建立"节点 id -> 与它相连的边分组元素"索引：拖拽推挤可能牵动很多节点，需要
-  // 批量刷新这些节点各自关联的边，而不仅仅是被直接拖拽的那一个节点。
+  // 建立"节点 id -> 与它相连的边分组元素"索引，拖拽时批量刷新关联边。
   const edgeGroupsByNode = {};
   container.querySelectorAll('.flow-edge-group').forEach(g => {
     const from = g.dataset.from, to = g.dataset.to;
@@ -889,8 +1197,9 @@ function renderFlowGraph(container, flow) {
   });
 
   const laneBBox = laneName => {
-    const ids = laneMembers[laneName];
-    if (!ids || !ids.length) return null;
+    // 处于过滤态时只按当前仍可见（currentFilterKeep 里）的成员算包围盒，非过滤态仍然按全部成员。
+    const ids = (laneMembers[laneName] || []).filter(id => !currentFilterKeep || currentFilterKeep.has(id));
+    if (!ids.length) return null;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const id of ids) {
       const p = flow.layout.nodes[id];
@@ -902,83 +1211,16 @@ function renderFlowGraph(container, flow) {
     return { x: minX - LANE_PAD, y: minY - LABEL_H - LANE_PAD, w: (maxX - minX) + LANE_PAD * 2, h: (maxY - minY) + LABEL_H + LANE_PAD * 2 };
   };
   const updateLaneBounds = laneName => {
-    const bbox = laneBBox(laneName);
-    if (!bbox) return;
     const rectEl = container.querySelector(`.lane-rect[data-lane="${cssEsc(laneName)}"]`);
     const labelEl = container.querySelector(`.lane-label[data-lane="${cssEsc(laneName)}"]`);
+    const bbox = laneBBox(laneName);
+    // 只有处于过滤态且这条泳道被过滤到一个成员都不剩时，才把泳道本身隐藏；非过滤态下 bbox 永远不会为 null（只要这条泳道本来就有成员）。
+    const hideEmpty = !!(currentFilterKeep && !bbox);
+    if (rectEl) rectEl.classList.toggle('filtered-out', hideEmpty);
+    if (labelEl) labelEl.classList.toggle('filtered-out', hideEmpty);
+    if (!bbox) return;
     if (rectEl) { rectEl.setAttribute('x', bbox.x); rectEl.setAttribute('y', bbox.y); rectEl.setAttribute('width', bbox.w); rectEl.setAttribute('height', bbox.h); }
     if (labelEl) { labelEl.setAttribute('x', bbox.x + 10); labelEl.setAttribute('y', bbox.y + 14); }
-  };
-  // 两个矩形若重叠（含 pad 间距），返回需要施加在 other 身上的最小推开位移，沿
-  // 重叠量较小的那根轴推开（标准 AABB 最小平移向量思路）；不重叠则返回 null。
-  const resolveOverlap = (mover, other, pad) => {
-    const pcx = mover.x + mover.w / 2, pcy = mover.y + mover.h / 2;
-    const qcx = other.x + other.w / 2, qcy = other.y + other.h / 2;
-    const overlapX = (mover.w + other.w) / 2 + pad - Math.abs(pcx - qcx);
-    const overlapY = (mover.h + other.h) / 2 + pad - Math.abs(pcy - qcy);
-    if (overlapX <= 0 || overlapY <= 0) return null;
-    return overlapX < overlapY
-      ? { dx: qcx >= pcx ? overlapX : -overlapX, dy: 0 }
-      : { dx: 0, dy: qcy >= pcy ? overlapY : -overlapY };
-  };
-  // 正在被拖拽的这一批节点（单个节点拖拽时只有它自己；整条泳道拖拽时是它全部
-  // 成员）永远自由移动、严格跟手，不被推挤/钳制；与它们冲突的其他节点/泳道会被
-  // "挤开"——泳道扩张侵犯到相邻泳道时，直接把相邻泳道的所有成员整体移开，而不是
-  // 限制扩张的一方，这正是用户要的"泳道内节点撑大 bounds 时，其它泳道跟着让开"。
-  // 这是有限次的一次性位置求解（每次 mousemove 独立计算，不依赖上一帧速度/弹簧），
-  // 不是持续物理模拟，因此不会有 vis-network 那种抖动、一直在动的问题。
-  const resolveCollisions = freeIds => {
-    const changed = new Set(freeIds);
-    const shiftLane = (laneName, dy) => {
-      (laneMembers[laneName] || []).forEach(id => {
-        const p = flow.layout.nodes[id];
-        flow.layout.nodes[id] = { x: p.x, y: p.y + dy, w: p.w, h: p.h };
-        changed.add(id);
-      });
-    };
-    for (let pass = 0; pass < MAX_RESOLVE_PASSES; pass++) {
-      let touched = false;
-      const ids = Object.keys(flow.layout.nodes);
-      for (let i = 0; i < ids.length; i++) {
-        for (let j = i + 1; j < ids.length; j++) {
-          const idA = ids[i], idB = ids[j];
-          const aFree = freeIds.has(idA), bFree = freeIds.has(idB);
-          if (aFree && bFree) continue; // 同一批被拖拽的节点（比如同一条泳道内部）不互相推挤
-          // 两者都不是本次拖拽主体时，固定推开后者，保证结果确定、不会来回震荡；
-          // 只要有一方是本次拖拽主体，就以它为参照物推开另一方（主体永不被推）。
-          const mover = aFree ? idA : (bFree ? idB : idA);
-          const other = mover === idA ? idB : idA;
-          const push = resolveOverlap(flow.layout.nodes[mover], flow.layout.nodes[other], NODE_PAD);
-          if (push) {
-            const o = flow.layout.nodes[other];
-            flow.layout.nodes[other] = { x: o.x + push.dx, y: o.y + push.dy, w: o.w, h: o.h };
-            changed.add(other);
-            touched = true;
-          }
-        }
-      }
-      // 泳道级联推挤：相邻两条泳道的动态包围盒若挨得太近，把其中一条整体移开消除
-      // 重叠。谁是"本次拖拽主体所在的泳道"就固定不动，推开对面那一条；如果两条都
-      // 不是拖拽主体（级联传递到更远的泳道），默认推下面那条，规则确定、不会震荡。
-      for (let li = 0; li < laneOrder.length - 1; li++) {
-        const laneA = laneOrder[li], laneB = laneOrder[li + 1];
-        const bboxA = laneBBox(laneA), bboxB = laneBBox(laneB);
-        if (!bboxA || !bboxB) continue;
-        const gap = bboxB.y - (bboxA.y + bboxA.h);
-        if (gap >= LANE_MIN_GAP) continue;
-        const need = LANE_MIN_GAP - gap;
-        const aFree = (laneMembers[laneA] || []).some(id => freeIds.has(id));
-        const bFree = (laneMembers[laneB] || []).some(id => freeIds.has(id));
-        if (bFree && !aFree) {
-          shiftLane(laneA, -need);
-        } else {
-          shiftLane(laneB, need);
-        }
-        touched = true;
-      }
-      if (!touched) break;
-    }
-    return changed;
   };
   // 把 changed 集合里所有节点的最新位置写回 DOM：节点本身的 transform、它关联的
   // 每一条边的折线路径与标签背景、以及它所在泳道的动态边框，一次性批量刷新。
@@ -1060,25 +1302,23 @@ function renderFlowGraph(container, flow) {
       if (!dragMoved && (Math.abs(dx0) > 2 || Math.abs(dy0) > 2)) dragMoved = true;
       if (!dragMoved) return;
       const dx = dx0 * dragNode.scale, dy = dy0 * dragNode.scale;
-      const moved = { x: dragNode.base.x + dx, y: dragNode.base.y + dy, w: dragNode.base.w, h: dragNode.base.h };
-      // 被拖拽节点严格按鼠标位移量 1:1 移动，不做任何钳制/阻挡（本身完全跟手）；
-      // resolveCollisions 会把与它冲突的其他节点/泳道"挤开"，applyChanges 统一把
-      // 受影响的节点/边/泳道刷新到 DOM。
+      // 对齐 UE5.5 SNodePanel::OnMouseMove：位置吸附到网格，不做任何碰撞检测/推挤，
+      // 允许节点与其它节点自由重叠。
+      const moved = { x: snapToGrid(dragNode.base.x + dx), y: snapToGrid(dragNode.base.y + dy), w: dragNode.base.w, h: dragNode.base.h };
       flow.layout.nodes[dragNode.id] = moved;
-      const changed = resolveCollisions(new Set([dragNode.id]));
-      applyChanges(changed, dragNode.el, dragNode.id);
+      applyChanges(new Set([dragNode.id]), dragNode.el, dragNode.id);
     } else if (dragLane) {
       const dx0 = ev.clientX - dragLane.startX, dy0 = ev.clientY - dragLane.startY;
       if (!dragMoved && (Math.abs(dx0) > 2 || Math.abs(dy0) > 2)) dragMoved = true;
       if (!dragMoved) return;
       const dx = dx0 * dragLane.scale, dy = dy0 * dragLane.scale;
-      // 整条泳道的所有成员严格按同一个位移量整体平移，保持彼此相对位置不变、严格跟手。
+      // 整条泳道的所有成员严格按同一个位移量整体平移（同 UE 多选节点一起拖拽时的
+      // "Move all the selected nodes"），吸附到网格，同样不做碰撞检测/推挤。
       dragLane.ids.forEach(id => {
         const b = dragLane.bases[id];
-        flow.layout.nodes[id] = { x: b.x + dx, y: b.y + dy, w: b.w, h: b.h };
+        flow.layout.nodes[id] = { x: snapToGrid(b.x + dx), y: snapToGrid(b.y + dy), w: b.w, h: b.h };
       });
-      const changed = resolveCollisions(new Set(dragLane.ids));
-      applyChanges(changed, null, null);
+      applyChanges(new Set(dragLane.ids), null, null);
     } else if (panState) {
       const dx = (ev.clientX - panState.startX) * panState.scale;
       const dy = (ev.clientY - panState.startY) * panState.scale;
@@ -1089,26 +1329,80 @@ function renderFlowGraph(container, flow) {
   const onMouseUp = () => {
     document.body.style.userSelect = '';
     if (dragNode) {
-      if (!dragMoved) nodeDetail(flow, dragNode.id);
+      if (!dragMoved) {
+        nodeDetail(flow, dragNode.id);
+        if (isolateModeOn) applyIsolation(dragNode.id);
+        // 过滤视图"一次性消费"：仅当已进入过滤模式但尚未选定目标（filterRootId
+        // 为 null，即刚点开按钮的"待选择"状态）时，这次点击才会应用过滤并锁定；
+        // 一旦锁定，后续点其它可见节点只会走上面的 nodeDetail，不会再碰这里。
+        else if (filterModeOn && filterRootId === null) applyFilter(dragNode.id);
+      }
       dragNode = null;
     }
+    // 隔离模式的退出只能通过再点一次工具栏"隔离视图"按钮（g.setIsolateMode(false)）
+    // 完成，点空白画布（单击或双击）都不会有任何效果——之前"单击空白退出隔离"的
+    // 行为容易在查看图时误触发（缩放/平移前后手滑碰到空白区域），体验很奇怪，已去掉。
     dragLane = null;
     panState = null;
   };
+  // 过滤视图的第二种退出方式：双击空白画布（必须落在空白处，不能是双击某个节点）。
+  // 单击空白画布故意不退出过滤，因为过滤视图的场景就是"筛出一条完整链路后在画布
+  // 里慢慢平移/缩放查看"，单击空白很容易在查看时误触发退出。隔离视图则完全不响应
+  // 空白画布的单击/双击——它的唯一退出方式是再点一次工具栏"隔离视图"按钮（见
+  // onMouseUp 里的说明），避免"看图时手滑碰到空白处就退出整个隔离"的诡异体验。
+  const onDblClick = ev => {
+    if (!filterModeOn) return;
+    const nodeEl = ev.target.closest ? ev.target.closest('.flow-node') : null;
+    if (nodeEl) return;
+    setFilterMode(false);
+    if (typeof api.onFilterExit === 'function') api.onFilterExit();
+  };
   svg.addEventListener('mousedown', onMouseDown);
+  svg.addEventListener('dblclick', onDblClick);
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mouseup', onMouseUp);
   _graphTeardown = () => {
     svg.removeEventListener('wheel', onWheel);
     svg.removeEventListener('mousedown', onMouseDown);
+    svg.removeEventListener('dblclick', onDblClick);
     window.removeEventListener('mousemove', onMouseMove);
     window.removeEventListener('mouseup', onMouseUp);
   };
   applyView();
-  return {
-    fit: () => { view = { x: 0, y: 0, w: layout.width, h: layout.height }; applyView(); },
-    reset: () => { flow.layout = JSON.parse(JSON.stringify(flow._layoutSnapshot)); return renderFlowGraph(container, flow); },
+  // "重排布局"：只对当前可见的节点子集（过滤视图锁定时=relatedSetOf(filterRootId)，
+  // 否则=全部节点）重新跑 computeCompactPositions，原地把新坐标写回 flow.layout.nodes
+  // 并用已有的 applyChanges/updateLaneBounds 刷新 DOM——不重建整个 renderFlowGraph
+  // 实例，因此不会像"恢复到服务端初始快照"那样，把当前隔离/过滤状态、也把用户在这轮
+  // 会话里做的其它手动微调一并抹掉；隐藏节点的坐标原样保留不变（反正 display:none，
+  // 位置无所谓），一旦退出过滤/隔离，它们立刻能用旧坐标正常显示，不需要额外兜底。
+  const relayout = () => {
+    const visibleIds = (filterModeOn && filterRootId) ? relatedSetOf(filterRootId) : null;
+    const fresh = computeCompactPositions(flow, visibleIds);
+    const changed = new Set(Object.keys(fresh));
+    changed.forEach(id => { flow.layout.nodes[id] = fresh[id]; });
+    applyChanges(changed, null, null);
+    (flow.lanes || []).forEach(laneName => updateLaneBounds(laneName));
+    if (visibleIds) {
+      fitToVisibleNodes(visibleIds);
+    } else {
+      // 全图重排：画布尺寸按新坐标重新估算，视野回到完整画布（等价于原来"适应窗口"）。
+      let maxX = 0, maxY = 0;
+      Object.values(flow.layout.nodes).forEach(p => { maxX = Math.max(maxX, p.x + p.w); maxY = Math.max(maxY, p.y + p.h); });
+      const margin = (layout.constants && layout.constants.margin) || 24;
+      layout.width = maxX + margin;
+      layout.height = maxY + margin;
+      view = { x: 0, y: 0, w: layout.width, h: layout.height };
+      applyView();
+    }
   };
+  const api = {
+    fit: () => { view = { x: 0, y: 0, w: layout.width, h: layout.height }; applyView(); },
+    relayout,
+    setIsolateMode,
+    setFilterMode,
+    onFilterExit: null, // 外部（工具栏）可挂一个回调：双击空白退出过滤时，同步把过滤按钮的高亮状态复位。
+  };
+  return api;
 }
 
 // 真正的可拖拽/停靠/自由调整布局的窗口系统（dockview-core），对齐 Unreal Editor 停靠窗口：
@@ -1137,7 +1431,9 @@ function ensureDock() {
           const legend = lanes.map(l => `<span><span class="sw" style="background:${laneColor(lanes, l)}"></span>${esc(l)}</span>`).join('');
           el.innerHTML = `<div class="graph-toolbar">
               <button class="btn-fit" type="button">适应窗口</button>
-              <button class="btn-reset" type="button">重置节点位置</button>
+              <button class="btn-relayout" type="button" title="按当前可见的节点重新排布（过滤视图锁定时只重排未被隐藏的那条链路，撤销手动拖拽并去掉因隐藏节点留下的空隙；未过滤时对整图重排）">重排布局</button>
+              <button class="btn-isolate" type="button" title="开启后点一个节点，只保留与它直接/间接相连的节点和边全亮，其余整体淡化；再点其它节点会立即切换到新节点；再点一次工具栏本按钮退出隔离（点空白画布不会退出）">🔍 隔离视图</button>
+              <button class="btn-filter" type="button" title="开启后点一个节点，只保留与它直接/间接相连的节点和边，其余整个隐藏（含空掉的泳道）；选定后即锁定，之后点其它可见节点只是正常查看详情、不会更换过滤目标；需再点一次本按钮或双击空白画布才能退出并重新选择">🔎 过滤视图</button>
               <span class="hint">点节点看证据 / 滚轮缩放 / 拖动空白处平移 / 拖动节点或泳道手动微调（服务端一次性静态分层布局，加载后不会自动移动）</span>
             </div>
             <div class="graph-mount"></div>
@@ -1145,7 +1441,30 @@ function ensureDock() {
           let graph = renderFlowGraph(el.querySelector('.graph-mount'), flow);
           const bindToolbar = g => {
             el.querySelector('.btn-fit').onclick = () => g.fit();
-            el.querySelector('.btn-reset').onclick = () => { graph = g.reset(); bindToolbar(graph); };
+            el.querySelector('.btn-relayout').onclick = () => g.relayout();
+            const isolateBtn = el.querySelector('.btn-isolate');
+            const filterBtn = el.querySelector('.btn-filter');
+            isolateBtn.classList.remove('active');
+            filterBtn.classList.remove('active');
+            // 隔离视图和过滤视图互斥：开一个自动关掉另一个（两者都是同一套"点节点算
+            // 相关集合"的呈现方式，同时开没有意义，容易让人搞不清当前到底生效的是哪种）。
+            // 具体的互斥清理（内部状态 + 已隐藏/淡化的 DOM class）交给 g.setIsolateMode/
+            // g.setFilterMode 自己处理，这里只负责两个按钮的 active 视觉状态保持同步。
+            isolateBtn.onclick = () => {
+              const on = !isolateBtn.classList.contains('active');
+              g.setIsolateMode(on);
+              isolateBtn.classList.toggle('active', on);
+              if (on) filterBtn.classList.remove('active');
+            };
+            filterBtn.onclick = () => {
+              const on = !filterBtn.classList.contains('active');
+              g.setFilterMode(on);
+              filterBtn.classList.toggle('active', on);
+              if (on) isolateBtn.classList.remove('active');
+            };
+            // 双击空白画布退出过滤（见 renderFlowGraph 内 onDblClick）是图内部触发的，
+            // 需要一个回调把过滤按钮的高亮状态同步复位，否则按钮会停留在"看起来还开着"。
+            g.onFilterExit = () => filterBtn.classList.remove('active');
           };
           if (graph) bindToolbar(graph);
         };
